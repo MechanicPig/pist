@@ -1,0 +1,1000 @@
+# Extracted from CelestialCartographers/Loenn built-in entity definitions.
+# Do not edit by hand; regenerate from the pinned Loenn source snapshot.
+
+[source]
+repository = 'CelestialCartographers/Loenn'
+commit = 'a935755344c07073b061306dd8d879e9c51bef26'
+
+[[template]]
+entity_name = 'badelineBoost'
+name = 'boost'
+display_name = 'Badeline Boost'
+source = 'entities/badeline_boost.lua'
+attrs = { lockCamera = true, canSkip = false, finalCh9Boost = false, finalCh9GoldenBoost = false, finalCh9Dialog = false }
+
+[[template]]
+entity_name = 'finalBoss'
+name = 'boss'
+display_name = 'Badeline Boss'
+source = 'entities/badeline_boss.lua'
+attrs = { patternIndex = 1, startHit = false, cameraPastY = 120.0, cameraLockY = true, canChangeMusic = true }
+
+[[template]]
+entity_name = 'finalBossFallingBlock'
+name = 'falling_block'
+display_name = 'Badeline Boss Falling Block'
+source = 'entities/badeline_boss_falling_block.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'finalBossMovingBlock'
+name = 'moving_block'
+display_name = 'Badeline Boss Moving Block'
+source = 'entities/badeline_boss_moving_block.lua'
+attrs = { nodeIndex = 0, width = 8, height = 8 }
+
+[[template]]
+entity_name = 'darkChaser'
+name = 'dark_chaser'
+display_name = 'Badeline Chaser'
+source = 'entities/badeline_chaser.lua'
+attrs = { canChangeMusic = true }
+
+[[template]]
+entity_name = 'darkChaserEnd'
+name = 'barrier'
+display_name = 'Badeline Chaser Barrier'
+source = 'entities/badeline_chaser_barrier.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'bigWaterfall'
+name = 'foreground'
+display_name = 'Big Waterfall (Foreground)'
+source = 'entities/big_waterfall.lua'
+attrs = { width = 16, height = 16, layer = 'FG' }
+
+[[template]]
+entity_name = 'bigWaterfall'
+name = 'background'
+display_name = 'Big Waterfall (Background)'
+source = 'entities/big_waterfall.lua'
+attrs = { width = 16, height = 16, layer = 'BG' }
+
+[[template]]
+entity_name = 'bird'
+name = 'bird'
+display_name = 'Bird NPC'
+source = 'entities/bird_npc.lua'
+attrs = { mode = 'Sleeping', onlyOnce = false, onlyIfPlayerLeft = false }
+
+[[template]]
+entity_name = 'birdPath'
+name = 'bird_path'
+display_name = 'Bird Path'
+source = 'entities/bird_path.lua'
+attrs = { only_once = false, onlyIfLeft = false, speedMult = 1.0, angleFix = false, angleFixMaxRotation = 60.0 }
+
+[[template]]
+entity_name = 'bonfire'
+name = 'bonfire'
+display_name = 'Bonfire'
+source = 'entities/bonfire.lua'
+attrs = { mode = 'Lit' }
+
+[[template]]
+entity_name = 'booster'
+name = 'green'
+display_name = 'Booster (Green)'
+source = 'entities/booster.lua'
+attrs = { red = false, ch9_hub_booster = false }
+
+[[template]]
+entity_name = 'booster'
+name = 'red'
+display_name = 'Booster (Red)'
+source = 'entities/booster.lua'
+attrs = { red = true, ch9_hub_booster = false }
+
+[[template]]
+entity_name = 'bounceBlock'
+name = 'fire'
+display_name = 'Core Block'
+source = 'entities/bounce_block.lua'
+attrs = { width = 16, height = 16, notCoreMode = false }
+
+[[template]]
+entity_name = 'bounceBlock'
+name = 'ice'
+display_name = 'Ice Crumble Block'
+source = 'entities/bounce_block.lua'
+attrs = { width = 16, height = 16, notCoreMode = true }
+
+[[template]]
+entity_name = 'bridge'
+name = 'bridge'
+display_name = 'Bridge'
+source = 'entities/bridge.lua'
+attrs = { width = 32 }
+
+[[template]]
+entity_name = 'bigSpinner'
+name = 'bumper'
+display_name = 'Bumper'
+source = 'entities/bumper.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'cassette'
+name = 'cassette'
+display_name = 'Cassette'
+source = 'entities/cassette.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'cassetteBlock'
+name = 'cassette_block_0'
+display_name = 'Cassette Block (0 - Blue)'
+source = 'entities/cassette_block.lua'
+attrs = { index = 0, tempo = 1.0, width = 16, height = 16 }
+
+[[template]]
+entity_name = 'cassetteBlock'
+name = 'cassette_block_1'
+display_name = 'Cassette Block (1 - Rose)'
+source = 'entities/cassette_block.lua'
+attrs = { index = 1, tempo = 1.0, width = 16, height = 16 }
+
+[[template]]
+entity_name = 'cassetteBlock'
+name = 'cassette_block_2'
+display_name = 'Cassette Block (2 - Bright Sun)'
+source = 'entities/cassette_block.lua'
+attrs = { index = 2, tempo = 1.0, width = 16, height = 16 }
+
+[[template]]
+entity_name = 'cassetteBlock'
+name = 'cassette_block_3'
+display_name = 'Cassette Block (3 - Malachite)'
+source = 'entities/cassette_block.lua'
+attrs = { index = 3, tempo = 1.0, width = 16, height = 16 }
+
+[[template]]
+entity_name = 'cliffside_flag'
+name = 'cliffside_flag'
+display_name = 'Cliffside Big Flag'
+source = 'entities/cliffside_flag.lua'
+attrs = { index = 0 }
+
+[[template]]
+entity_name = 'cliffflag'
+name = 'cliffflag'
+display_name = 'Cliffside Flagline'
+source = 'entities/cliffside_flagline.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'clothesline'
+name = 'clothesline'
+display_name = 'Clothes Line'
+source = 'entities/clothesline.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'cloud'
+name = 'normal'
+display_name = 'Cloud'
+source = 'entities/cloud.lua'
+attrs = { fragile = false, small = false }
+
+[[template]]
+entity_name = 'cloud'
+name = 'fragile'
+display_name = 'Cloud (Fragile)'
+source = 'entities/cloud.lua'
+attrs = { fragile = true, small = false }
+
+[[template]]
+entity_name = 'greenBlocks'
+name = 'green'
+display_name = 'Clutter Block (Books)'
+source = 'entities/clutter_blocks.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'yellowBlocks'
+name = 'yellow'
+display_name = 'Clutter Block (Boxes)'
+source = 'entities/clutter_blocks.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'redBlocks'
+name = 'red'
+display_name = 'Clutter Block (Laundry)'
+source = 'entities/clutter_blocks.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'clutterCabinet'
+name = 'cabinet'
+display_name = 'Clutter Cabinet'
+source = 'entities/clutter_cabinet.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'cobweb'
+name = 'cobweb'
+display_name = 'Cobweb'
+source = 'entities/cobweb.lua'
+attrs = { color = '696A6A' }
+
+[[template]]
+entity_name = 'everest/coreMessage'
+name = 'core_message'
+display_name = 'Core Message'
+source = 'entities/core_message.lua'
+attrs = { line = 0, dialog = 'app_ending', outline = false }
+
+[[template]]
+entity_name = 'coreModeToggle'
+name = 'both'
+display_name = 'Core Mode Toggle (Both)'
+source = 'entities/core_toggle.lua'
+attrs = { onlyIce = false, onlyFire = false, persistent = false }
+
+[[template]]
+entity_name = 'coreModeToggle'
+name = 'fire'
+display_name = 'Core Mode Toggle (Fire)'
+source = 'entities/core_toggle.lua'
+attrs = { onlyIce = false, onlyFire = true, persistent = false }
+
+[[template]]
+entity_name = 'coreModeToggle'
+name = 'ice'
+display_name = 'Core Mode Toggle (Ice)'
+source = 'entities/core_toggle.lua'
+attrs = { onlyIce = true, onlyFire = false, persistent = false }
+
+[[template]]
+entity_name = 'blackGem'
+name = 'crystal_heart'
+display_name = 'Crystal Heart'
+source = 'entities/crystal_heart.lua'
+attrs = { fake = false, removeCameraTriggers = false, fakeHeartDialog = 'CH9_FAKE_HEART', keepGoingDialog = 'CH9_KEEP_GOING' }
+
+[[template]]
+entity_name = 'cutsceneNode'
+name = 'cutscene_node'
+display_name = 'Cutscene Node'
+source = 'entities/cutscene_node.lua'
+attrs = { nodeName = '' }
+
+[[template]]
+entity_name = 'dreamBlock'
+name = 'dream_block'
+display_name = 'Dream Block'
+source = 'entities/dream_block.lua'
+attrs = { fastMoving = false, below = false, oneUse = false, width = 8, height = 8 }
+
+[[template]]
+entity_name = 'dreamHeartGem'
+name = 'crystal_heart'
+display_name = 'Crystal Heart (Dream)'
+source = 'entities/dream_heart.lua'
+attrs = { color = 'Random' }
+
+[[template]]
+entity_name = 'dreammirror'
+name = 'normal'
+display_name = 'Dream Mirror'
+source = 'entities/dream_mirror.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'everest/customBirdTutorial'
+name = 'bird'
+display_name = 'Custom Bird Tutorial'
+source = 'entities/everest_bird_tutorial.lua'
+attrs = { faceLeft = true, birdId = '', onlyOnce = false, caw = true, info = 'TUTORIAL_DREAMJUMP', controls = 'DownRight,+,Dash,tinyarrow,Jump' }
+
+[[template]]
+entity_name = 'fakeHeart'
+name = 'crystal_heart'
+display_name = 'Crystal Heart (Fake)'
+source = 'entities/fake_heart.lua'
+attrs = { color = 'Random' }
+
+[[template]]
+entity_name = 'infiniteStar'
+name = 'normal'
+display_name = 'Feather'
+source = 'entities/feather.lua'
+attrs = { shielded = false, singleUse = false }
+
+[[template]]
+entity_name = 'fireBarrier'
+name = 'fire_barrier'
+display_name = 'Fire Barrier'
+source = 'entities/fire_barrier.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'fireBall'
+name = 'fireball'
+display_name = 'Fireball'
+source = 'entities/fireball.lua'
+attrs = { amount = 3, offset = 0.0, speed = 1.0, notCoreMode = false }
+
+[[template]]
+entity_name = 'fireBall'
+name = 'iceball'
+display_name = 'Iceball'
+source = 'entities/fireball.lua'
+attrs = { amount = 3, offset = 0.0, speed = 1.0, notCoreMode = true }
+
+[[template]]
+entity_name = 'bridgeFixed'
+name = 'bridge_fixed'
+display_name = 'Bridge (Fixed)'
+source = 'entities/fixed_bridge.lua'
+attrs = { width = 32 }
+
+[[template]]
+entity_name = 'flingBird'
+name = 'fling_bird'
+display_name = 'Fling Bird'
+source = 'entities/fling_bird.lua'
+attrs = { waiting = false }
+
+[[template]]
+entity_name = 'flingBirdIntro'
+name = 'fling_bird'
+display_name = 'Fling Bird Intro'
+source = 'entities/fling_bird_intro.lua'
+attrs = { crashes = false }
+
+[[template]]
+entity_name = 'floatingDebris'
+name = 'floating_debris'
+display_name = 'Floating Debris'
+source = 'entities/floating_debris.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'flutterbird'
+name = 'normal'
+display_name = 'Flutterbird'
+source = 'entities/flutterbird.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'foregroundDebris'
+name = 'foreground_debris'
+display_name = 'Foreground Debris'
+source = 'entities/foreground_debris.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'birdForsakenCityGem'
+name = 'satellite'
+display_name = 'Forsaken City Satellite'
+source = 'entities/forsaken_city_satellite.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'glassBlock'
+name = 'glass_block'
+display_name = 'Glass Block'
+source = 'entities/glass_block.lua'
+attrs = { sinks = false, width = 8, height = 8 }
+
+[[template]]
+entity_name = 'glider'
+name = 'normal'
+display_name = 'Jellyfish'
+source = 'entities/glider.lua'
+attrs = { tutorial = false, bubble = false }
+
+[[template]]
+entity_name = 'glider'
+name = 'floating'
+display_name = 'Jellyfish (Floating)'
+source = 'entities/glider.lua'
+attrs = { tutorial = false, bubble = true }
+
+[[template]]
+entity_name = 'goldenBlock'
+name = 'golden_block'
+display_name = 'Golden Block'
+source = 'entities/golden_block.lua'
+attrs = { width = 16, height = 16 }
+
+[[template]]
+entity_name = 'goldenBerry'
+name = 'golden'
+display_name = 'Golden Strawberry'
+source = 'entities/golden_strawberry.lua'
+attrs = { winged = false, moon = false }
+
+[[template]]
+entity_name = 'goldenBerry'
+name = 'golden_winged'
+display_name = 'Golden Strawberry (Winged)'
+source = 'entities/golden_strawberry.lua'
+attrs = { winged = true, moon = false }
+
+[[template]]
+entity_name = 'gondola'
+name = 'gondola'
+display_name = 'Gondola'
+source = 'entities/gondola.lua'
+attrs = { active = true }
+
+[[template]]
+entity_name = 'hahaha'
+name = 'hahaha'
+display_name = 'Hahaha'
+source = 'entities/hahaha.lua'
+attrs = { ifset = '', triggerLaughSfx = false }
+
+[[template]]
+entity_name = 'hanginglamp'
+name = 'hanging_lamp'
+display_name = 'Hanging Lamp'
+source = 'entities/hanging_lamp.lua'
+attrs = { height = 16 }
+
+[[template]]
+entity_name = 'heartGemDoor'
+name = 'door'
+display_name = 'Heart Door'
+source = 'entities/heart_door.lua'
+attrs = { width = 40, requires = 0, startHidden = false }
+
+[[template]]
+entity_name = 'iceBlock'
+name = 'ice_block'
+display_name = 'Ice Block'
+source = 'entities/ice_block.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'wavedashmachine'
+name = 'cafe'
+display_name = 'Internet Café'
+source = 'entities/internet_cafe.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'introCar'
+name = 'intro_car'
+display_name = 'Intro Car'
+source = 'entities/intro_car.lua'
+attrs = { hasRoadAndBarriers = false }
+
+[[template]]
+entity_name = 'invisibleBarrier'
+name = 'invisible_barrier'
+display_name = 'Invisible Barrier'
+source = 'entities/invisible_barrier.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'kevins_pc'
+name = 'kevins_pc'
+display_name = "Kevin's PC"
+source = 'entities/kevins_pc.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'key'
+name = 'normal'
+display_name = 'Key'
+source = 'entities/key.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'key'
+name = 'with_return'
+display_name = 'Key (With Return)'
+source = 'entities/key.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'killbox'
+name = 'killbox'
+display_name = 'Killbox'
+source = 'entities/killbox.lua'
+attrs = { width = 8 }
+
+[[template]]
+entity_name = 'lamp'
+name = 'normal'
+display_name = 'Lamp'
+source = 'entities/lamp.lua'
+attrs = { broken = false }
+
+[[template]]
+entity_name = 'lamp'
+name = 'broken'
+display_name = 'Lamp (Broken)'
+source = 'entities/lamp.lua'
+attrs = { broken = true }
+
+[[template]]
+entity_name = 'sandwichLava'
+name = 'lava_sandwich'
+display_name = 'Lava Sandwich'
+source = 'entities/lava_sandwich.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'lightbeam'
+name = 'lightbeam'
+display_name = 'Lightbeam'
+source = 'entities/lightbeam.lua'
+attrs = { width = 32, height = 24, flag = '', rotation = 0.0 }
+
+[[template]]
+entity_name = 'lightning'
+name = 'lightning'
+display_name = 'Lightning'
+source = 'entities/lightning.lua'
+attrs = { width = 8, height = 8, perLevel = false, moveTime = 5.0 }
+
+[[template]]
+entity_name = 'lightningBlock'
+name = 'breaker_box'
+display_name = 'Lightning Breaker Box'
+source = 'entities/lightning_breaker_box.lua'
+attrs = { flipX = false, music_progress = -1, music_session = false, music = '', flag = false }
+
+[[template]]
+entity_name = 'everest/memorial'
+name = 'memorial'
+display_name = 'Custom Memorial'
+source = 'entities/memorial.lua'
+attrs = { dialog = 'MEMORIAL', sprite = 'scenery/memorial/memorial', spacing = 16 }
+
+[[template]]
+entity_name = 'memorialTextController'
+name = 'golden_no_dash'
+display_name = 'Golden Strawberry (No Dash)'
+source = 'entities/memorial_text_controller.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'moonCreature'
+name = 'moon_creature'
+display_name = 'Moon Creature'
+source = 'entities/moon_creature.lua'
+attrs = { number = 1 }
+
+[[template]]
+entity_name = 'negaBlock'
+name = 'nega_block'
+display_name = 'Nega Block'
+source = 'entities/nega_block.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'everest/npc'
+name = 'npc'
+display_name = 'Custom NPC'
+source = 'entities/npc.lua'
+attrs = { sprite = 'player/idle', spriteRate = 1, dialogId = '', onlyOnce = true, endLevel = false, flipX = false, flipY = false, approachWhenTalking = false, approachDistance = 16, indicatorOffsetX = 0, indicatorOffsetY = 0 }
+
+[[template]]
+entity_name = 'friendlyGhost'
+name = 'oshiro_boss'
+display_name = 'Oshiro Boss'
+source = 'entities/oshiro_boss.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'oshirodoor'
+name = 'oshiro_door'
+display_name = 'Oshiro Door'
+source = 'entities/oshiro_door.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'payphone'
+name = 'payphone'
+display_name = 'Payphone'
+source = 'entities/payphone.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'picoconsole'
+name = 'pico_console'
+display_name = 'Pico Console'
+source = 'entities/pico_console.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'plateau'
+name = 'plateau'
+display_name = 'Plateau'
+source = 'entities/plateau.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'playbackBillboard'
+name = 'playback_billboard'
+display_name = 'Playback Billboard'
+source = 'entities/playback_billboard.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'player'
+name = 'player'
+display_name = 'Player (Spawn Point)'
+source = 'entities/player.lua'
+attrs = { isDefaultSpawn = false }
+
+[[template]]
+entity_name = 'playbackTutorial'
+name = 'playback'
+display_name = 'Ghost Player Playback'
+source = 'entities/player_playback.lua'
+attrs = { tutorial = '' }
+
+[[template]]
+entity_name = 'playerSeeker'
+name = 'player_seeker'
+display_name = 'Player Seeker'
+source = 'entities/player_seeker.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'powerSourceNumber'
+name = 'power_source_number'
+display_name = 'Power Source Number'
+source = 'entities/power_source_number.lua'
+attrs = { number = 1, strawberries = '', keys = '' }
+
+[[template]]
+entity_name = 'eyebomb'
+name = 'left'
+display_name = 'Puffer (Left)'
+source = 'entities/puffer.lua'
+attrs = { right = false }
+
+[[template]]
+entity_name = 'eyebomb'
+name = 'right'
+display_name = 'Puffer (Right)'
+source = 'entities/puffer.lua'
+attrs = { right = true }
+
+[[template]]
+entity_name = 'refill'
+name = 'one_dash'
+display_name = 'Refill'
+source = 'entities/refill.lua'
+attrs = { oneUse = false, twoDash = false }
+
+[[template]]
+entity_name = 'refill'
+name = 'two_dashes'
+display_name = 'Refill (Two Dashes)'
+source = 'entities/refill.lua'
+attrs = { oneUse = false, twoDash = true }
+
+[[template]]
+entity_name = 'reflectionHeartStatue'
+name = 'statue'
+display_name = 'Reflection Heart Statue'
+source = 'entities/reflection_heart_statue.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'resortLantern'
+name = 'lantern'
+display_name = 'Resort Lantern'
+source = 'entities/resort_lantern.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'resortmirror'
+name = 'mirror'
+display_name = 'Resort Mirror'
+source = 'entities/resort_mirror.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'resortRoofEnding'
+name = 'resort_roof_ending'
+display_name = 'Resort Roof Ending'
+source = 'entities/resort_roof_ending.lua'
+attrs = { width = 8 }
+
+[[template]]
+entity_name = 'ridgeGate'
+name = 'ridge_gate'
+display_name = 'Ridge Gate'
+source = 'entities/ridge_gate.lua'
+attrs = { texture = 'objects/ridgeGate', strawberries = '', keys = '', width = 32, height = 32 }
+
+[[template]]
+entity_name = 'risingLava'
+name = 'rising_lava'
+display_name = 'Rising Lava'
+source = 'entities/rising_lava.lua'
+attrs = { intro = false }
+
+[[template]]
+entity_name = 'seeker'
+name = 'seeker'
+display_name = 'Seeker'
+source = 'entities/seeker.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'seekerBarrier'
+name = 'seeker_barrier'
+display_name = 'Seeker Barrier'
+source = 'entities/seeker_barrier.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'seekerStatue'
+name = 'seeker_statue'
+display_name = 'Seeker Statue'
+source = 'entities/seeker_statue.lua'
+attrs = { hatch = 'Distance' }
+
+[[template]]
+entity_name = 'slider'
+name = 'clockwise'
+display_name = 'Slider (Clockwise)'
+source = 'entities/slider.lua'
+attrs = { clockwise = true, surface = 'Floor' }
+
+[[template]]
+entity_name = 'soundSource'
+name = 'sound_source'
+display_name = 'Sound Source'
+source = 'entities/sound_source.lua'
+attrs = { sound = '' }
+
+[[template]]
+entity_name = 'spinner'
+name = 'dust_sprite'
+display_name = 'Dust Sprite'
+source = 'entities/spinner.lua'
+attrs = { color = 'blue', dust = true, attachToSolid = false }
+
+[[template]]
+entity_name = 'wallSpringRight'
+name = 'left'
+display_name = 'Spring (Left)'
+source = 'entities/spring.lua'
+attrs = { playerCanUse = true }
+
+[[template]]
+entity_name = 'wallSpringLeft'
+name = 'right'
+display_name = 'Spring (Right)'
+source = 'entities/spring.lua'
+attrs = { playerCanUse = true }
+
+[[template]]
+entity_name = 'spring'
+name = 'up'
+display_name = 'Spring (Up)'
+source = 'entities/spring.lua'
+attrs = { playerCanUse = true }
+
+[[template]]
+entity_name = 'everest/starClimbGraphicsController'
+name = 'controller'
+display_name = 'Star Climb Graphics Controller'
+source = 'entities/star_climb_controller.lua'
+attrs = { fgColor = 'A3FFFF', bgColor = '293E4B' }
+
+[[template]]
+entity_name = 'starClimbController'
+name = 'controller'
+display_name = 'Star Climb Controller'
+source = 'entities/star_climb_controller.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'starJumpBlock'
+name = 'star_jump_block'
+display_name = 'Star Jump Block'
+source = 'entities/star_jump_block.lua'
+attrs = { width = 8, height = 8, sinks = true }
+
+[[template]]
+entity_name = 'strawberry'
+name = 'normal'
+display_name = 'Strawberry'
+source = 'entities/strawberry.lua'
+attrs = { winged = false, moon = false, checkpointID = -1, order = -1 }
+
+[[template]]
+entity_name = 'strawberry'
+name = 'normal_winged'
+display_name = 'Strawberry (Winged)'
+source = 'entities/strawberry.lua'
+attrs = { winged = true, moon = false, checkpointID = -1, order = -1 }
+
+[[template]]
+entity_name = 'strawberry'
+name = 'moon'
+display_name = 'Moonberry'
+source = 'entities/strawberry.lua'
+attrs = { winged = false, moon = true, checkpointID = -1, order = -1 }
+
+[[template]]
+entity_name = 'blockField'
+name = 'block_field'
+display_name = 'Strawberry Blockfield'
+source = 'entities/strawberry_blockfield.lua'
+attrs = { width = 8, height = 8 }
+
+[[template]]
+entity_name = 'SummitBackgroundManager'
+name = 'manager'
+display_name = 'Summit Background Manager'
+source = 'entities/summit_background_manager.lua'
+attrs = { index = 0, cutscene = '', intro_launch = false, dark = false, ambience = '' }
+
+[[template]]
+entity_name = 'summitcheckpoint'
+name = 'summit_checkpoint'
+display_name = 'Summit Checkpoint'
+source = 'entities/summit_checkpoint.lua'
+attrs = { number = 0 }
+
+[[template]]
+entity_name = 'summitcloud'
+name = 'summit_cloud'
+display_name = 'Summit Cloud'
+source = 'entities/summit_cloud.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'templeBigEyeball'
+name = 'temple_big_eyeball'
+display_name = 'Temple Big Eyeball'
+source = 'entities/temple_big_eyeball.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'templeCrackedBlock'
+name = 'temple_block'
+display_name = 'Temple Cracked Block'
+source = 'entities/temple_cracked_block.lua'
+attrs = { width = 16, height = 16, persistent = false }
+
+[[template]]
+entity_name = 'templeEye'
+name = 'temple_eye'
+display_name = 'Temple Eye'
+source = 'entities/temple_eye.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'templeMirror'
+name = 'mirror'
+display_name = 'Temple Mirror'
+source = 'entities/temple_mirror.lua'
+attrs = { width = 24, height = 24, reflectX = 0.0, reflectY = 0.0 }
+
+[[template]]
+entity_name = 'templeMirrorPortal'
+name = 'temple_mirror_portal'
+display_name = 'Temple Mirror Portal'
+source = 'entities/temple_mirror_portal.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'tentacles'
+name = 'tentacles'
+display_name = 'Tentacles'
+source = 'entities/tentacles.lua'
+attrs = { fear_distance = '', slide_until = 0 }
+
+[[template]]
+entity_name = 'theoCrystal'
+name = 'theo_crystal'
+display_name = 'Theo Crystal'
+source = 'entities/theo_crystal.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'theoCrystalPedestal'
+name = 'pedestal'
+display_name = 'Theo Crystal Pedestal'
+source = 'entities/theo_crystal_pedestal.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'torch'
+name = 'torch'
+display_name = 'Torch'
+source = 'entities/torch.lua'
+attrs = { startLit = false }
+
+[[template]]
+entity_name = 'touchSwitch'
+name = 'touch_switch'
+display_name = 'Touch Switch'
+source = 'entities/touch_switch.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'trapdoor'
+name = 'trapdoor'
+display_name = 'Trapdoor'
+source = 'entities/trapdoor.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'wallBooster'
+name = 'booster_right'
+display_name = 'Wall Booster (Right)'
+source = 'entities/wallbooster.lua'
+attrs = { height = 8, left = true, notCoreMode = false }
+
+[[template]]
+entity_name = 'wallBooster'
+name = 'booster_left'
+display_name = 'Wall Booster (Left)'
+source = 'entities/wallbooster.lua'
+attrs = { height = 8, left = false, notCoreMode = false }
+
+[[template]]
+entity_name = 'wallBooster'
+name = 'ice_right'
+display_name = 'Ice Wall (Right)'
+source = 'entities/wallbooster.lua'
+attrs = { height = 8, left = true, notCoreMode = true }
+
+[[template]]
+entity_name = 'wallBooster'
+name = 'ice_left'
+display_name = 'Ice Wall (Left)'
+source = 'entities/wallbooster.lua'
+attrs = { height = 8, left = false, notCoreMode = true }
+
+[[template]]
+entity_name = 'towerviewer'
+name = 'watchtower'
+display_name = 'Watchtower'
+source = 'entities/watchtower.lua'
+attrs = { summit = false, onlyY = false }
+
+[[template]]
+entity_name = 'water'
+name = 'water'
+display_name = 'Water'
+source = 'entities/water.lua'
+attrs = { hasBottom = false, width = 8, height = 8 }
+
+[[template]]
+entity_name = 'waterfall'
+name = 'waterfall'
+display_name = 'Waterfall'
+source = 'entities/waterfall.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'whiteblock'
+name = 'white_block'
+display_name = 'White Block'
+source = 'entities/white_block.lua'
+attrs = {  }
+
+[[template]]
+entity_name = 'wire'
+name = 'wire'
+display_name = 'Wire'
+source = 'entities/wire.lua'
+attrs = { above = false, color = '595866', fixWindBehavior = true }

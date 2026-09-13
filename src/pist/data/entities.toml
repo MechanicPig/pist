@@ -1,0 +1,200 @@
+[entities.strawberry]
+rules = [
+    { kind = "moonberry", when = { moon = true } },
+    { kind = "strawberry", when = { moon = false } },
+    { kind = "strawberry" },
+]
+
+[entities."CollabUtils2/MiniHeart"]
+rules = [
+    { kind = "miniheart" },
+]
+
+[entities."CollabUtils2/SilverBerry"]
+rules = [
+    { kind = "silverberry" },
+]
+
+[entities."SorbetHelper/ReturnBerry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."MaxHelpingHand/CustomizableBerry"]
+rules = [
+    { kind = "moonberry" },
+]
+
+[entities.goldenBerry]
+rules = [
+    { kind = "goldenberry" },
+]
+
+[entities."LunaticHelper/StrawberryWithReturn"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities.blackGem]
+rules = [
+    { when = { fake = true } },
+    { kind = "end_level_heart", when = { fake = false }, meta = { HeartIsEnd = true } },
+    { kind = "keep_going_heart", when = { fake = false }, meta = { HeartIsEnd = false } },
+]
+
+[entities."CollabUtils2/SpeedBerry"]
+rules = [
+    { kind = "speedberry" },
+]
+
+[entities."MaxHelpingHand/SecretBerry"]
+rules = [
+    { kind = "secretberry" },
+]
+
+[entities."MaxHelpingHand/MultiRoomStrawberrySeed"]
+rules = [
+    { kind = "miniberry" },
+]
+
+[entities."ArphimigonHelper/HeartGem"]
+rules = [
+    { kind = "end_level_heart" },
+]
+
+[entities."CollabUtils2/RainbowBerry"]
+rules = [
+    { kind = "rainbowberry" },
+]
+
+[entities."SpringCollab2020/returnBerry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities.cassette]
+rules = [
+    { kind = "cassette" },
+]
+
+[entities."AdventureHelper/CustomCrystalHeart"]
+rules = [
+    { kind = "end_level_heart" },
+]
+
+[entities."MaxHelpingHand/ReskinnableCrystalHeart"]
+rules = [
+    { kind = "end_level_heart", meta = { HeartIsEnd = true } },
+    { kind = "keep_going_heart", meta = { HeartIsEnd = false } },
+]
+
+[entities."MaxHelpingHand/NonPoppingStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."MaxHelpingHand/GoldenStrawberryCustomConditions"]
+rules = [
+    { kind = "goldenberry" },
+]
+
+[entities."MaxHelpingHand/MultiRoomStrawberry"]
+rules = [
+    { kind = "moonberry", when = { moon = true } },
+    { kind = "strawberry", when = { moon = false } },
+]
+
+[entities."ArphimigonHelper/ShieldedGoldenBerry"]
+rules = [
+    { kind = "goldenberry" },
+]
+
+[entities."JungleHelper/CassetteCustomPreviewMusic"]
+rules = [
+    { kind = "cassette" },
+]
+
+[entities."SpringCollab2020/MultiRoomStrawberrySeed"]
+rules = [
+    { kind = "miniberry" },
+]
+
+[entities."Bitsbolts/GrablessBerry"]
+rules = [
+    { kind = "walljumpless_berry" },
+]
+
+[entities."DSModHelper/ReskinnableStrawberry"]
+rules = [
+    { kind = "secretberry" },
+]
+
+[entities."DzhakeHelper/SequenceBerry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."CommunalHelper/DreamStrawberry"]
+rules = [
+    { kind = "secretberry" },
+]
+
+[entities."CommunalHelper/SJ/ExplodingStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."FactoryHelper/RustBerry"]
+rules = [
+    { kind = "secretberry" },
+]
+
+[entities."JungleHelper/TreeDepthController"]
+rules = [
+    { kind = "grabless_goldenberry" },
+]
+
+[entities.memorialTextController]
+rules = [
+    { kind = "dashless_goldenberry" },
+]
+
+[entities."SJ2021/ExplodingStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities.birdForsakenCityGem]
+rules = [
+    { kind = "keep_going_heart" },
+]
+
+[entities."ChronoHelper/DownWingedStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."DSidesPlatinum/PlatinumStrawberry"]
+rules = [
+    { kind = "platinumberry" },
+]
+
+[entities."MemorialHelper/FlagCrystalHeart"]
+rules = [
+    { kind = "end_level_heart" },
+]
+
+[entities."PlatinumStrawberry/PlatinumStrawberry"]
+rules = [
+    { kind = "platinumberry" },
+]
+
+[entities."SpringCollab2020/diagonalWingedStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]
+
+[entities."SpringCollab2020/MultiRoomStrawberry"]
+rules = [
+    { kind = "strawberry" },
+]

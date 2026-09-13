@@ -1,0 +1,24 @@
+# Python and uv
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+.pist/
+dist/
+build/
+*.egg-info/
+
+# Local settings and secrets (never commit OAuth credentials or tokens)
+.env
+.env.*
+!.env.example
+.secrets/
+config.local.toml
+
+# Editor and operating system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

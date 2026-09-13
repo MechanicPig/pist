@@ -1,0 +1,29 @@
+[[rules]]
+source = 'trigger'
+name = 'CollabUtils2/ChapterPanelTrigger'
+
+[rules.region]
+x = { attr = 'x' }
+y = { attr = 'y' }
+width = { attr = 'width', default = 16 }
+height = { attr = 'height', default = 16 }
+
+[[rules]]
+source = 'entity'
+name = 'SJ2021/StrawberryJamJar'
+
+[rules.region]
+x = { attr = 'x', offset = -24 }
+y = { attr = 'y', offset = -32 }
+width = { value = 48 }
+height = { value = 32 }
+
+[[rules]]
+source = 'entity'
+name = 'CollabUtils2/WarpPedestal'
+
+[rules.region]
+x = { attr = 'x', offset = -24 }
+y = { attr = 'y', offset = -32 }
+width = { value = 48 }
+height = { value = 32 }

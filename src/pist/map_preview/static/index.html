@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地图预览</title>
+<link rel="stylesheet" href="assets/map_preview.css">
+</head>
+<body>
+<header>
+  <h1 id="title">地图预览</h1>
+  <span id="count"></span>
+  <span id="collectible-summary"></span>
+  <fieldset id="mode">
+    <label><input type="radio" name="mode" value="review" checked>编辑路线</label>
+    <label><input type="radio" name="mode" value="navigate">地图路由</label>
+    <label><input type="radio" name="mode" value="collectibles">收集品校正</label>
+  </fieldset>
+  <fieldset id="overlays">
+    <label><input id="show-first-clear-route" type="checkbox" checked>初见路线</label>
+    <label><input id="show-first-clear-time" type="checkbox">初见用时</label>
+  </fieldset>
+  <button id="back" class="secondary">后退</button>
+  <button id="forward" class="secondary">前进</button>
+  <button id="home" class="secondary">返回起点</button>
+  <button id="cancel" class="secondary">取消</button>
+  <button id="save">保存</button>
+</header>
+<main>
+  <canvas id="map"></canvas>
+  <aside>
+    <input id="filter" placeholder="筛选房间名">
+    <div id="rooms"></div>
+    <div id="hint" class="hint"></div>
+  </aside>
+</main>
+<div id="status" hidden></div>
+<section id="entity-info" hidden>
+  <button id="entity-info-close" class="secondary">关闭</button>
+  <strong id="entity-info-id"></strong>
+  <span id="entity-info-source"></span>
+  <pre id="entity-info-attrs"></pre>
+</section>
+<script src="assets/map_preview.js"></script>
+</body>
+</html>

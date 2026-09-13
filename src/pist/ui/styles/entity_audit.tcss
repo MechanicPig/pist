@@ -1,0 +1,133 @@
+Input {
+    margin: 1 2;
+}
+
+#audit-toolbar {
+    height: auto;
+}
+
+#audit-toolbar > Input {
+    width: 1fr;
+}
+
+#audit-toolbar > Button {
+    margin: 1 2 1 0;
+}
+
+KindPickerScreen, KindEditorScreen, KindContextScreen, AuditRulesRefreshScreen, KindDeleteScreen {
+    align: center middle;
+}
+
+#audit-entity-list {
+    width: 40%;
+    margin: 0 1 1 2;
+    border: round $accent;
+}
+
+#audit-entity-list > EntityAuditGroupItem {
+    margin-top: 1;
+    background: $surface;
+}
+
+#audit-right {
+    width: 1fr;
+    margin: 0 2 1 0;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#audit-entity-status, #audit-entity-evidence, #audit-entity-note, #audit-save-entity,
+#audit-entity-kind, #audit-confirm-entity-kind, #audit-revoke-entity-kind,
+#audit-attribute-status, #audit-attribute-evidence, #audit-attribute-note, #audit-save-attribute,
+#audit-observation-question, #audit-observation-status, #audit-observation-kind,
+#audit-observation-evidence, #audit-observation-note, #audit-save-observation {
+    margin-top: 1;
+}
+
+#audit-save-entity, #audit-confirm-entity-kind, #audit-save-attribute, #audit-save-observation {
+    width: 16;
+}
+
+#audit-entity-kind-actions {
+    height: auto;
+}
+
+#audit-entity-kind-actions > Button {
+    margin-right: 1;
+}
+
+#audit-attribute-review {
+    height: auto;
+}
+
+#new-kind-dialog {
+    width: 60%;
+    height: auto;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#kind-context-dialog {
+    width: 28;
+    height: auto;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#kind-context-dialog > Button {
+    margin-top: 1;
+}
+
+#kind-delete-dialog {
+    width: 60%;
+    height: auto;
+    border: round $error;
+    padding: 1 2;
+}
+
+#kind-picker-dialog {
+    width: 60%;
+    height: 70%;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#audit-kind-tree {
+    height: 1fr;
+    border: round $accent;
+}
+
+#occurrence-dialog {
+    width: 90%;
+    height: 90%;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#audit-rules-refresh-dialog {
+    width: 80%;
+    height: 80%;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#audit-rules-refresh-body {
+    height: 1fr;
+    margin: 1 0;
+    border: round $accent;
+}
+
+#audit-rules-refresh-diff {
+    height: auto;
+}
+
+#occurrence-map-list, #occurrence-room-list {
+    width: 1fr;
+    height: 1fr;
+    border: round $accent;
+}
+
+.audit-section-title {
+    margin-top: 1;
+    text-style: bold;
+}

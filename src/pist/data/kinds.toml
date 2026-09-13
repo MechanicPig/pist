@@ -1,0 +1,114 @@
+[kinds.collectible]
+label = "可收集物"
+
+[kinds.berry]
+label = "浆果"
+parent = "collectible"
+
+[kinds.strawberry]
+label = "草莓"
+parent = "berry"
+stat = "count"
+sprite = "strawberry.png"
+
+[kinds.strawberry.table_field]
+table = "主表"
+field = "红草莓数"
+
+[kinds.moonberry]
+label = "月莓"
+parent = "berry"
+stat = "count"
+sprite = "moonberry.png"
+
+[kinds.moonberry.table_field]
+table = "主表"
+field = "月莓数"
+
+[kinds.secretberry]
+label = "秘密草莓"
+parent = "moonberry"
+sprite = "strawberry.png"
+
+[kinds.special]
+label = "特殊草莓"
+parent = "berry"
+
+[kinds.goldenberry]
+label = "金草莓"
+parent = "special"
+
+[kinds.dashless_goldenberry]
+label = "无冲金草莓"
+parent = "special"
+sprite = "dashless_goldenberry.png"
+
+[kinds.grabless_goldenberry]
+label = "无抓金草莓"
+parent = "special"
+
+[kinds.silverberry]
+label = "银草莓"
+parent = "special"
+sprite = "silverberry.png"
+
+[kinds.rainbowberry]
+label = "彩虹草莓"
+parent = "special"
+sprite = "rainbowberry.png"
+
+[kinds.platinumberry]
+label = "铂草莓"
+parent = "special"
+
+[kinds.speedberry]
+label = "速通莓"
+parent = "special"
+sprite = "speedberry.png"
+
+[kinds.walljumpless_berry]
+label = "禁踢墙跳草莓"
+parent = "special"
+
+[kinds.cassette]
+label = "磁带"
+parent = "collectible"
+stat = "exist"
+sprite = "cassette.png"
+
+[kinds.cassette.table_field]
+table = "主表"
+field = "磁带"
+
+[kinds.heart]
+label = "水晶之心"
+parent = "collectible"
+stat = "select"
+sprite = "heart.png"
+
+[kinds.heart.table_field]
+table = "主表"
+field = "水晶之心"
+
+[kinds.end_level_heart]
+label = "水晶之心（通关收集）"
+parent = "heart"
+select_value = "通关收集"
+
+[kinds.keep_going_heart]
+label = "水晶之心（额外收集）"
+parent = "heart"
+select_value = "额外收集"
+
+[kinds.portable]
+label = "可携带物"
+
+[kinds.miniberry]
+label = "迷你草莓"
+parent = "portable"
+sprite = "miniberry.png"
+
+[kinds.miniheart]
+label = "迷你心"
+parent = "end_level_heart"
+sprite = "miniheart.png"
