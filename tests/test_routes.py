@@ -3,21 +3,21 @@ from struct import pack
 
 import pytest
 
+from pist.entities.rules import EntityRules, EntityStat, load_entity_rule_layers
 from pist.game.binmap import BinElement, BinMap
-from pist.game.entities import EntityRules, EntityStat, load_entity_rule_layers
-from pist.game.map_entrances import load_map_entrance_rule_layers
+from pist.game.mods import InstalledMod, LocalMap
 from pist.game.routes import (
     EndersBlenderReader,
     MapLink,
     MapMarker,
     MapRoute,
     load_map_layout,
-    map_entity_table_values,
+    map_entity_record_values,
     map_layout,
 )
+from pist.game.time import Time
 from pist.local_data import LocalDataStore
-from pist.models import InstalledMod, LocalMap
-from pist.time import Time
+from pist.map_entrances import load_map_entrance_rule_layers
 
 
 def _varlen(value: int) -> bytes:
@@ -125,7 +125,7 @@ def test_map_layout_extracts_tiles_and_configured_entity_markers() -> None:
     )
 
 
-def test_map_entity_table_values_apply_saved_marker_exclusions() -> None:
+def test_map_entity_record_values_apply_saved_marker_exclusions() -> None:
     map_data = BinMap(
         package='Author/Pack/Map',
         root=BinElement(
@@ -157,7 +157,7 @@ def test_map_entity_table_values_apply_saved_marker_exclusions() -> None:
         ),
     )
 
-    values = map_entity_table_values(
+    values = map_entity_record_values(
         map_data,
         excluded_markers=frozenset({'room\x1fstrawberry\x1f1\x1f8\x1f8'}),
         entity_rules=load_entity_rule_layers().with_rule('heartGem', 'end_level_heart', {}),

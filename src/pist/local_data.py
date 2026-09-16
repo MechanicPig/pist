@@ -1,7 +1,7 @@
 """Persist user-maintained local data in one SQLite database."""
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,43 +9,53 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pist.game.routes import MapRoute
-from pist.models import RecordDraft
+from pist.records import MapRecord
 
 LOCAL_DATA_PATH = Path('.pist/local-data.sqlite3')
-LEGACY_DRAFTS_DIR = 'drafts'
-LEGACY_ROUTES_DIR = 'routes'
 
 
 class LocalDataStore:
-    """Store record drafts and map routes together in local SQLite data."""
+    """Store map records and routes together in local SQLite data."""
 
     def __init__(self, path: Path = LOCAL_DATA_PATH) -> None:
         self._path = path
         self._initialize()
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Generator[sqlite3.Connection]:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._path)
         try:
-            yield connection
-            connection.commit()
+            yield conn
+            conn.commit()
         except BaseException:
-            connection.rollback()
+            conn.rollback()
             raise
         finally:
-            connection.close()
+            conn.close()
 
     def _initialize(self) -> None:
-        with self._connection() as connection:
-            connection.executescript(
+        with self._connect() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'"
+                ).fetchone()
+                is not None
+                and conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'"
+                ).fetchone()
+                is None
+            ):
+                conn.execute('ALTER TABLE drafts RENAME TO records')
+                conn.execute('DROP INDEX IF EXISTS drafts_by_map_save')
+            conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS drafts (
+                CREATE TABLE IF NOT EXISTS records (
                     id INTEGER PRIMARY KEY,
                     created_at TEXT NOT NULL,
                     mod_metadata_name TEXT,
                     map_file TEXT,
-                    save_slot INTEGER,
+                    save_slot INTEGER NOT NULL,
                     payload TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS map_routes (
@@ -53,172 +63,83 @@ class LocalDataStore:
                     updated_at TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS legacy_imports (
-                    source_path TEXT PRIMARY KEY
-                );
+                CREATE INDEX IF NOT EXISTS records_by_map_save
+                ON records (mod_metadata_name, map_file, save_slot, id DESC);
                 """
             )
-            self._upgrade_draft_identity_columns(connection)
-            self._import_legacy_json(connection)
 
-    @staticmethod
-    def _upgrade_draft_identity_columns(connection: sqlite3.Connection) -> None:
-        """Add and populate the identity columns introduced after early local drafts."""
-        columns = {row[1] for row in connection.execute('PRAGMA table_info(drafts)')}
-        for name, definition in (
-            ('mod_metadata_name', 'TEXT'),
-            ('map_file', 'TEXT'),
-            ('save_slot', 'INTEGER'),
-        ):
-            if name not in columns:
-                connection.execute(f'ALTER TABLE drafts ADD COLUMN {name} {definition}')
-        rows = connection.execute(
-            '''
-            SELECT id, payload FROM drafts
-            WHERE mod_metadata_name IS NULL OR map_file IS NULL
-            '''
-        ).fetchall()
-        for draft_id, payload in rows:
-            try:
-                draft = RecordDraft.model_validate_json(payload)
-            except (TypeError, ValidationError, ValueError):
-                continue
-            connection.execute(
-                '''
-                UPDATE drafts
-                SET mod_metadata_name = ?, map_file = ?, save_slot = ?
-                WHERE id = ?
-                ''',
-                (draft.mod_metadata_name, draft.map_file, draft.save_slot, draft_id),
-            )
-        connection.execute(
-            '''
-            CREATE INDEX IF NOT EXISTS drafts_by_map_save
-            ON drafts (mod_metadata_name, map_file, save_slot, id DESC)
-            '''
-        )
-
-    def _import_legacy_json(self, connection: sqlite3.Connection) -> None:
-        """Import each prior JSON draft or route once without deleting its source file."""
-        for path in self._legacy_paths(LEGACY_DRAFTS_DIR):
-            if self._was_imported(connection, path):
-                continue
-            try:
-                draft = RecordDraft.model_validate_json(path.read_text(encoding='utf-8'))
-            except (OSError, ValidationError, ValueError):
-                continue
-            connection.execute(
-                '''
-                INSERT INTO drafts (created_at, mod_metadata_name, map_file, save_slot, payload)
-                VALUES (?, ?, ?, ?, ?)
-                ''',
-                self._draft_row(draft),
-            )
-            self._mark_imported(connection, path)
-        for path in self._legacy_paths(LEGACY_ROUTES_DIR):
-            if self._was_imported(connection, path):
-                continue
-            try:
-                route = MapRoute.model_validate_json(path.read_text(encoding='utf-8'))
-            except (OSError, ValidationError, ValueError):
-                continue
-            connection.execute(
-                """
-                INSERT INTO map_routes (map_file, updated_at, payload)
-                VALUES (?, ?, ?)
-                ON CONFLICT(map_file) DO UPDATE SET
-                    updated_at = excluded.updated_at,
-                    payload = excluded.payload
-                """,
-                (route.map_file, datetime.now(tz=UTC).isoformat(), route.model_dump_json()),
-            )
-            self._mark_imported(connection, path)
-
-    def _legacy_paths(self, directory: str) -> tuple[Path, ...]:
-        return tuple(sorted((self._path.parent / directory).glob('*.json')))
-
-    @staticmethod
-    def _was_imported(connection: sqlite3.Connection, path: Path) -> bool:
-        return connection.execute(
-            'SELECT 1 FROM legacy_imports WHERE source_path = ?', (str(path.resolve()),)
-        ).fetchone() is not None
-
-    @staticmethod
-    def _mark_imported(connection: sqlite3.Connection, path: Path) -> None:
-        connection.execute(
-            'INSERT INTO legacy_imports (source_path) VALUES (?)', (str(path.resolve()),)
-        )
-
-    def save_draft(self, draft: RecordDraft) -> int:
-        """Create or update a draft and return its stable local database identifier."""
-        if draft.time_played is None:
-            raise ValueError('Cannot save a record draft without native play time.')
-        with self._connection() as connection:
-            existing_id = self._draft_id(connection, draft)
+    def save_record(self, record: MapRecord) -> int:
+        """Create or update a record and return its stable local database identifier."""
+        if record.time_played is None:
+            raise ValueError('Cannot save a record without native play time.')
+        with self._connect() as conn:
+            existing_id = self._record_id(conn, record)
             if existing_id is not None:
-                connection.execute(
-                    '''
-                    UPDATE drafts
+                conn.execute(
+                    """
+                    UPDATE records
                     SET created_at = ?, payload = ?
                     WHERE id = ?
-                    ''',
-                    (draft.created_at.astimezone(UTC).isoformat(), draft.model_dump_json(), existing_id),
+                    """,
+                    (
+                        record.created_at.astimezone(UTC).isoformat(),
+                        record.model_dump_json(),
+                        existing_id,
+                    ),
                 )
                 return existing_id
-            cursor = connection.execute(
-                '''
-                INSERT INTO drafts (created_at, mod_metadata_name, map_file, save_slot, payload)
+            cursor = conn.execute(
+                """
+                INSERT INTO records (created_at, mod_metadata_name, map_file, save_slot, payload)
                 VALUES (?, ?, ?, ?, ?)
-                ''',
-                self._draft_row(draft),
+                """,
+                self._record_row(record),
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def existing_draft_id(self, draft: RecordDraft) -> int | None:
-        """Return the latest local draft for the same Mod, map, and save slot."""
-        with self._connection() as connection:
-            return self._draft_id(connection, draft)
+    def existing_record_id(self, record: MapRecord) -> int | None:
+        """Return the latest local record for the same Mod, map, and save slot."""
+        with self._connect() as conn:
+            return self._record_id(conn, record)
 
     @staticmethod
-    def _draft_id(connection: sqlite3.Connection, draft: RecordDraft) -> int | None:
-        row = connection.execute(
-            '''
-            SELECT id FROM drafts
-            WHERE mod_metadata_name = ? AND map_file = ? AND save_slot IS ?
+    def _record_id(conn: sqlite3.Connection, record: MapRecord) -> int | None:
+        row = conn.execute(
+            """
+            SELECT id FROM records
+            WHERE mod_metadata_name = ? AND map_file = ? AND save_slot = ?
             ORDER BY id DESC LIMIT 1
-            ''',
-            (draft.mod_metadata_name, draft.map_file, draft.save_slot),
+            """,
+            (record.mod_metadata_name, record.map_file, record.save_slot),
         ).fetchone()
         return None if row is None else row[0]
 
     @staticmethod
-    def _draft_row(draft: RecordDraft) -> tuple[str, str, str, int | None, str]:
+    def _record_row(record: MapRecord) -> tuple[str, str, str, int, str]:
         return (
-            draft.created_at.astimezone(UTC).isoformat(),
-            draft.mod_metadata_name,
-            draft.map_file,
-            draft.save_slot,
-            draft.model_dump_json(),
+            record.created_at.astimezone(UTC).isoformat(),
+            record.mod_metadata_name,
+            record.map_file,
+            record.save_slot,
+            record.model_dump_json(),
         )
 
-    def load_draft(self, draft_id: int) -> RecordDraft:
-        """Load one saved draft by its stable local identifier."""
-        with self._connection() as connection:
-            row = connection.execute(
-                'SELECT payload FROM drafts WHERE id = ?', (draft_id,)
-            ).fetchone()
+    def load_record(self, record_id: int) -> MapRecord:
+        """Load one saved record by its stable local identifier."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT payload FROM records WHERE id = ?', (record_id,)).fetchone()
         if row is None:
-            raise ValueError(f'No saved local draft with id {draft_id}.')
+            raise ValueError(f'No saved local record with id {record_id}.')
         try:
-            return RecordDraft.model_validate_json(row[0])
+            return MapRecord.model_validate_json(row[0])
         except (TypeError, ValidationError, ValueError) as error:
-            raise ValueError(f'Invalid local draft with id {draft_id}.') from error
+            raise ValueError(f'Invalid local record with id {record_id}.') from error
 
     def save_route(self, route: MapRoute) -> None:
         """Replace the saved user-confirmed route for one concrete map file."""
-        with self._connection() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 INSERT INTO map_routes (map_file, updated_at, payload)
                 VALUES (?, ?, ?)
@@ -235,8 +156,8 @@ class LocalDataStore:
 
     def load_route(self, map_file: str) -> MapRoute | None:
         """Return the saved route for one map file, if there is one."""
-        with self._connection() as connection:
-            row = connection.execute(
+        with self._connect() as conn:
+            row = conn.execute(
                 'SELECT payload FROM map_routes WHERE map_file = ?', (map_file,)
             ).fetchone()
         if row is None:

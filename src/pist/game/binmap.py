@@ -10,7 +10,8 @@ MAX_LOOKUP_SIZE = 65_535
 MAX_ELEMENT_COUNT = 1_000_000
 MAX_RECURSION_DEPTH = 1_000
 
-type AttrValue = bool | int | float | str
+type NumericAttrValue = int | float
+type AttrValue = bool | NumericAttrValue | str
 
 
 class BadMapBin(ValueError):

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Celeste 可收集实体分析"
+  short_description: "为实体审计补充未知 Celeste 可收集实体的静态源码证据。"
+  default_prompt: "使用 $celeste-collectible-entity-analysis 为此 Celeste Mod 中审计无法定性的实体补充静态证据。"

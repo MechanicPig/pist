@@ -11,7 +11,7 @@ from zipfile import BadZipFile
 from luaparser.ast import SyntaxException
 
 from pist.game.binmap import AttrValue
-from pist.game.modpath import ModPath, iter_files
+from pist.game.mod_path import ModPath, iter_files
 
 from .eval import LuaKey, LuaModule, LuaTable, LuaValue, evaluate
 from .selene import SeleneSyntaxError, preprocess

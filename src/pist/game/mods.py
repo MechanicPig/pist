@@ -3,20 +3,24 @@
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from zipfile import BadZipFile, ZipFile
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field
 
 from pist.game.binmap import BadMapBin, parse_map_meta
 from pist.game.dialog import (
+    LocalizedNames,
     campaign_dir_for_map_file,
+    default_campaign_name,
+    default_map_name,
     dialog_key_for_campaign_dir,
     dialog_key_for_map_file,
     map_base_file_and_side,
     parse_dialog,
 )
-from pist.game.modpath import BadModPath, BadZipModPath, ModPath, iter_files
-from pist.models import EverestManifest, InstalledMod, LocalCampaign, LocalMap, ModScanReport
+from pist.game.mod_path import BadModPath, BadZipModPath, ModPath, iter_files
 
 COLLAB_ID_FILENAME = 'CollabUtils2CollabID.txt'
 MODS_DIRNAME = 'Mods'
@@ -40,6 +44,94 @@ IGNORED_DEPENDENCY_NAMES = frozenset({'celeste', 'everest', 'everestcore'})
 MAP_SIDE_ORDER = {None: 0, 'B': 1, 'C': 2}
 NATURAL_PART_PATTERN = re.compile(r'(\d+)')
 COLLAB_JOURNAL_ICON_PATTERN = re.compile(r'.*/\d+-.*')
+
+
+class Dependency(BaseModel):
+    """One required or optional Everest Mod dependency."""
+
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
+
+    name: str = Field(validation_alias='Name')
+    version: str | None = Field(default=None, validation_alias='Version')
+
+
+class EverestManifest(BaseModel):
+    """The first package entry in an Everest ``everest.yaml`` manifest."""
+
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
+
+    name: str = Field(validation_alias='Name')
+    version: str | None = Field(default=None, validation_alias='Version')
+    dependencies: list[Dependency] = Field(default_factory=list, validation_alias='Dependencies')
+    optional_dependencies: list[Dependency] = Field(
+        default_factory=list, validation_alias='OptionalDependencies'
+    )
+
+
+def _base_file_from_data(data: dict[str, object]) -> str:
+    """Build a map's base file when callers do not already provide one."""
+    file_path = data['file_path']
+    assert isinstance(file_path, str)
+    return map_base_file_and_side(file_path)[0]
+
+
+class LocalMap(BaseModel):
+    """One map file and its localized display-name candidates."""
+
+    file_path: str
+    dialog_key: str
+    base_file: str = Field(default_factory=_base_file_from_data)
+    side: Literal['B', 'C'] | None = None
+    names: LocalizedNames = Field(default_factory=dict)
+    author_texts: LocalizedNames = Field(default_factory=dict)
+    collab_credit_tags: LocalizedNames = Field(default_factory=dict)
+
+    @property
+    def fallback_name(self) -> str:
+        """Return the Game-generated map name when Dialog has no entry."""
+        name = default_map_name(self.base_file)
+        return f'{name} {self.side}' if self.side is not None else name
+
+
+class LocalCampaign(BaseModel):
+    """One playable campaign and its contained map files."""
+
+    directory: str
+    dialog_key: str
+    kind: Literal['campaign', 'collab_lobby', 'collab_prologue'] = 'campaign'
+    names: LocalizedNames = Field(default_factory=dict)
+    maps: list[LocalMap] = Field(default_factory=list)
+
+    @property
+    def fallback_name(self) -> str:
+        """Return the Game-generated campaign name when Dialog has no entry."""
+        return default_campaign_name(self.directory)
+
+
+class InstalledMod(BaseModel):
+    """An enabled local Mod package discovered under the Game Mods directory."""
+
+    source: Literal['zip', 'directory']
+    filename: str
+    path: str
+    metadata_name: str
+    metadata_version: str | None
+    dependencies: list[Dependency] = Field(default_factory=list)
+    optional_dependencies: list[Dependency] = Field(default_factory=list)
+    collab_id: str | None = None
+    map_files: list[str] = Field(default_factory=list)
+    maps: list[LocalMap] = Field(default_factory=list)
+    campaigns: list[LocalCampaign] = Field(default_factory=list)
+
+
+class ModScanReport(BaseModel):
+    """Persisted result of an offline scan of locally enabled Mods."""
+
+    mods_directory: str
+    blacklist_entries: list[str]
+    skipped_blacklisted: list[str]
+    disabled_mod_names: list[str] = Field(default_factory=list)
+    mods: list[InstalledMod]
 
 
 def _natural_path_key(path: str) -> tuple[tuple[int, int | str], ...]:

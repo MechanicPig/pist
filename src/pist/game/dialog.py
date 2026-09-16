@@ -1,7 +1,7 @@
 """Dialog TXT parsing compatible with the game's language loader."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import Literal, cast
 
@@ -17,6 +17,17 @@ MAP_FILE_EXT = '.bin'
 MAP_SIDE_PATTERN = re.compile(r'-(?P<side>[BC])$', re.IGNORECASE)
 
 type MapSide = Literal['B', 'C']
+type LocalizedNames = dict[str, str]
+
+DIALOG_LANGUAGES = ('zh-cn', 'en')
+
+
+def localized_name(names: Mapping[str, str], languages: Iterable[str]) -> str | None:
+    """Return the first configured language available in a name mapping."""
+    for lang in languages:
+        if (name := names.get(lang)) is not None:
+            return name
+    return next(iter(names.values()), None)
 
 
 def parse_dialog(content: str) -> CaseFoldDict[str]:

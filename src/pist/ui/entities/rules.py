@@ -21,11 +21,11 @@ from textual.widgets import (
     Static,
 )
 
-from pist.game.entities import EntityConfigStore, EntityRuleConflict
-from pist.game.modpath import ModPath
+from pist.entities.rules import EntityConfigStore, EntityRuleConflict
+from pist.game.mod_path import ModPath
 from pist.loenn import LoennMod, LoennPlacement, LoennRegistry, LoennWarning, load_loenn_registry
 
-from .tui import RefreshableCssApp
+from ..tui import RefreshableCssApp
 
 TEMPLATE_FILTER_ID = 'template-filter'
 TEMPLATE_LIST_ID = 'template-list'
@@ -73,7 +73,7 @@ class LoennPlacementItem(ListItem):
 class EntityRuleApp(RefreshableCssApp[None]):
     """Search static Loenn placements and save their entity rules to TOML."""
 
-    CSS_PATH = 'styles/entity_rules.tcss'
+    CSS_PATH = '../styles/entities_rules.tcss'
     TITLE = 'Pist · 实体规则'
     BINDINGS: ClassVar = [
         ('escape', 'quit', '退出'),

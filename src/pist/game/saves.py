@@ -2,13 +2,14 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import IntEnum
 from functools import cached_property
 from pathlib import Path
 from xml.etree import ElementTree
 
 from pist.game.dialog import map_base_file_and_side
-from pist.models import LocalMap
-from pist.time import Time
+from pist.game.mods import LocalMap
+from pist.game.time import Time
 
 SAVES_DIRNAME = 'Saves'
 SAVE_EXT = '.celeste'
@@ -18,6 +19,15 @@ AREA_STATS_PATHS = (
     'LevelSetRecycleBin/LevelSetStats/Areas/AreaStats',
 )
 MODE_INDEX = {None: 0, 'B': 1, 'C': 2}
+
+
+class MapProgress(IntEnum):
+    """Sort order for the best progress recorded for one map across save slots."""
+
+    SINGLE_RUN_COMPLETED = 0
+    COMPLETED = 1
+    ENTERED = 2
+    UNRECORDED = 3
 
 
 def sid_for_map_file(map_file: str) -> str:
@@ -97,28 +107,28 @@ class SaveReader:
                     stats.setdefault(key, value)
         return SaveSlot(number, stats)
 
-    def map_progress(self, map_file: str) -> int:
-        """Return 0 single-run complete, 1 complete, 2 entered, or 3 unrecorded."""
+    def map_progress(self, map_file: str) -> MapProgress:
+        """Return the best known progress for one map across all save slots."""
         base_file, side = map_base_file_and_side(map_file)
         map_key = (sid_for_map_file(base_file), MODE_INDEX[side])
-        return self._map_progress.get(map_key, 3)
+        return self._map_progress.get(map_key, MapProgress.UNRECORDED)
 
     @cached_property
-    def _map_progress(self) -> dict[tuple[str, int], int]:
+    def _map_progress(self) -> dict[tuple[str, int], MapProgress]:
         """Index every map once, avoiding repeated XML parsing during map sorting."""
-        progress: dict[tuple[str, int], int] = {}
+        progress: dict[tuple[str, int], MapProgress] = {}
         for number in self.available_numbers():
             for map_key, stats in self.load(number)._map_stats.items():
                 value = (
-                    0
+                    MapProgress.SINGLE_RUN_COMPLETED
                     if stats.single_run_completed
-                    else 1
+                    else MapProgress.COMPLETED
                     if stats.completed
-                    else 2
+                    else MapProgress.ENTERED
                     if stats.is_recorded
-                    else 3
+                    else MapProgress.UNRECORDED
                 )
-                progress[map_key] = min(progress.get(map_key, 3), value)
+                progress[map_key] = min(progress.get(map_key, MapProgress.UNRECORDED), value)
         return progress
 
     def _paths(self, number: int) -> tuple[Path, Path]:

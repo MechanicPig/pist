@@ -6,12 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 from pist.game.mods import (
+    EverestManifest,
+    InstalledMod,
+    LocalMap,
     ModScanner,
     collab_journal_map_order,
     is_collab_submission_map,
     is_mod_dependency,
 )
-from pist.models import EverestManifest, InstalledMod, LocalMap
 
 
 def write_zip_mod(

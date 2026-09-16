@@ -1,5 +1,5 @@
-from pist.game.binmap import BinElement, BinMap
-from pist.game.entities import (
+from pist.entities.analysis import HeartStatus, MapEntityStats, analyze_map_entities
+from pist.entities.rules import (
     SHARED_ENTITIES_PATH,
     EntityKind,
     EntityRule,
@@ -7,16 +7,14 @@ from pist.game.entities import (
     EntityRulesForId,
     EntityStat,
     EntityTableField,
-    HeartStatus,
-    MapEntityStats,
-    analyze_map_entities,
     load_entity_rules,
 )
+from pist.game.binmap import BinElement, BinMap
 
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
 
 
-def test_entity_table_values_include_absent_count_and_existence_kinds() -> None:
+def test_entity_record_values_include_absent_count_and_existence_kinds() -> None:
     stats = MapEntityStats(
         counted={},
         existing={},
@@ -27,7 +25,7 @@ def test_entity_table_values_include_absent_count_and_existence_kinds() -> None:
         stat_types={'strawberry': EntityStat.COUNT, 'cassette': EntityStat.EXIST},
     )
 
-    assert stats.table_values == {'主表': {'红草莓数': 0, '磁带': False}}
+    assert stats.record_values == {'主表': {'红草莓数': 0, '磁带': False}}
 
 
 def test_map_entities_classifies_configured_entities_with_sources() -> None:
@@ -99,7 +97,7 @@ def test_map_entities_classifies_configured_entities_with_sources() -> None:
     assert entities.stats.count('strawberry') == 1
     assert entities.stats.count('moonberry') == 1
     assert entities.stats.exists('cassette')
-    assert entities.stats.table_values == {
+    assert entities.stats.record_values == {
         '主表': {'红草莓数': 1, '月莓数': 1, '磁带': True, '水晶之心': '通关收集'}
     }
     assert entities.has_cassette
@@ -145,15 +143,16 @@ def test_map_entities_marks_ambiguous_heart_outcomes_for_review() -> None:
         ),
     )
 
-    rules = (
-        SHARED_RULES.with_rule('heartGem', 'end_level_heart', {'endLevel': True})
-        .with_rule('heartGem', 'keep_going_heart', {'endLevel': False})
+    rules = SHARED_RULES.with_rule('heartGem', 'end_level_heart', {'endLevel': True}).with_rule(
+        'heartGem', 'keep_going_heart', {'endLevel': False}
     )
     entities = analyze_map_entities(map_data, rules=rules)
 
     assert len(entities.hearts) == 2
     assert entities.heart_status is HeartStatus.NEEDS_REVIEW
-    assert '水晶之心' not in entities.stats.table_values['主表']
+    assert '水晶之心' not in entities.stats.record_values['主表']
+    assert entities.stats.select_conflicts[0].table_field.field == '水晶之心'
+    assert entities.stats.select_conflicts[0].values == frozenset({'通关收集', '额外收集'})
 
 
 def test_map_entities_passes_map_metadata_to_rules() -> None:

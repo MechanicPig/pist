@@ -65,7 +65,7 @@ class ModPath:
     def iterdir(self) -> Iterator[Self]:
         raise NotImplementedError
 
-    def joinpath(self, *parts: StrPath) -> Self:
+    def joinpath(self, *_: StrPath) -> Self:
         raise NotImplementedError
 
     __truediv__ = joinpath

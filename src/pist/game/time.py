@@ -72,7 +72,9 @@ class Time:
         return self.ingame_format()
 
     def __repr__(self) -> str:
-        return f'{type(self).__name__}({self.total_milliseconds=})'
+        if total_milliseconds := self.total_milliseconds:
+            return f'{type(self).__name__}({total_milliseconds=})'
+        return f'{type(self).__name__}()'
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Time) and self.total_milliseconds == other.total_milliseconds

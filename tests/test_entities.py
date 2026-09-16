@@ -2,8 +2,9 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import tomli_w
 
-from pist.game.entities import (
+from pist.entities.rules import (
     SHARED_ENTITIES_PATH,
     EntityConfigStore,
     EntityKind,
@@ -22,6 +23,16 @@ from pist.game.entities import (
 )
 
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
+
+
+def _split_config(path: Path) -> Path:
+    """Move a compact test fixture's kinds table into its required sibling file."""
+    config = tomllib.loads(path.read_text(encoding='utf-8'))
+    kinds = config.pop('kinds', {})
+    kinds_path = path.with_name('kinds.toml')
+    kinds_path.write_text(tomli_w.dumps({'kinds': kinds}), encoding='utf-8')
+    path.write_text(tomli_w.dumps(config), encoding='utf-8')
+    return kinds_path
 
 
 @pytest.mark.parametrize(
@@ -125,7 +136,7 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path)
+    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert entity_kind('TestHelper/Berry', {'moon': True}, rules=rules) == 'testberry'
     assert entity_kind('TestHelper/Berry', {'moon': False}, rules=rules) is None
@@ -134,6 +145,24 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
         EntityStat.COUNT,
         EntityTableField(table='maps', field='test berries'),
     )
+
+
+def test_entity_rules_rejects_kind_definitions_in_an_entity_rule_file(tmp_path) -> None:
+    kinds_path = tmp_path / 'kinds.toml'
+    kinds_path.write_text("[kinds.berry]\nlabel = 'Berry'\n", encoding='utf-8')
+    entities_path = tmp_path / 'entities.toml'
+    entities_path.write_text(
+        """[kinds.unexpected]
+label = 'Unexpected'
+
+[entities."TestHelper/Berry"]
+rules = [{ kind = 'berry' }]
+""",
+        encoding='utf-8',
+    )
+
+    with pytest.raises(ValueError, match='Invalid entity rules config'):
+        load_entity_rules(entities_path, kinds_path=kinds_path)
 
 
 def test_entity_rules_support_metadata_conditions_and_terminal_non_collectibles(tmp_path) -> None:
@@ -155,7 +184,7 @@ rules = [
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path)
+    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert entity_kind('TestHelper/Heart', {'fake': True}, rules=rules) is None
     assert (
@@ -166,8 +195,9 @@ rules = [
 
     serialized = entity_rules_toml(rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}))
     assert 'exclude' not in serialized
-    assert EntityRules.model_validate(tomllib.loads(serialized)) == rules.with_exclusion(
-        'TestHelper/OtherHeart', {'fake': True}
+    assert (
+        EntityRuleLayer.model_validate(tomllib.loads(serialized)).entities
+        == rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}).entities
     )
 
 
@@ -179,7 +209,9 @@ label = 'Strawberry'
 """,
         encoding='utf-8',
     )
-    rules = load_entity_rules(config_path).with_rule('Example/Berry', 'strawberry', {})
+    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path)).with_rule(
+        'Example/Berry', 'strawberry', {}
+    )
     rules = rules.with_exclusion('Example/Berry', {'fake': True})
 
     assert entity_kind('Example/Berry', {'fake': True}, rules=rules) is None
@@ -219,7 +251,7 @@ rules = [{ kind = 'berry' }]
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path)
+    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert entity_kind('TestHelper/Berry', {}, rules=rules) == 'berry'
 
@@ -246,7 +278,7 @@ label = 'Berry'
 """,
         encoding='utf-8',
     )
-    store = EntityConfigStore(config_path)
+    store = EntityConfigStore(config_path, kinds_path=_split_config(config_path))
 
     rules = store.load().with_kind(
         'customberry', 'Custom Berry', parent='berry', sprite='customberry.png'
@@ -467,7 +499,7 @@ rules = [{ kind = 'strawberry' }]
 """,
         encoding='utf-8',
     )
-    store = EntityConfigStore(source_path)
+    store = EntityConfigStore(source_path, kinds_path=_split_config(source_path))
 
     rules = store.load().with_rule('TestHelper/Berry', 'strawberry', {'moon': True})
     store.save(rules)
@@ -510,18 +542,19 @@ rules = [{ kind = 'moonberry', when = { moon = true } }]
         encoding='utf-8',
     )
 
-    store = EntityConfigStore(shared_path=shared_path, local_path=local_path)
+    kinds_path = _split_config(shared_path)
+    store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path, local_path=local_path)
     rules = store.load().with_rule('TestHelper/Berry', 'moonberry', {'golden': True})
     store.save(rules)
 
-    reloaded = load_entity_rule_layers(shared_path, local_path)
+    reloaded = load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
     assert entity_kind('TestHelper/Berry', {}, rules=reloaded) == 'strawberry'
     assert entity_kind('TestHelper/Berry', {'moon': True}, rules=reloaded) == 'moonberry'
     assert entity_kind('TestHelper/Berry', {'golden': True}, rules=reloaded) == 'moonberry'
     assert '[kinds.strawberry]' not in local_path.read_text(encoding='utf-8')
 
 
-def test_local_kind_layer_overrides_only_explicit_fields(tmp_path) -> None:
+def test_local_entity_layer_rejects_kind_definitions(tmp_path) -> None:
     shared_path = tmp_path / 'shared.toml'
     shared_path.write_text(
         """[kinds.heart]
@@ -543,14 +576,9 @@ parent = 'collectible'
         encoding='utf-8',
     )
 
-    rules = load_entity_rule_layers(shared_path, local_path)
-
-    assert rules.kinds['heart'] == EntityKind(
-        label='Local heart',
-        parent='collectible',
-        stat=EntityStat.SELECT,
-        table_field=EntityTableField(table='maps', field='heart'),
-    )
+    kinds_path = _split_config(shared_path)
+    with pytest.raises(ValueError, match='Invalid entity rules config layers'):
+        load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
 
 
 def test_local_rule_layer_reports_conflicting_shared_rule_overrides(tmp_path) -> None:
@@ -580,7 +608,8 @@ rules = [{ kind = 'moonberry' }]
         encoding='utf-8',
     )
 
-    store = EntityConfigStore(shared_path=shared_path, local_path=local_path)
+    kinds_path = _split_config(shared_path)
+    store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path, local_path=local_path)
     rules = store.load()
 
     assert entity_kind('TestHelper/Berry', {}, rules=rules) == 'moonberry'

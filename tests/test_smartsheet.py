@@ -6,13 +6,14 @@ from typing import Self, cast
 import pytest
 from aiohttp import ClientSession
 
-from pist.models import JsonObject, RecordDraft, TencentDocsCredentials
-from pist.secrets import CredentialStore
+from pist.records import MapRecord
+from pist.secrets import CredentialStore, TencentDocsCredentials
 from pist.smartsheet import (
     API_BASE_URL,
     DRIVE_API_URL,
+    JsonObject,
     TencentSmartSheetClient,
-    _draft_record_values,
+    _record_values,
 )
 
 
@@ -73,8 +74,7 @@ def test_submit_update_reads_all_record_pages(monkeypatch) -> None:
         offset = options['offset']
         return {
             'records': [
-                {'recordID': f'r{index}'}
-                for index in range(offset, min(offset + 100, 101))
+                {'recordID': f'r{index}'} for index in range(offset, min(offset + 100, 101))
             ]
         }
 
@@ -88,15 +88,16 @@ def test_submit_update_reads_all_record_pages(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize('status', ('进行中', '未开始'))
-def test_incomplete_draft_omits_map_data_from_main_table(status: str) -> None:
-    draft = RecordDraft(
+def test_incomplete_record_omits_map_data_from_main_table(status: str) -> None:
+    record = MapRecord(
         created_at=datetime(2026, 9, 13, tzinfo=UTC),
         mod_metadata_name='Example',
         map_name='Map',
         map_file='Maps/Example/Map.bin',
         sid='Example/Map',
         side='A',
-        table_values={
+        save_slot=0,
+        record_values={
             '主表': {
                 '状态': status,
                 '任意规则统计字段': 3,
@@ -117,7 +118,7 @@ def test_incomplete_draft_omits_map_data_from_main_table(status: str) -> None:
         ]
     }
 
-    values = _draft_record_values(draft, fields)
+    values = _record_values(record, fields)
 
     assert values == {
         'Mod元数据名': [{'type': 'text', 'text': 'Example'}],

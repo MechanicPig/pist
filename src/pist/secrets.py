@@ -3,12 +3,20 @@
 import asyncio
 
 import keyring
-from pydantic import ValidationError
-
-from pist.models import TencentDocsCredentials
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 SERVICE_NAME = 'pist.tencent_docs'
 DIRECT_CREDENTIALS_KEY = 'direct_credentials'
+
+
+class TencentDocsCredentials(BaseModel):
+    """Direct Tencent Docs credentials stored in Windows Credential Manager."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    client_id: str = Field(min_length=1)
+    access_token: str = Field(min_length=1)
+    open_id: str = Field(min_length=1)
 
 
 class CredentialStore:

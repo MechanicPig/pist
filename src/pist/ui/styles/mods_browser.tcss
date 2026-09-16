@@ -1,0 +1,114 @@
+Horizontal {
+    height: 1fr;
+}
+
+#mod-tree {
+    width: 40%;
+    border: round $primary;
+    background: transparent;
+}
+
+#detail-scroll {
+    width: 60%;
+    border: round $primary;
+}
+
+#detail {
+    padding: 1 2;
+}
+
+#map-detail {
+    padding: 0 2;
+}
+
+#detail, #map-detail {
+    height: auto;
+}
+
+.campaign-section > Contents {
+    padding-left: 3;
+}
+
+.campaign-detail {
+    height: auto;
+}
+
+.campaign-header {
+    height: auto;
+}
+
+.map-list {
+    height: auto;
+    background: transparent;
+}
+
+DatePickerScreen, RecordReferenceScreen, RecordEditorScreen, AuthorSelectionScreen {
+    align: center middle;
+}
+
+#date-picker {
+    width: 52;
+    height: auto;
+    border: tall $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#date-picker-header, #date-picker-actions, #record-sync-actions {
+    height: auto;
+    align: center middle;
+}
+
+#date-picker-header Button, #record-sync-actions Button {
+    margin: 0 1;
+}
+
+#date-picker-days {
+    grid-size: 7;
+    grid-gutter: 0;
+    height: auto;
+    margin-top: 1;
+}
+
+#date-picker-days Button { min-width: 0; width: 1fr; }
+#date-picker-actions, #record-sync-actions { padding-top: 1; }
+
+#record-reference-dialog {
+    width: 75%; height: 75%; border: tall $primary; padding: 1 2; background: $surface;
+}
+#record-reference-content { height: 1fr; }
+#record-reference-actions, #record-confirm-actions, #author-select-actions {
+    height: auto; align: right middle; padding-top: 1;
+}
+
+#record-confirm {
+    width: 70%; height: 90%; border: tall $primary; padding: 1 2; background: $surface;
+}
+#record-confirm-content { height: 1fr; }
+.record-reference-summary { margin-bottom: 1; }
+.record-field-label, .record-reference-title { text-style: bold; }
+#record-fields { grid-size: 4; grid-columns: 10 1fr 10 1fr; grid-rows: 1; grid-gutter: 0; height: auto; }
+#record-fields Input, #record-fields Select { width: 1fr; height: 1; }
+#record-fields > Horizontal { height: 1; layout: horizontal; align: left middle; }
+.record-wide-control { column-span: 3; }
+.record-date-control Input { width: 1fr; }
+.record-date-picker { width: auto; margin-left: 1; }
+.record-note-control { column-span: 3; height: 1; }
+.record-author-placeholder, .record-route-placeholder { color: $foreground 50%; }
+.record-field-warning { color: $warning; }
+#record-confirm-actions Button, #author-select-actions Button { margin-left: 1; }
+
+RecordSyncModeScreen, DialogAuthorSelectionScreen { align: center middle; }
+#record-sync-mode { width: 58; height: auto; border: tall $primary; padding: 1 2; background: $surface; }
+
+#author-select { width: 70%; height: 80%; border: round $primary; padding: 1 2; background: $surface; }
+#author-select-list { height: 1fr; }
+
+#dialog-author-select { width: 70%; height: 80%; border: round $primary; padding: 1 2; background: $surface; }
+#dialog-author-text, #dialog-author-text:focus { height: 3; border: round $primary; }
+#dialog-author-list { height: 1fr; min-height: 3; border: round $primary; padding: 0 1; overflow-y: auto; }
+.dialog-author-row { height: 1; }
+.dialog-author-row Input { width: 1fr; height: 1; }
+.dialog-author-row Button { width: auto; margin-left: 1; }
+#dialog-author-actions { height: 4; min-height: 4; align: right middle; padding-top: 1; }
+#dialog-author-actions Button { margin-left: 1; }

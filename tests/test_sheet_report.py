@@ -1,15 +1,15 @@
-from pist.models import (
+from pist.sheet_report import (
+    ManualRecordField,
+    field_coverage_report,
+    inspection_fields,
+    manual_record_fields,
+)
+from pist.smartsheet import (
     FileIdConversion,
     GetSheetsData,
     InspectionReport,
     SmartSheet,
     SubSheetInspection,
-)
-from pist.sheet_report import (
-    ManualDraftField,
-    field_coverage_report,
-    inspection_fields,
-    manual_draft_fields,
 )
 
 
@@ -41,11 +41,11 @@ def test_field_coverage_report_classifies_current_planned_and_formula_fields() -
     assert field_coverage_report(report) == (
         '# Smart Sheet 字段覆盖报告\n\n'
         '文件 ID：`file`\n\n'
-        '“当前草稿”表示生成本地草稿时已经可以稳定填入；“计划自动”尚未实现。\n\n'
+        '“当前记录”表示生成本地记录时已经可以稳定填入；“计划自动”尚未实现。\n\n'
         '## 初见（3 列）\n\n'
         '| 字段 | 类型 | 覆盖状态 | 数据来源 / 说明 |\n'
         '| --- | --- | --- | --- |\n'
-        '| Mod元数据名 | 文本 | 当前草稿 | everest.yaml |\n'
+        '| Mod元数据名 | 文本 | 当前记录 | everest.yaml |\n'
         '| 红草莓数 | 数字 | 计划自动 | .bin 地图实体分析 |\n'
         '| 平均单面死亡数 | 公式 | 公式列 | 由表格公式计算，不写入 |\n'
     )
@@ -61,7 +61,7 @@ def test_api_models_accept_camel_case_aliases() -> None:
     assert sheets[0].is_visible
 
 
-def test_manual_draft_fields_use_main_table_metadata_and_select_options() -> None:
+def test_manual_record_fields_use_main_table_metadata_and_select_options() -> None:
     report = InspectionReport(
         file_id='file',
         sheets=[
@@ -124,13 +124,13 @@ def test_manual_draft_fields_use_main_table_metadata_and_select_options() -> Non
         ],
     )
 
-    assert manual_draft_fields(report) == (
-        ManualDraftField('体感难度', 17, ('高级',)),
-        ManualDraftField('难度子阶', 17, ('低',)),
-        ManualDraftField('标注难度', 17, ('专家',)),
-        ManualDraftField('标注难度子阶', 17, ('高',)),
-        ManualDraftField('起始日期', 4),
-        ManualDraftField('状态', 17, ('通关', '进行中')),
-        ManualDraftField('评分', 2),
-        ManualDraftField('备注', 1),
+    assert manual_record_fields(report) == (
+        ManualRecordField('体感难度', 17, ('高级',)),
+        ManualRecordField('难度子阶', 17, ('低',)),
+        ManualRecordField('标注难度', 17, ('专家',)),
+        ManualRecordField('标注难度子阶', 17, ('高',)),
+        ManualRecordField('起始日期', 4),
+        ManualRecordField('状态', 17, ('通关', '进行中')),
+        ManualRecordField('评分', 2),
+        ManualRecordField('备注', 1),
     )

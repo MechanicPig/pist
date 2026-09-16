@@ -4,21 +4,23 @@ import json
 from textual.app import App
 from textual.widgets import Button, Input, ListView, Select, Tree
 
-from pist.game.entities import (
+from pist.entities.audit import (
+    AttributeAuditStatus,
+    AuditSource,
+    EntityAuditStatus,
+    EntityAuditStore,
+    EntityAuditSummary,
+    RawEntityOccurrence,
+    occurrences_for_variants,
+)
+from pist.entities.rules import (
     EntityKind,
     EntityRules,
     EntityStat,
     EntityTableField,
 )
-from pist.game.entity_audit import (
-    AttributeAuditStatus,
-    EntityAuditStatus,
-    EntityAuditStore,
-    occurrences_for_variants,
-)
 from pist.game.routes import MapMarker
-from pist.ui.entity_audit import (
-    _UNKNOWN,
+from pist.ui.entities.audit import (
     ATTRIBUTE_SELECT_ID,
     ATTRIBUTE_STATUS_ID,
     ENTITY_LIST_ID,
@@ -30,6 +32,7 @@ from pist.ui.entity_audit import (
     NEW_KIND_STAT_ID,
     NEW_KIND_TABLE_ID,
     REVOKE_ENTITY_KIND_ID,
+    UNKNOWN,
     VARIANT_SELECT_ID,
     VIEW_GROUP_OCCURRENCES_ID,
     EntityAuditApp,
@@ -38,18 +41,21 @@ from pist.ui.entity_audit import (
     KindContextScreen,
     KindEditorScreen,
     KindPickerScreen,
-    KindTree,
-    OccurrenceScreen,
-    _add_kind_nodes,
     _classification_groups,
     _default_value,
-    _map_occurrences,
-    _occurrence_markers,
+)
+from pist.ui.entities.kinds import KindTree, add_kind_nodes
+from pist.ui.entities.occurrences import (
+    MapOccurrenceItem,
+    MapOccurrences,
+    OccurrenceScreen,
+    map_occurrences,
+    occurrence_markers,
 )
 
 
 def test_confirmed_default_input_distinguishes_json_null_from_blank() -> None:
-    assert _default_value('') is _UNKNOWN
+    assert _default_value('') is UNKNOWN
     assert _default_value('null') is None
     assert _default_value('false') is False
 
@@ -166,10 +172,10 @@ def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch)
     calls = 0
     original = store.entity_summaries
 
-    def summaries(*args: object) -> object:
+    def summaries(report_id: int | None = None) -> tuple[EntityAuditSummary, ...]:
         nonlocal calls
         calls += 1
-        return original(*args)
+        return original(report_id)
 
     monkeypatch.setattr(store, 'entity_summaries', summaries)
     app = EntityAuditApp(store, report_id)
@@ -180,14 +186,16 @@ def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch)
             entity_filter = app.query_one('#audit-entity-filter', Input)
             entity_filter.value = 'Other'
             await pilot.pause()
-            app.query_one(f'#{ENTITY_STATUS_ID}', Select).value = (
-                EntityAuditStatus.ENTITY_CANDIDATE.value
-            )
+            app.query_one(
+                f'#{ENTITY_STATUS_ID}', Select
+            ).value = EntityAuditStatus.ENTITY_CANDIDATE.value
             app.save_entity()
             await pilot.pause()
             assert calls == 1
             assert entity_filter.value == 'Other'
-            assert app.query_one(EntityAuditItem).summary.status is EntityAuditStatus.ENTITY_CANDIDATE
+            assert (
+                app.query_one(EntityAuditItem).summary.status is EntityAuditStatus.ENTITY_CANDIDATE
+            )
             assert not app.query_one(EntityAuditItem).display
 
     asyncio.run(check())
@@ -226,21 +234,15 @@ def test_saving_entity_moves_only_the_saved_navigation_item(tmp_path) -> None:
     async def check() -> None:
         async with app.run_test() as pilot:
             entities = app.query_one(f'#{ENTITY_LIST_ID}', ListView)
-            items = {
-                item.summary.entity_name: item
-                for item in entities.query(EntityAuditItem)
-            }
+            items = {item.summary.entity_name: item for item in entities.query(EntityAuditItem)}
             await pilot.click(items['First'])
-            app.query_one(f'#{ENTITY_STATUS_ID}', Select).value = (
-                EntityAuditStatus.ENTITY_CANDIDATE.value
-            )
+            app.query_one(
+                f'#{ENTITY_STATUS_ID}', Select
+            ).value = EntityAuditStatus.ENTITY_CANDIDATE.value
             app.save_entity()
             await pilot.pause()
 
-            refreshed = {
-                item.summary.entity_name: item
-                for item in entities.query(EntityAuditItem)
-            }
+            refreshed = {item.summary.entity_name: item for item in entities.query(EntityAuditItem)}
             assert refreshed['First'] is not items['First']
             assert refreshed['Second'] is items['Second']
             assert refreshed['First'].summary.status is EntityAuditStatus.ENTITY_CANDIDATE
@@ -405,6 +407,35 @@ def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_pa
     asyncio.run(check())
 
 
+def test_double_clicking_an_occurrence_requests_a_map_preview() -> None:
+    occurrence = RawEntityOccurrence(
+        entity_name='Example/Berry',
+        attrs={'x': 8, 'y': 16},
+        source=AuditSource(scope='mod', map_file='Maps/Test.bin', map_name='Test'),
+        room='a',
+        entity_id=1,
+    )
+    requested: list[MapOccurrences] = []
+    app = App()
+
+    async def check() -> None:
+        async with app.run_test() as pilot:
+            app.push_screen(
+                OccurrenceScreen(
+                    'Example/Berry',
+                    (occurrence,),
+                    map_progress=lambda _: 0,
+                    preview=requested.append,
+                )
+            )
+            await pilot.pause()
+            await pilot.double_click(app.screen.query_one(MapOccurrenceItem))
+
+    asyncio.run(check())
+
+    assert [data.source.map_file for data in requested] == ['Maps/Test.bin']
+
+
 def test_kind_picker_tree_keeps_the_configured_hierarchy() -> None:
     rules = EntityRules(
         kinds={
@@ -415,7 +446,7 @@ def test_kind_picker_tree_keeps_the_configured_hierarchy() -> None:
     )
     tree = Tree[str]('kind')
 
-    _add_kind_nodes(tree.root, rules)
+    add_kind_nodes(tree.root, rules)
 
     berry = tree.root.children[0]
     assert berry.data == 'berry'
@@ -615,8 +646,8 @@ def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(tm
     report_id = store.import_report(report_path)
     occurrences = store.entity_detail('Example/Berry', report_id).occurrences
 
-    maps = _map_occurrences(occurrences, lambda _: 3)
+    maps = map_occurrences(occurrences, lambda _: 3)
 
     assert len(maps) == 2
     assert maps[0].source.mod_file == 'Example.zip'
-    assert _occurrence_markers(maps[0].occurrences) == {'a': (MapMarker(8, 16, 'audit'),)}
+    assert occurrence_markers(maps[0].occurrences) == {'a': (MapMarker(8, 16, 'audit'),)}

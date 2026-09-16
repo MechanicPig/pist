@@ -1,7 +1,7 @@
 """Textual UI for browsing locally enabled Mods."""
 
 from calendar import monthrange
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, date, datetime, time
 from html import unescape
 from pathlib import Path, PurePosixPath
@@ -15,6 +15,7 @@ from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     Checkbox,
@@ -31,43 +32,46 @@ from textual.widgets import (
 )
 from textual.widgets._tree import TreeNode
 
-from pist.drafts import create_record_draft, merge_saved_draft
-from pist.game.mods import collab_journal_map_order, is_collab_submission_map, is_mod_dependency
-from pist.game.routes import (
-    EndersBlenderReader,
-    EndersBlenderSave,
-    MapRoute,
-    load_map_entity_table_values_from_path,
-    load_map_layout,
-)
-from pist.game.saves import SaveReader, SaveSlot
-from pist.gamebanana import GameBananaClient, GameBananaLookupError
-from pist.local_data import LocalDataStore
-from pist.map_preview import MapPreview, MapPreviewError
-from pist.models import (
-    DIALOG_LANGUAGES,
+from pist.entities.analysis import SelectConflict
+from pist.game.dialog import DIALOG_LANGUAGES, localized_name
+from pist.game.mods import (
     Dependency,
-    GameBananaSubmission,
-    InspectionReport,
     InstalledMod,
     LocalCampaign,
     LocalMap,
     ModScanReport,
-    PistSettings,
-    RecordDraft,
-    localized_name,
+    collab_journal_map_order,
+    is_collab_submission_map,
+    is_mod_dependency,
 )
-from pist.settings import SettingsStore
-from pist.sheet_report import ManualDraftField, manual_draft_fields
-from pist.smartsheet import TencentSmartSheetClient, extract_file_id
+from pist.game.routes import (
+    EndersBlenderReader,
+    EndersBlenderSave,
+    MapRoute,
+    load_map_entity_stats_from_path,
+    load_map_layout,
+)
+from pist.game.saves import SaveReader, SaveSlot
+from pist.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSubmission
+from pist.local_data import LocalDataStore
+from pist.map_preview import MapPreview, MapPreviewError
+from pist.records import MapRecord, create_map_record, merge_saved_record
+from pist.settings import PistSettings, SettingsStore
+from pist.sheet_report import ManualRecordField, manual_record_fields
+from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
+from pist.types import CellValue, RecordValues
 
-from .tui import RefreshableCssApp
+from ..tui import RefreshableCssApp
 
 MOD_TREE_ID = 'mod-tree'
 DETAIL_ID = 'detail'
 MAP_DETAIL_ID = 'map-detail'
 DETAIL_SCROLL_ID = 'detail-scroll'
-DRAFT_DIFFICULTY_ROWS = (
+LEFT_MOUSE_BUTTON = 1
+type AuthorSource = GameBananaSubmission | str | None
+RIGHT_MOUSE_BUTTON = 3
+DOUBLE_CLICK_COUNT = 2
+RECORD_DIFFICULTY_ROWS = (
     ('体感难度', '难度子阶'),
     ('标注难度', '标注难度子阶'),
 )
@@ -81,8 +85,16 @@ def _plain_html(value: str) -> str:
     return sub(r'\n{3,}', '\n\n', value).strip()
 
 
+def _select_conflict_hints(conflicts: tuple[SelectConflict, ...]) -> dict[str, str]:
+    """Return visible field hints for select-stat values that conflict in one map."""
+    return {
+        conflict.table_field.field: f'多个结果：{"、".join(sorted(conflict.values))}'
+        for conflict in conflicts
+    }
+
+
 def _reference_summary(title: str, content: str, *, limit: int = 120) -> str:
-    """Return one compact, single-line preview of supplemental draft information."""
+    """Return one compact, single-line preview of supplemental record information."""
     value = ' '.join(content.split())
     if len(value) > limit:
         value = f'{value[:limit].rstrip()}…'
@@ -91,45 +103,6 @@ def _reference_summary(title: str, content: str, *, limit: int = 120) -> str:
 
 class DatePickerScreen(ModalScreen[str | None]):
     """Choose one optional ISO date from a compact month calendar."""
-
-    CSS = """
-    DatePickerScreen {
-        align: center middle;
-    }
-
-    #date-picker {
-        width: 52;
-        height: auto;
-        border: tall $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #date-picker-header, #date-picker-actions {
-        height: auto;
-        align: center middle;
-    }
-
-    #date-picker-header Button {
-        margin: 0 1;
-    }
-
-    #date-picker-days {
-        grid-size: 7;
-        grid-gutter: 0;
-        height: auto;
-        margin-top: 1;
-    }
-
-    #date-picker-days Button {
-        min-width: 0;
-        width: 1fr;
-    }
-
-    #date-picker-actions {
-        padding-top: 1;
-    }
-    """
 
     def __init__(self, selected: date | None = None) -> None:
         super().__init__()
@@ -414,10 +387,10 @@ class MapItem(ListItem):
             _map_lines([self.map_info], self._languages, save_slot, trim=True)
         )
 
-    def _on_click(self, _: events.Click) -> None:
-        """Keep ListView selection while exposing map-specific mouse gestures."""
-        super()._on_click(_)
-        self.post_message(self.Clicked(self, _.button, _.chain))
+    @on(events.Click)
+    def map_clicked(self, event: events.Click) -> None:
+        """Expose map-specific mouse gestures after ListItem handles selection."""
+        self.post_message(self.Clicked(self, event.button, event.chain))
 
 
 class MapList(ListView):
@@ -439,8 +412,8 @@ class MapList(ListView):
         )
 
 
-class DraftReferenceSummary(Static):
-    """Compact supplemental draft information that opens in full on double-click."""
+class RecordReferenceSummary(Static):
+    """Compact supplemental record information that opens in full on double-click."""
 
     class Opened(Message):
         """The player requested the complete reference text."""
@@ -477,37 +450,14 @@ class DraftReferenceSummary(Static):
         self._content = content
 
     async def _on_click(self, event: events.Click) -> None:
-        if event.button == 1 and event.chain == 2:
+        if event.button == LEFT_MOUSE_BUTTON and event.chain == DOUBLE_CLICK_COUNT:
             event.stop()
             self.post_message(self.Opened(self._title, self._content))
 
 
-class DraftReferenceScreen(ModalScreen[None]):
+class RecordReferenceScreen(ModalScreen[None]):
     """Show the complete GameBanana introduction or collab tag text."""
 
-    CSS = """
-    DraftReferenceScreen {
-        align: center middle;
-    }
-
-    #draft-reference-dialog {
-        width: 75%;
-        height: 75%;
-        border: tall $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #draft-reference-content {
-        height: 1fr;
-    }
-
-    #draft-reference-actions {
-        height: auto;
-        align: right middle;
-        padding-top: 1;
-    }
-    """
     BINDINGS: ClassVar = [('escape', 'dismiss', '关闭')]
 
     def __init__(self, title: str, content: str) -> None:
@@ -516,216 +466,138 @@ class DraftReferenceScreen(ModalScreen[None]):
         self._content = content
 
     def compose(self) -> ComposeResult:
-        with Vertical(id='draft-reference-dialog'):
-            yield Static(self._title, classes='draft-reference-title')
-            with VerticalScroll(id='draft-reference-content'):
+        with Vertical(id='record-reference-dialog'):
+            yield Static(self._title, classes='record-reference-title')
+            with VerticalScroll(id='record-reference-content'):
                 yield Static(self._content)
-            with Horizontal(id='draft-reference-actions'):
-                yield Button('关闭', id='draft-reference-close', variant='primary')
+            with Horizontal(id='record-reference-actions'):
+                yield Button('关闭', id='record-reference-close', variant='primary')
 
-    @on(Button.Pressed, '#draft-reference-close')
+    @on(Button.Pressed, '#record-reference-close')
     def close(self) -> None:
         self.dismiss()
 
 
-class DraftAuthorField(Static):
-    """An editable author value in the draft-information grid."""
+class RecordAuthorField(Static):
+    """An editable author value in the record-information grid."""
 
     class Clicked(Message):
         """The player wants to revise the selected credited authors."""
 
     async def _on_click(self, event: events.Click) -> None:
-        if event.button == 1:
+        if event.button == LEFT_MOUSE_BUTTON:
             event.stop()
             self.post_message(self.Clicked())
 
 
-class DraftRouteField(Static):
+class RecordRouteField(Static):
     """A main-room-count value that opens the map route editor."""
 
     class Clicked(Message):
         """The player wants to edit the map route."""
 
     async def _on_click(self, event: events.Click) -> None:
-        if event.button == 1:
+        if event.button == LEFT_MOUSE_BUTTON:
             event.stop()
             self.post_message(self.Clicked())
 
 
-class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
-    """Preview one record draft before writing it to local storage."""
+class RecordEditorScreen(ModalScreen[MapRecord | None]):
+    """Edit one local record before writing it to local storage."""
 
-    CSS = """
-    ConfirmDraftScreen {
-        align: center middle;
-    }
-
-    #draft-confirm {
-        width: 70%;
-        height: 90%;
-        border: tall $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #draft-confirm-content {
-        height: 1fr;
-    }
-
-    .draft-reference-summary {
-        margin-bottom: 1;
-    }
-
-    .draft-field-label, .draft-reference-title {
-        text-style: bold;
-    }
-
-    #draft-fields {
-        grid-size: 4;
-        grid-columns: 10 1fr 10 1fr;
-        grid-rows: 1;
-        grid-gutter: 0;
-        height: auto;
-    }
-
-    #draft-fields Input, #draft-fields Select {
-        width: 1fr;
-        height: 1;
-    }
-
-    #draft-fields > Horizontal {
-        height: 1;
-        layout: horizontal;
-        align: left middle;
-    }
-
-    .draft-wide-control {
-        column-span: 3;
-    }
-
-    .draft-date-control Input {
-        width: 1fr;
-    }
-
-    .draft-date-picker {
-        width: auto;
-        margin-left: 1;
-    }
-
-    .draft-note-control {
-        column-span: 3;
-        height: 1;
-    }
-
-    .draft-author-placeholder {
-        color: $foreground 50%;
-    }
-
-    .draft-route-placeholder {
-        color: $foreground 50%;
-    }
-
-    #draft-confirm-actions {
-        height: auto;
-        align: right middle;
-        padding-top: 1;
-    }
-
-    #draft-confirm-actions Button {
-        margin-left: 1;
-    }
-    """
     BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
 
     def __init__(
         self,
-        draft: RecordDraft,
+        record: MapRecord,
         *,
-        manual_fields: tuple[ManualDraftField, ...] = (),
+        manual_fields: tuple[ManualRecordField, ...] = (),
         reference: tuple[str, str] | None = None,
-        author_source: GameBananaSubmission | str | None = None,
+        author_source: AuthorSource = None,
         collab_tags: str | None = None,
+        field_hints: Mapping[str, str] | None = None,
         edit_route: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
-        self._draft = draft
+        self._record = record
         self._manual_fields = manual_fields
         self._reference = reference
         self._author_source = author_source
         self._collab_tags = collab_tags
+        self._field_hints = {} if field_hints is None else field_hints
         self._edit_route = edit_route
 
     def compose(self) -> ComposeResult:
-        with Vertical(id='draft-confirm'):
-            with VerticalScroll(id='draft-confirm-content'):
+        with Vertical(id='record-confirm'):
+            with VerticalScroll(id='record-confirm-content'):
                 if self._reference is not None:
                     title, content = self._reference
-                    yield DraftReferenceSummary(
+                    yield RecordReferenceSummary(
                         title,
                         content,
-                        id='draft-reference-summary',
-                        classes='draft-reference-summary',
+                        id='record-reference-summary',
+                        classes='record-reference-summary',
                     )
-                with Grid(id='draft-fields'):
-                    yield from self._draft_field_widgets()
-            with Horizontal(id='draft-confirm-actions'):
-                yield Button('取消', id='draft-confirm-cancel')
-                yield Button('保存', id='draft-confirm-save', variant='primary')
+                with Grid(id='record-fields'):
+                    yield from self._record_field_widgets()
+            with Horizontal(id='record-confirm-actions'):
+                yield Button('取消', id='record-confirm-cancel')
+                yield Button('保存', id='record-confirm-save', variant='primary')
 
-    @on(DraftReferenceSummary.Opened)
-    def open_draft_reference(self, event: DraftReferenceSummary.Opened) -> None:
-        """Open the complete supplemental reference without leaving the draft."""
-        self.app.push_screen(DraftReferenceScreen(event.title, event.content))
+    @on(RecordReferenceSummary.Opened)
+    def open_record_reference(self, event: RecordReferenceSummary.Opened) -> None:
+        """Open the complete supplemental reference without leaving the record."""
+        self.app.push_screen(RecordReferenceScreen(event.title, event.content))
 
-    @on(DraftAuthorField.Clicked)
+    @on(RecordAuthorField.Clicked)
     def edit_authors(self) -> None:
-        """Reopen the source-specific author selector from the draft grid."""
+        """Reopen the source-specific author selector from the record grid."""
         if isinstance(self._author_source, GameBananaSubmission):
             self.app.push_screen(
-                AuthorSelectionScreen(self._author_source, selected_authors=self._draft.authors),
+                AuthorSelectionScreen(self._author_source, selected_authors=self._record.authors),
                 self._set_authors,
             )
         elif isinstance(self._author_source, str):
             self.app.push_screen(
-                DialogAuthorSelectionScreen(self._author_source, authors=self._draft.authors),
+                DialogAuthorSelectionScreen(self._author_source, authors=self._record.authors),
                 self._set_authors,
             )
 
-    @on(DraftRouteField.Clicked)
+    @on(RecordRouteField.Clicked)
     def edit_route(self) -> None:
-        """Open the non-blocking route editor for this draft's map."""
+        """Open the non-blocking route editor for this record's map."""
         if self._edit_route is not None:
             self._edit_route()
 
     def _set_authors(self, authors: tuple[str, ...] | None) -> None:
         if authors is None:
             return
-        self._draft = self._draft.model_copy(update={'authors': authors})
-        author_field = self.query_one(DraftAuthorField)
+        self._record = self._record.model_copy(update={'authors': authors})
+        author_field = self.query_one(RecordAuthorField)
         author_field.update('、'.join(authors) or '单击选择作者')
         if authors:
-            author_field.remove_class('draft-author-placeholder')
+            author_field.remove_class('record-author-placeholder')
         else:
-            author_field.add_class('draft-author-placeholder')
+            author_field.add_class('record-author-placeholder')
 
-    def _draft_field_widgets(self) -> ComposeResult:
+    def _record_field_widgets(self) -> ComposeResult:
         """Render generated data and editable table fields in the requested row order."""
         yield from self._pair(
-            'Mod 名', self._draft.mod_name, 'Mod 元数据名', self._draft.mod_metadata_name
+            'Mod 名', self._record.mod_name, 'Mod 元数据名', self._record.mod_metadata_name
         )
         yield self._label('作者')
         if self._author_source is None:
-            yield Static('、'.join(self._draft.authors))
+            yield Static('、'.join(self._record.authors))
         else:
-            author_field = DraftAuthorField('、'.join(self._draft.authors) or '单击选择作者')
-            if not self._draft.authors:
-                author_field.add_class('draft-author-placeholder')
+            author_field = RecordAuthorField('、'.join(self._record.authors) or '单击选择作者')
+            if not self._record.authors:
+                author_field.add_class('record-author-placeholder')
             yield author_field
         yield self._label('更新时间')
         yield self._updated_at_control()
-        yield from self._pair('地图', self._draft.map_name, 'SID', self._draft.sid)
-        yield from self._pair('存档槽', self._draft.save_slot, '已通关', self._draft.completed)
-        yield from self._pair('用时', self._draft.time_played, '死亡', self._draft.deaths)
+        yield from self._pair('地图', self._record.map_name, 'SID', self._record.sid)
+        yield from self._pair('存档槽', self._record.save_slot, '已通关', self._record.completed)
+        yield from self._pair('用时', self._record.time_played, '死亡', self._record.deaths)
         yield self._label('主房间数')
         room_count = self._table_value('主房间数')
         if self._edit_route is None:
@@ -734,9 +606,9 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
             route_label = '单击编辑路线'
             if room_count is not None:
                 route_label = f'{room_count}（单击编辑路线）'
-            route_field = DraftRouteField(route_label)
+            route_field = RecordRouteField(route_label)
             if room_count is None:
-                route_field.add_class('draft-route-placeholder')
+                route_field.add_class('record-route-placeholder')
             yield route_field
         yield self._label('合集标签')
         yield Static(self._display_value(self._collab_tags))
@@ -746,31 +618,39 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
         yield from self._pair(
             '磁带', self._table_value('磁带'), '水晶之心', self._table_value('水晶之心')
         )
-        for titles in DRAFT_DIFFICULTY_ROWS:
+        for titles in RECORD_DIFFICULTY_ROWS:
             yield from self._manual_pair(*titles)
         yield from self._manual_pair('起始日期', '结束日期')
         yield from self._manual_pair('状态', 'SL使用')
         rating = self._manual_field('评分')
         if rating is not None:
             yield self._label('评分')
-            yield self._manual_control(rating, classes='draft-wide-control')
+            yield self._manual_control(rating, classes='record-wide-control')
         note = self._manual_field('备注')
         if note is not None:
             yield self._label('备注')
-            yield self._manual_control(note, classes='draft-note-control')
+            yield self._manual_control(note, classes='record-note-control')
 
     def _pair(
         self, left_label: str, left_value: object, right_label: str, right_value: object
     ) -> ComposeResult:
         yield self._label(left_label)
-        yield Static(self._display_value(left_value))
+        yield self._field_value(left_label, left_value)
         yield self._label(right_label)
-        yield Static(self._display_value(right_value))
+        yield self._field_value(right_label, right_value)
 
     @staticmethod
     def _label(value: str) -> Static:
         """Render a bold field label without affecting its paired value."""
-        return Static(value, classes='draft-field-label')
+        return Static(value, classes='record-field-label')
+
+    def _field_value(self, title: str, value: object) -> Static:
+        """Render a generated field value or a visible explanation for a missing value."""
+        hint = self._field_hints.get(title) if value is None else None
+        field = Static(self._display_value(value) if hint is None else hint)
+        if hint is not None:
+            field.add_class('record-field-warning')
+        return field
 
     def _manual_pair(self, left_title: str, right_title: str) -> ComposeResult:
         for title in (left_title, right_title):
@@ -778,28 +658,44 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
             yield self._label('难度子阶' if title == '标注难度子阶' else title)
             yield Static('') if field is None else self._manual_control(field)
 
-    def _manual_field(self, title: str) -> ManualDraftField | None:
+    def _manual_field(self, title: str) -> ManualRecordField | None:
         return next((field for field in self._manual_fields if field.title == title), None)
 
-    def _manual_control(
-        self, field: ManualDraftField, *, classes: str | None = None
-    ) -> Static | Horizontal | Input | Select | TextArea:
+    def _manual_control(self, field: ManualRecordField, *, classes: str | None = None) -> Widget:
         field_id = self._manual_field_id(field)
+        value = self._table_value(field.title)
         match field.field_type:
             case 4:
                 return Horizontal(
-                    Input(placeholder='YYYY-MM-DD', id=field_id, compact=True),
+                    Input(
+                        self._display_value(value),
+                        placeholder='YYYY-MM-DD',
+                        id=field_id,
+                        compact=True,
+                    ),
                     Button(
                         '选择日期',
                         id=f'{field_id}-picker',
-                        classes='draft-date-picker',
+                        classes='record-date-picker',
                         compact=True,
                     ),
-                    classes=f'draft-date-control {classes or ""}'.strip(),
+                    classes=f'record-date-control {classes or ""}'.strip(),
                 )
             case 17:
+                options = field.options
+                if isinstance(value, str) and value and value not in options:
+                    options = (*options, value)
+                if isinstance(value, str):
+                    return Select(
+                        ((option, option) for option in options),
+                        prompt=f'选择{field.title}',
+                        value=value,
+                        id=field_id,
+                        classes=classes,
+                        compact=True,
+                    )
                 return Select(
-                    ((option, option) for option in field.options),
+                    ((option, option) for option in options),
                     prompt=f'选择{field.title}',
                     id=field_id,
                     classes=classes,
@@ -807,6 +703,7 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
                 )
             case 2:
                 return Input(
+                    self._display_value(value),
                     placeholder='0–10',
                     type='integer',
                     id=field_id,
@@ -815,26 +712,29 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
                     compact=True,
                 )
             case 1:
-                return Input(id=field_id, classes=classes, compact=True)
+                return Input(self._display_value(value), id=field_id, classes=classes, compact=True)
             case _:
                 return Static('')
 
     def _updated_at_control(self) -> Horizontal:
         value = (
             ''
-            if self._draft.mod_updated_at is None
-            else self._draft.mod_updated_at.date().isoformat()
+            if self._record.mod_updated_at is None
+            else self._record.mod_updated_at.date().isoformat()
         )
         return Horizontal(
-            Input(value=value, placeholder='YYYY-MM-DD', id='draft-updated-at', compact=True),
+            Input(value=value, placeholder='YYYY-MM-DD', id='record-updated-at', compact=True),
             Button(
-                '选择日期', id='draft-updated-at-picker', classes='draft-date-picker', compact=True
+                '选择日期',
+                id='record-updated-at-picker',
+                classes='record-date-picker',
+                compact=True,
             ),
-            classes='draft-date-control',
+            classes='record-date-control',
         )
 
-    def _table_value(self, title: str) -> int | bool | str | None:
-        for values in self._draft.table_values.values():
+    def _table_value(self, title: str) -> CellValue | None:
+        for values in self._record.record_values.values():
             if title in values:
                 return values[title]
         return None
@@ -845,11 +745,11 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
 
     @on(Button.Pressed)
     def confirm(self, event: Button.Pressed) -> None:
-        """Return the draft only after the user explicitly confirms it."""
-        if event.button.id == 'draft-confirm-cancel':
+        """Return the record only after the user explicitly confirms it."""
+        if event.button.id == 'record-confirm-cancel':
             self.dismiss(None)
             return
-        if event.button.id == 'draft-confirm-save':
+        if event.button.id == 'record-confirm-save':
             manual_values = self._manual_values()
             if manual_values is None:
                 return
@@ -858,13 +758,13 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
             except ValueError:
                 self.notify('更新时间请使用 YYYY-MM-DD 格式。', severity='warning')
                 return
-            table_values = {
-                table: dict(values) for table, values in self._draft.table_values.items()
+            record_values = {
+                table: dict(values) for table, values in self._record.record_values.items()
             }
-            table_values.setdefault('主表', {}).update(manual_values)
+            record_values.setdefault('主表', {}).update(manual_values)
             self.dismiss(
-                self._draft.model_copy(
-                    update={'mod_updated_at': updated_at, 'table_values': table_values}
+                self._record.model_copy(
+                    update={'mod_updated_at': updated_at, 'record_values': record_values}
                 )
             )
 
@@ -893,14 +793,14 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
             self.query_one(f'#{field_id}', Input).value = value
 
     def _updated_at(self) -> datetime | None:
-        value = self.query_one('#draft-updated-at', Input).value.strip()
+        value = self.query_one('#record-updated-at', Input).value.strip()
         if not value:
             return None
         return datetime.combine(date.fromisoformat(value), time.min, tzinfo=UTC)
 
-    def _manual_field_id(self, field: ManualDraftField) -> str:
+    def _manual_field_id(self, field: ManualRecordField) -> str:
         """Return a DOM-safe ID for a selected inspected field."""
-        return f'draft-manual-{self._manual_fields.index(field)}'
+        return f'record-manual-{self._manual_fields.index(field)}'
 
     def _manual_values(self) -> dict[str, int | str] | None:
         """Validate optional inputs and return only fields the user filled in."""
@@ -941,63 +841,29 @@ class ConfirmDraftScreen(ModalScreen[RecordDraft | None]):
         return values
 
 
-class DraftSubmitModeScreen(ModalScreen[bool | None]):
-    """Ask whether a saved local draft should add or update a table record."""
-
-    CSS = """
-    DraftSubmitModeScreen { align: center middle; }
-    #draft-submit-mode { width: 58; height: auto; border: tall $primary; padding: 1 2; background: $surface; }
-    #draft-submit-actions { height: auto; align: center middle; padding-top: 1; }
-    #draft-submit-actions Button { margin: 0 1; }
-    """
+class RecordSyncModeScreen(ModalScreen[bool | None]):
+    """Ask whether a saved local record should add or update a table record."""
 
     def compose(self) -> ComposeResult:
-        with Vertical(id='draft-submit-mode'):
-            yield Static('草稿已保存。是否同步到腾讯表格？')
+        with Vertical(id='record-sync-mode'):
+            yield Static('本地记录已保存。是否同步到腾讯表格？')
             yield Static('更新会按 Mod 元数据名和地图名查找唯一记录；不唯一时会拒绝写入。')
-            with Horizontal(id='draft-submit-actions'):
-                yield Button('仅保存草稿', id='draft-submit-cancel')
-                yield Button('新增记录', id='draft-submit-add')
-                yield Button('更新匹配记录', id='draft-submit-update', variant='primary')
+            with Horizontal(id='record-sync-actions'):
+                yield Button('仅保存本地记录', id='record-sync-cancel')
+                yield Button('新增表格记录', id='record-sync-add')
+                yield Button('更新匹配记录', id='record-sync-update', variant='primary')
 
     @on(Button.Pressed)
     def choose_mode(self, event: Button.Pressed) -> None:
         if event.button.id is None:
             return
-        choice = {'draft-submit-add': False, 'draft-submit-update': True}.get(event.button.id)
+        choice = {'record-sync-add': False, 'record-sync-update': True}.get(event.button.id)
         self.dismiss(choice)
 
 
 class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
     """Let the player select author entries from raw GameBanana Credits."""
 
-    CSS = """
-    AuthorSelectionScreen {
-        align: center middle;
-    }
-
-    #author-select {
-        width: 70%;
-        height: 80%;
-        border: round $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #author-select-list {
-        height: 1fr;
-    }
-
-    #author-select-actions {
-        height: auto;
-        align: right middle;
-        padding-top: 1;
-    }
-
-    #author-select-actions Button {
-        margin-left: 1;
-    }
-    """
     BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
 
     def __init__(
@@ -1018,7 +884,7 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
                     yield Checkbox(
                         Text(label),
                         value=name in self._selected_authors,
-                        id=f'draft-author-{index}',
+                        id=f'record-author-{index}',
                         compact=True,
                     )
             with Horizontal(id='author-select-actions'):
@@ -1035,7 +901,7 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
             dict.fromkeys(
                 name
                 for index, (name, _, _) in enumerate(self._choices)
-                if self.query_one(f'#draft-author-{index}', Checkbox).value
+                if self.query_one(f'#record-author-{index}', Checkbox).value
             )
         )
         self.dismiss(authors)
@@ -1044,26 +910,6 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
 class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
     """Select one or more arbitrary author-name spans from Dialog text."""
 
-    CSS = """
-    DialogAuthorSelectionScreen { align: center middle; }
-    #dialog-author-select { width: 70%; height: 80%; border: round $primary; padding: 1 2; background: $surface; }
-    #dialog-author-text, #dialog-author-text:focus {
-        height: 3;
-        border: round $primary;
-    }
-    #dialog-author-list {
-        height: 1fr;
-        min-height: 3;
-        border: round $primary;
-        padding: 0 1;
-        overflow-y: auto;
-    }
-    .dialog-author-row { height: 1; }
-    .dialog-author-row Input { width: 1fr; height: 1; }
-    .dialog-author-row Button { width: auto; margin-left: 1; }
-    #dialog-author-actions { height: 4; min-height: 4; align: right middle; padding-top: 1; }
-    #dialog-author-actions Button { margin-left: 1; }
-    """
     BINDINGS: ClassVar = [
         ('ctrl+enter', 'add_author', '添加选区'),
         ('escape', 'dismiss', '取消'),
@@ -1143,7 +989,7 @@ class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
 class ModBrowserApp(RefreshableCssApp[None]):
     """Browse a fixed scan result through keyboard-friendly panes."""
 
-    CSS_PATH = 'styles/browse.tcss'
+    CSS_PATH = '../styles/mods_browser.tcss'
     TITLE = 'Pist · 已启用 Mod'
     BINDINGS: ClassVar = [
         ('q', 'quit', '退出'),
@@ -1183,8 +1029,8 @@ class ModBrowserApp(RefreshableCssApp[None]):
         self._gamebanana_client = gamebanana_client
         self._sheet_client = sheet_client
         self._sheet_source = sheet_source
-        self._manual_draft_fields = (
-            () if inspection_report is None else manual_draft_fields(inspection_report)
+        self._manual_record_fields = (
+            () if inspection_report is None else manual_record_fields(inspection_report)
         )
         self._mods = report.mods
         self._mods_by_name = {mod.metadata_name.casefold(): mod for mod in report.mods}
@@ -1252,14 +1098,12 @@ class ModBrowserApp(RefreshableCssApp[None]):
             self._collab_map_orders[key] = ordered
         return list(ordered)
 
-    def _map_widgets(self, mod: InstalledMod) -> list[Static | Collapsible | ListView]:
+    def _map_widgets(self, mod: InstalledMod) -> list[Widget]:
         if not mod.campaigns:
             if not mod.maps:
                 return [Static(format_mod_maps(mod, self._dialog_languages, self._save_slot))]
             return [Static(Text('地图\n', style='bold underline')), self._map_list(mod.maps)]
-        widgets: list[Static | Collapsible | ListView] = [
-            Static(Text('地图\n', style='bold underline'))
-        ]
+        widgets: list[Widget] = [Static(Text('地图\n', style='bold underline'))]
         if maps := _ungrouped_maps(mod):
             widgets.append(self._map_list(maps))
         if lobbies := _collab_lobby_maps(mod):
@@ -1316,11 +1160,15 @@ class ModBrowserApp(RefreshableCssApp[None]):
             else self._mod_label(mod)
         )
         node = parent.add(label, data=mod, allow_expand=has_enabled_dependency)
-        names = ancestry | {mod.metadata_name.casefold()}
-        for dependency in mod.dependencies:
-            self._add_dependency_node(node, dependency, is_optional=False, ancestry=names)
-        for dependency in mod.optional_dependencies:
-            self._add_dependency_node(node, dependency, is_optional=True, ancestry=names)
+        name = mod.metadata_name.casefold()
+        ancestry.add(name)
+        try:
+            for dependency in mod.dependencies:
+                self._add_dependency_node(node, dependency, is_optional=False, ancestry=ancestry)
+            for dependency in mod.optional_dependencies:
+                self._add_dependency_node(node, dependency, is_optional=True, ancestry=ancestry)
+        finally:
+            ancestry.remove(name)
 
     def _add_dependency_node(
         self,
@@ -1388,30 +1236,32 @@ class ModBrowserApp(RefreshableCssApp[None]):
                 map_list.index = ordered_maps.index(highlighted_map)
 
     async def on_map_item_clicked(self, event: MapItem.Clicked) -> None:
-        """Open a draft with right-click or a route preview with double-click."""
+        """Open a record with right-click or a route preview with double-click."""
         if self._selected_mod is None:
             return
-        if event.button == 3:
-            await self._preview_draft(event.item.map_info)
-        elif event.button == 1 and event.chain == 2:
+        if event.button == RIGHT_MOUSE_BUTTON:
+            await self._preview_record(event.item.map_info)
+        elif event.button == LEFT_MOUSE_BUTTON and event.chain == DOUBLE_CLICK_COUNT:
             self._start_map_preview(event.item.map_info)
 
-    async def _preview_draft(self, map_info: LocalMap) -> None:
-        """Preview a record draft for one map after an explicit mouse gesture."""
+    async def _preview_record(self, map_info: LocalMap) -> None:
+        """Edit a local record for one map after an explicit mouse gesture."""
         if self._selected_mod is None:
             return
-        table_values = self._draft_table_values(map_info)
-        if table_values is None:
+        assert self._save_slot is not None
+        record_data = self._record_values(map_info)
+        if record_data is None:
             return
-        draft = create_record_draft(
+        record_values, field_hints = record_data
+        record = create_map_record(
             self._selected_mod,
             map_info,
             save_slot=self._save_slot,
             languages=self._dialog_languages,
-            table_values=table_values,
+            record_values=record_values,
         )
-        if draft.time_played is None:
-            self.notify('当前存档没有该地图的有效记录，不能保存草稿。', severity='warning')
+        if record.time_played is None:
+            self.notify('当前存档没有该地图的有效记录，不能保存本地记录。', severity='warning')
             return
         gamebanana = None
         if self._gamebanana_client is not None:
@@ -1426,59 +1276,58 @@ class ModBrowserApp(RefreshableCssApp[None]):
                         '未找到与 Everest 元数据名精确匹配的 GameBanana 提交。', severity='warning'
                     )
         author_text = localized_name(map_info.author_texts, self._dialog_languages)
-        author_source: GameBananaSubmission | str | None = gamebanana
+        author_source: AuthorSource = gamebanana
         if (
             self._selected_mod.collab_id
             and is_collab_submission_map(map_info)
             and author_text is not None
         ):
             author_source = author_text
-        draft = create_record_draft(
+        record = create_map_record(
             self._selected_mod,
             map_info,
             save_slot=self._save_slot,
             gamebanana=gamebanana,
             languages=self._dialog_languages,
-            table_values=table_values,
+            record_values=record_values,
         )
-        existing_draft_id = self._local_data.existing_draft_id(draft)
-        if existing_draft_id is not None:
-            draft = merge_saved_draft(draft, self._local_data.load_draft(existing_draft_id))
+        existing_record_id = self._local_data.existing_record_id(record)
+        if existing_record_id is not None:
+            record = merge_saved_record(record, self._local_data.load_record(existing_record_id))
         self.push_screen(
-            ConfirmDraftScreen(
-                draft,
-                manual_fields=self._manual_draft_fields,
-                reference=self._draft_reference(map_info, gamebanana),
+            RecordEditorScreen(
+                record,
+                manual_fields=self._manual_record_fields,
+                reference=self._record_reference(map_info, gamebanana),
                 author_source=author_source,
                 collab_tags=self._collab_tags(map_info),
+                field_hints=field_hints,
                 edit_route=lambda: self._start_map_preview(map_info),
             ),
-            self._save_record_draft,
+            self._save_record,
         )
 
-    def _draft_reference(
+    def _record_reference(
         self, map_info: LocalMap, gamebanana: GameBananaSubmission | None
     ) -> tuple[str, str] | None:
-        """Return the human-maintained reference text relevant to one draft."""
+        """Return the human-maintained reference text relevant to one record."""
         if gamebanana is None:
             return None
         description = _plain_html(gamebanana.description)
         return ('简介', description) if description else None
 
     def _collab_tags(self, map_info: LocalMap) -> str | None:
-        """Return localized collab tags for their dedicated draft-grid field."""
+        """Return localized collab tags for their dedicated record-grid field."""
         tags = localized_name(map_info.collab_credit_tags, self._dialog_languages)
         return tags if tags is not None and tags.strip() else None
 
-    def _draft_table_values(
-        self, map_info: LocalMap
-    ) -> dict[str, dict[str, int | bool | str]] | None:
-        """Read corrected entity values and a saved main-room count for one draft."""
+    def _record_values(self, map_info: LocalMap) -> tuple[RecordValues, dict[str, str]] | None:
+        """Read corrected entity values, field hints, and a saved main-room count."""
         if self._selected_mod is None:
             return None
         try:
             route = self._local_data.load_route(map_info.file_path)
-            table_values = load_map_entity_table_values_from_path(
+            stats = load_map_entity_stats_from_path(
                 Path(self._selected_mod.path),
                 map_info.file_path,
                 excluded_markers=frozenset() if route is None else route.excluded_markers,
@@ -1486,50 +1335,51 @@ class ModBrowserApp(RefreshableCssApp[None]):
         except ValueError as error:
             self.notify(f'无法读取地图实体统计：{error}', severity='warning')
             return None
+        record_values = stats.record_values
         if route is not None:
-            table_values.setdefault('主表', {})['主房间数'] = route.room_count
-        return table_values
+            record_values.setdefault('主表', {})['主房间数'] = route.room_count
+        return record_values, _select_conflict_hints(stats.select_conflicts)
 
-    def _save_record_draft(self, draft: RecordDraft | None) -> None:
-        if draft is None:
+    def _save_record(self, record: MapRecord | None) -> None:
+        if record is None:
             return
-        existing_draft_id = self._local_data.existing_draft_id(draft)
-        draft_id = self._local_data.save_draft(draft)
-        action = '已更新' if existing_draft_id is not None else '已保存'
-        self.notify(f'{action}本地草稿：{draft_id}')
+        existing_record_id = self._local_data.existing_record_id(record)
+        record_id = self._local_data.save_record(record)
+        action = '已更新' if existing_record_id is not None else '已保存'
+        self.notify(f'{action}本地记录：{record_id}')
         if self._sheet_client is not None and self._sheet_source is not None:
             self.push_screen(
-                DraftSubmitModeScreen(),
-                lambda update: self._choose_draft_submission(draft, update),
+                RecordSyncModeScreen(),
+                lambda update: self._choose_record_sync(record, update),
             )
 
-    def _choose_draft_submission(self, draft: RecordDraft, update: bool | None) -> None:
+    def _choose_record_sync(self, record: MapRecord, update: bool | None) -> None:
         """Start an explicit table write after the user selects its safe mode."""
         if update is not None:
-            self.run_worker(self._submit_draft(draft, update), exclusive=False)
+            self.run_worker(self._sync_record(record, update), exclusive=False)
 
-    async def _submit_draft(self, draft: RecordDraft, update: bool) -> None:
-        """Synchronize a saved draft to the configured Smart Sheet."""
+    async def _sync_record(self, record: MapRecord, update: bool) -> None:
+        """Synchronize a saved record to the configured Smart Sheet."""
         assert self._sheet_client is not None
         assert self._sheet_source is not None
         try:
-            record_id = await self._sheet_client.submit_draft(
-                extract_file_id(self._sheet_source), draft, update=update
+            remote_record_id = await self._sheet_client.sync_record(
+                extract_file_id(self._sheet_source), record, update=update
             )
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             self.notify(f'提交表格失败：{error}', severity='error')
             return
         action = '更新' if update else '新增'
-        self.notify(f'已{action}表格记录：{record_id}')
+        self.notify(f'已{action}表格记录：{remote_record_id}')
 
     async def action_preview_map(self) -> None:
         """Open map preview for the currently highlighted map item."""
         if not isinstance(self.focused, ListView):
-            self.notify('请先在地图列表中高亮一张地图。', severity='warning')
+            self.notify('请先在地图列表中选中一张地图。', severity='warning')
             return
         item = self.focused.highlighted_child
         if not isinstance(item, MapItem) or self._selected_mod is None:
-            self.notify('请先在地图列表中高亮一张地图。', severity='warning')
+            self.notify('请先在地图列表中选中一张地图。', severity='warning')
             return
         self._start_map_preview(item.map_info)
 

@@ -6,36 +6,23 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar, Literal
 
-from rich.style import Style
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Select, Static, Tree
+from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Select, Static
 from textual.widgets._select import SelectCurrent, SelectOverlay
-from textual.widgets._tree import NodeID, TreeNode
 
-from pist.game.binmap import AttrValue
-from pist.game.dialog import dialog_key_for_map_file
-from pist.game.entities import (
-    EntityConfigStore,
-    EntityRuleLayer,
-    EntityRules,
-    EntityStat,
-    EntityTableField,
-    entity_rules_toml,
-)
-from pist.game.entity_audit import (
-    _UNKNOWN,
+from pist.entities.audit import (
     META_ATTRIBUTE_PREFIX,
+    UNKNOWN,
     AttributeAuditStatus,
     AttributeAuditSummary,
-    AuditSource,
     DefaultValue,
     EntityAuditDetail,
     EntityAuditStatus,
@@ -44,16 +31,26 @@ from pist.game.entity_audit import (
     EntityVariant,
     ObservationQuestion,
     ObservationStatus,
-    RawEntityOccurrence,
     RuleCandidate,
     occurrences_for_variants,
 )
-from pist.game.routes import MapLayout, MapMarker, load_map_layout_from_path
-from pist.game.saves import SaveReader
+from pist.entities.rules import (
+    EntityConfigStore,
+    EntityRuleLayer,
+    EntityRules,
+    EntityStat,
+    EntityTableField,
+    entity_rules_toml,
+)
+from pist.game.binmap import AttrValue
+from pist.game.saves import MapProgress, SaveReader
 from pist.map_preview import MapPreview
-from pist.models import LocalMap
 
-from .tui import RefreshableCssApp
+from ..tui import RefreshableCssApp
+from .kinds import KindTree, add_kind_nodes, kind_button_label
+from .occurrences import MapOccurrences, OccurrenceScreen
+from .occurrences import load_occurrence_map as _load_occurrence_map
+from .occurrences import occurrence_markers as _occurrence_markers
 
 ENTITY_FILTER_ID = 'audit-entity-filter'
 ENTITY_LIST_ID = 'audit-entity-list'
@@ -81,8 +78,6 @@ SAVE_OBSERVATION_ID = 'audit-save-observation'
 VIEW_OCCURRENCES_ID = 'audit-view-occurrences'
 VIEW_GROUP_OCCURRENCES_ID = 'audit-view-group-occurrences'
 REFRESH_AUDIT_RULES_ID = 'audit-refresh-audit-rules'
-OCCURRENCE_MAP_LIST_ID = 'occurrence-map-list'
-OCCURRENCE_ROOM_LIST_ID = 'occurrence-room-list'
 KIND_TREE_ID = 'audit-kind-tree'
 NEW_KIND_NAME_ID = 'audit-new-kind-name'
 NEW_KIND_LABEL_ID = 'audit-new-kind-label'
@@ -94,9 +89,71 @@ NEW_KIND_FIELD_ID = 'audit-new-kind-field'
 NEW_KIND_SELECT_VALUE_ID = 'audit-new-kind-select-value'
 SAVE_NEW_KIND_ID = 'audit-save-new-kind'
 
-type NewKind = tuple[
-    str, str, str | None, str | None, EntityStat, EntityTableField | None, str | None
-]
+ENTITY_STATUS_LABELS: Mapping[EntityAuditStatus, str] = MappingProxyType(
+    {
+        EntityAuditStatus.UNKNOWN: '未审查',
+        EntityAuditStatus.ENTITY_CANDIDATE: '实体候选',
+        EntityAuditStatus.IGNORED: '已排除',
+    }
+)
+ATTRIBUTE_STATUS_LABELS: Mapping[AttributeAuditStatus, str] = MappingProxyType(
+    {
+        AttributeAuditStatus.UNKNOWN: '未审查',
+        AttributeAuditStatus.AFFECTS_KIND: '影响分类',
+        AttributeAuditStatus.DOES_NOT_AFFECT_KIND: '不影响分类',
+        AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND: '暂定不影响分类',
+        AttributeAuditStatus.UNSURE_DEFAULT: '默认值待确认',
+        AttributeAuditStatus.AFFECTS_BEHAVIOR: '影响行为',
+    }
+)
+OBSERVATION_QUESTION_LABELS: Mapping[ObservationQuestion, str] = MappingProxyType(
+    {
+        ObservationQuestion.ENTITY_CLASSIFICATION: '实体分类',
+        ObservationQuestion.PAUSE_MENU_COUNT: '暂停菜单计数',
+        ObservationQuestion.DEBUG_MAP_COLOR: 'Debug Map 颜色',
+        ObservationQuestion.TOTAL_STRAWBERRY_COUNT: '草莓总数',
+    }
+)
+OBSERVATION_STATUS_LABELS: Mapping[ObservationStatus, str] = MappingProxyType(
+    {
+        ObservationStatus.UNKNOWN: '未确认',
+        ObservationStatus.CONFIRMED: '已确认',
+        ObservationStatus.NOT_COLLECTIBLE: '排除',
+        ObservationStatus.CONFLICT: '有冲突',
+    }
+)
+ENTITY_STATUS_STYLES: Mapping[EntityAuditStatus, str] = MappingProxyType(
+    {
+        EntityAuditStatus.UNKNOWN: 'yellow',
+        EntityAuditStatus.IGNORED: 'dim',
+        EntityAuditStatus.ENTITY_CANDIDATE: 'cyan',
+    }
+)
+ATTRIBUTE_STATUS_STYLES: Mapping[AttributeAuditStatus, str] = MappingProxyType(
+    {
+        AttributeAuditStatus.UNKNOWN: 'yellow',
+        AttributeAuditStatus.AFFECTS_KIND: 'cyan',
+        AttributeAuditStatus.DOES_NOT_AFFECT_KIND: 'green',
+        AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND: 'dark_orange',
+        AttributeAuditStatus.UNSURE_DEFAULT: 'magenta',
+        AttributeAuditStatus.AFFECTS_BEHAVIOR: 'dark_orange',
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NewKind:
+    """One validated category edit returned by the category-editor screen."""
+
+    name: str
+    label: str
+    parent: str | None
+    sprite: str | None
+    stat: EntityStat
+    table_field: EntityTableField | None
+    select_value: str | None
+
+
 type SaveKind = Callable[[NewKind, str | None], EntityRules | None]
 type DeleteKind = Callable[[str], EntityRules | None]
 
@@ -144,8 +201,8 @@ class EntityAuditItem(ListItem):
     def _label(self) -> Text:
         text = Text(self.summary.entity_name, style='bold')
         text.append(
-            f' [{_entity_status_text(self.summary.status)}]',
-            style=_entity_status_style(self.summary.status),
+            f' [{ENTITY_STATUS_LABELS[self.summary.status]}]',
+            style=ENTITY_STATUS_STYLES[self.summary.status],
         )
         text.append(
             f'\n{self.summary.occurrence_count} instances · {self.summary.variant_count} variants',
@@ -168,7 +225,7 @@ class EntityAuditGroupItem(ListItem):
         self.query_one(Static).update(self._label())
 
     def _label(self) -> Text:
-        return Text(f'{_entity_status_label(self.status)}（{self.count}）', style='bold')
+        return Text(f'{ENTITY_STATUS_LABELS[self.status]}（{self.count}）', style='bold')
 
 
 class AttributeAuditItem(ListItem):
@@ -181,106 +238,17 @@ class AttributeAuditItem(ListItem):
     def _label(self) -> Text:
         text = Text(_audit_attribute_name(self.summary.name), style='bold')
         text.append(
-            f' [{_attribute_status_text(self.summary.status)}]',
-            style=_attribute_status_style(self.summary.status),
+            f' [{ATTRIBUTE_STATUS_LABELS[self.summary.status]}]',
+            style=ATTRIBUTE_STATUS_STYLES[self.summary.status],
         )
         text.append('\n')
         text.append(_value_counts_text(self.summary), style='dim')
-        if self.summary.default_value is not _UNKNOWN:
+        if self.summary.default_value is not UNKNOWN:
             text.append(
                 f'\n默认值: {json.dumps(self.summary.default_value, ensure_ascii=False)}',
                 style='cyan',
             )
         return text
-
-
-@dataclass(frozen=True, slots=True)
-class MapOccurrences:
-    """All selected-entity occurrences in one map."""
-
-    source: AuditSource
-    rooms: tuple[tuple[str, int], ...]
-    occurrences: tuple[RawEntityOccurrence, ...]
-
-    @property
-    def count(self) -> int:
-        return sum(count for _, count in self.rooms)
-
-
-class MapOccurrenceItem(ListItem):
-    """One map row in the occurrence popup."""
-
-    class PreviewRequested(Message):
-        """Request a read-only browser preview for this map row."""
-
-        def __init__(self, item: MapOccurrenceItem) -> None:
-            self.item = item
-            super().__init__()
-
-    def __init__(self, data: MapOccurrences) -> None:
-        self.data = data
-        text = Text(data.source.map_name, style='bold')
-        if data.source.mod_name is not None:
-            text.append(f' [{data.source.mod_name}]', style='dark_orange')
-        text.append(f'\n{data.count} instances · {data.source.map_file}', style='dim')
-        super().__init__(Static(text))
-
-    def _on_click(self, _: events.Click) -> None:
-        super()._on_click(_)
-        if _.chain == 2:
-            self.post_message(self.PreviewRequested(self))
-
-
-class OccurrenceScreen(ModalScreen[None]):
-    """Two-level table of maps and rooms containing the selected entity."""
-
-    BINDINGS: ClassVar = [('escape', 'dismiss', '关闭')]
-
-    def __init__(
-        self,
-        entity_name: str,
-        occurrences: tuple[RawEntityOccurrence, ...],
-        map_progress: Callable[[str], int],
-        preview: Callable[[MapOccurrences], None] | None = None,
-    ) -> None:
-        super().__init__()
-        self._entity_name = entity_name
-        self._maps = _map_occurrences(occurrences, map_progress)
-        self._preview = preview
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id='occurrence-dialog'):
-            yield Static(
-                f'{self._entity_name} 的出现位置（双击地图预览）',
-                classes='audit-section-title',
-            )
-            with Horizontal():
-                yield ListView(
-                    *(MapOccurrenceItem(data) for data in self._maps),
-                    id=OCCURRENCE_MAP_LIST_ID,
-                )
-                yield ListView(id=OCCURRENCE_ROOM_LIST_ID)
-            yield Button('关闭', id='occurrence-close')
-
-    @on(ListView.Selected, f'#{OCCURRENCE_MAP_LIST_ID}')
-    def select_map(self, event: ListView.Selected) -> None:
-        if not isinstance(event.item, MapOccurrenceItem):
-            return
-        rooms = self.query_one(f'#{OCCURRENCE_ROOM_LIST_ID}', ListView)
-        rooms.clear()
-        rooms.extend(
-            ListItem(Static(f'{room or "未命名房间"} · {count} instances'))
-            for room, count in event.item.data.rooms
-        )
-
-    @on(MapOccurrenceItem.PreviewRequested)
-    def preview_map(self, event: MapOccurrenceItem.PreviewRequested) -> None:
-        if self._preview is not None:
-            self._preview(event.item.data)
-
-    @on(Button.Pressed, '#occurrence-close')
-    def close(self) -> None:
-        self.dismiss()
 
 
 class AuditRulesRefreshScreen(ModalScreen[bool]):
@@ -347,72 +315,6 @@ class KindDeleteScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
-class KindTree(Tree[str]):
-    """A kind tree whose context click creates a root or child kind."""
-
-    ICON_NODE = '▸ '
-    ICON_NODE_EXPANDED = '▾ '
-    ICON_LEAF = '∗ '
-
-    class ContextRequested(Message):
-        """Request the context menu for a kind node, if any."""
-
-        def __init__(self, parent: str | None) -> None:
-            self.kind = parent
-            super().__init__()
-
-    class KindConfirmed(Message):
-        """Request choosing a kind after a double click."""
-
-        def __init__(self, kind: str) -> None:
-            self.kind = kind
-            super().__init__()
-
-    def render_label(self, node: TreeNode[str], base_style: Style, style: Style) -> Text:
-        """Give leaf kinds the same compact marker as the Mods dependency tree."""
-        text = super().render_label(node, base_style, style)
-        return Text.assemble((self.ICON_LEAF, base_style), text) if not node.allow_expand else text
-
-    def _context_node_for(self, event: events.MouseEvent) -> TreeNode[str] | None:
-        style = event.style
-        node_id = None if style is None else style.meta.get('node')
-        if not isinstance(node_id, int):
-            return None
-        return self.get_node_by_id(NodeID(node_id))
-
-    def _click_node_for(self, event: events.Click) -> TreeNode[str] | None:
-        style = event.style
-        line = None if style is None else style.meta.get('line')
-        return self.get_node_at_line(line) if isinstance(line, int) else None
-
-    async def _on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button == 3:
-            node = self._context_node_for(event)
-            parent = None if node is None else node.data
-            self.post_message(self.ContextRequested(parent))
-            event.prevent_default()
-            event.stop()
-            return
-        await super()._on_mouse_down(event)
-
-    async def _on_click(self, event: events.Click) -> None:
-        if event.button == 3:
-            event.prevent_default()
-            event.stop()
-            return
-        if event.button == 1:
-            node = self._click_node_for(event)
-            if node is not None:
-                if event.chain >= 2 and node.data is not None:
-                    self.post_message(self.KindConfirmed(node.data))
-                else:
-                    self._toggle_node(node)
-                event.prevent_default()
-                event.stop()
-                return
-        await super()._on_click(event)
-
-
 class KindEditorScreen(ModalScreen[NewKind | None]):
     """Create or edit one local collectible kind without editing TOML by hand."""
 
@@ -458,7 +360,7 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
                 id=NEW_KIND_SPRITE_ID,
             )
             yield Button(
-                _kind_button_label(self._rules, self._parent_kind, prompt='父类别：无'),
+                kind_button_label(self._rules, self._parent_kind, prompt='父类别：无'),
                 id=NEW_KIND_PARENT_ID,
             )
             stat = EntityStat.NONE if self._definition is None else self._definition.stat
@@ -508,7 +410,7 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
 
     def _set_parent(self, parent: str | None) -> None:
         self._parent_kind = parent
-        self.query_one(f'#{NEW_KIND_PARENT_ID}', Button).label = _kind_button_label(
+        self.query_one(f'#{NEW_KIND_PARENT_ID}', Button).label = kind_button_label(
             self._rules, parent, prompt='父类别：无'
         )
         self._update_select_value_disabled()
@@ -557,7 +459,17 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
                 return
             table_field = EntityTableField(table=table, field=field)
         select_value = self.query_one(f'#{NEW_KIND_SELECT_VALUE_ID}', Input).value.strip() or None
-        self.dismiss((name, label, self._parent_kind, sprite, stat, table_field, select_value))
+        self.dismiss(
+            NewKind(
+                name=name,
+                label=label,
+                parent=self._parent_kind,
+                sprite=sprite,
+                stat=stat,
+                table_field=table_field,
+                select_value=select_value,
+            )
+        )
 
 
 class KindContextScreen(ModalScreen[Literal['add', 'edit', 'delete'] | None]):
@@ -578,7 +490,7 @@ class KindContextScreen(ModalScreen[Literal['add', 'edit', 'delete'] | None]):
                 yield Button('新增根类别', id='kind-context-add', variant='primary')
             else:
                 yield Static(
-                    _kind_button_label(self._rules, self._kind, prompt='类别'),
+                    kind_button_label(self._rules, self._kind, prompt='类别'),
                     classes='audit-section-title',
                 )
                 yield Button('编辑该类别', id='kind-context-edit')
@@ -634,7 +546,7 @@ class KindPickerScreen(ModalScreen[str | None]):
             tree = KindTree('类别', id=KIND_TREE_ID)
             tree.show_root = False
             tree.auto_expand = False
-            _add_kind_nodes(tree.root, self._rules)
+            add_kind_nodes(tree.root, self._rules)
             tree.root.expand_all()
             yield tree
             if self._allow_blank:
@@ -709,7 +621,7 @@ class KindPickerScreen(ModalScreen[str | None]):
         if rules is None:
             return
         self._rules = rules
-        self.dismiss(result[0])
+        self.dismiss(result.name)
 
     @on(Button.Pressed, '#kind-picker-clear')
     def clear_kind(self) -> None:
@@ -732,7 +644,7 @@ class VariantAuditItem(ListItem):
         text.append(f'\n{self.variant.occurrence_count} instances', style='dim')
         if self.variant.observations:
             states = ', '.join(
-                _observation_status_text(observation.status)
+                OBSERVATION_STATUS_LABELS[observation.status]
                 for observation in self.variant.observations
             )
             text.append(f' · {states}', style='cyan')
@@ -772,7 +684,7 @@ class ClassificationGroup:
 class EntityAuditApp(RefreshableCssApp[None]):
     """Review unknown entity IDs before proposing TOML collectible rules."""
 
-    CSS_PATH = 'styles/entity_audit.tcss'
+    CSS_PATH = '../styles/entities_audit.tcss'
     TITLE = 'Pist · 实体规则审计'
     BINDINGS: ClassVar = [
         ('escape', 'quit', '退出'),
@@ -809,74 +721,77 @@ class EntityAuditApp(RefreshableCssApp[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(id='audit-toolbar'):
-            yield Input(placeholder='筛选实体 ID 或审查状态', id=ENTITY_FILTER_ID)
-            yield Button('从审计刷新规则', id=REFRESH_AUDIT_RULES_ID, variant='primary')
-        with Horizontal():
-            yield ListView(*self._entity_items(), id=ENTITY_LIST_ID)
-            with VerticalScroll(id='audit-right'):
-                yield Static('请从左侧选择一个实体。', id='audit-detail-content')
-                yield Button('查看出现位置', id=VIEW_OCCURRENCES_ID, disabled=True)
-                yield Static('实体审查', classes='audit-section-title')
-                yield AuditSelect(_entity_status_options(), id=ENTITY_STATUS_ID, disabled=True)
-                yield Input(placeholder='证据来源（可选）', id=ENTITY_EVIDENCE_ID, disabled=True)
-                yield Input(placeholder='原因或备注', id=ENTITY_NOTE_ID, disabled=True)
-                yield Button('保存', id=SAVE_ENTITY_ID, disabled=True, variant='primary')
-                yield Button(
-                    '确认整实体类别（不受属性影响时使用）',
-                    id=ENTITY_KIND_ID,
-                    disabled=True,
-                )
-                with Horizontal(id='audit-entity-kind-actions'):
-                    yield Button(
-                        '确认',
-                        id=CONFIRM_ENTITY_KIND_ID,
-                        disabled=True,
-                        variant='primary',
-                    )
-                    yield Button('撤回', id=REVOKE_ENTITY_KIND_ID, disabled=True)
-                with Vertical(id='audit-attribute-review'):
-                    yield Static('属性审查', classes='audit-section-title')
-                    yield AuditSelect((), prompt='选择属性', id=ATTRIBUTE_SELECT_ID, disabled=True)
-                    yield AuditSelect(
-                        _attribute_status_options(), id=ATTRIBUTE_STATUS_ID, disabled=True
-                    )
-                    yield Input(
-                        placeholder='确认的默认值（JSON，例如 null 或 false；留空表示未确认）',
-                        id=ATTRIBUTE_DEFAULT_ID,
-                        disabled=True,
-                    )
-                    yield Input(
-                        placeholder='证据来源（可选）', id=ATTRIBUTE_EVIDENCE_ID, disabled=True
-                    )
-                    yield Input(placeholder='原因或备注', id=ATTRIBUTE_NOTE_ID, disabled=True)
-                    yield Button('保存', id=SAVE_ATTRIBUTE_ID, disabled=True, variant='primary')
-                    yield Static('分类确认', classes='audit-section-title')
-                    yield AuditSelect(
-                        (), prompt='选择分类属性组合', id=VARIANT_SELECT_ID, disabled=True
-                    )
-                    yield Button('查看该组合的地图', id=VIEW_GROUP_OCCURRENCES_ID, disabled=True)
-                    yield AuditSelect(
-                        _observation_question_options(),
-                        id=OBSERVATION_QUESTION_ID,
-                        disabled=True,
-                    )
-                    yield AuditSelect(
-                        _observation_status_options(),
-                        id=OBSERVATION_STATUS_ID,
-                        disabled=True,
-                    )
-                    yield Button(
-                        '确认的类别（已确认时必填）',
-                        id=OBSERVATION_KIND_ID,
-                        disabled=True,
-                    )
-                    yield Input(
-                        placeholder='证据来源（可选）', id=OBSERVATION_EVIDENCE_ID, disabled=True
-                    )
-                    yield Input(placeholder='观察备注', id=OBSERVATION_NOTE_ID, disabled=True)
-                    yield Button('保存', id=SAVE_OBSERVATION_ID, disabled=True, variant='primary')
+        yield self._toolbar()
+        yield Horizontal(
+            ListView(*self._entity_items(), id=ENTITY_LIST_ID),
+            self._detail_pane(),
+            id='audit-body',
+        )
         yield Footer()
+
+    @staticmethod
+    def _toolbar() -> Horizontal:
+        return Horizontal(
+            Input(placeholder='筛选实体 ID 或审查状态', id=ENTITY_FILTER_ID),
+            Button('从审计刷新规则', id=REFRESH_AUDIT_RULES_ID, variant='primary'),
+            id='audit-toolbar',
+        )
+
+    def _detail_pane(self) -> VerticalScroll:
+        return VerticalScroll(
+            Static('请从左侧选择一个实体。', id='audit-detail-content'),
+            Button('查看出现位置', id=VIEW_OCCURRENCES_ID, disabled=True),
+            self._entity_review(),
+            self._attribute_review(),
+            id='audit-right',
+        )
+
+    def _entity_review(self) -> Vertical:
+        return Vertical(
+            Static('实体审查', classes='audit-section-title'),
+            AuditSelect(_entity_status_options(), id=ENTITY_STATUS_ID, disabled=True),
+            Input(placeholder='证据来源（可选）', id=ENTITY_EVIDENCE_ID, disabled=True),
+            Input(placeholder='原因或备注', id=ENTITY_NOTE_ID, disabled=True),
+            Button('保存', id=SAVE_ENTITY_ID, disabled=True, variant='primary'),
+            Button('确认整实体类别（不受属性影响时使用）', id=ENTITY_KIND_ID, disabled=True),
+            Horizontal(
+                Button('确认', id=CONFIRM_ENTITY_KIND_ID, disabled=True, variant='primary'),
+                Button('撤回', id=REVOKE_ENTITY_KIND_ID, disabled=True),
+                id='audit-entity-kind-actions',
+            ),
+            id='audit-entity-review',
+        )
+
+    def _attribute_review(self) -> Vertical:
+        return Vertical(
+            Static('属性审查', classes='audit-section-title'),
+            AuditSelect((), prompt='选择属性', id=ATTRIBUTE_SELECT_ID, disabled=True),
+            AuditSelect(_attribute_status_options(), id=ATTRIBUTE_STATUS_ID, disabled=True),
+            Input(
+                placeholder='确认的默认值（JSON，例如 null 或 false；留空表示未确认）',
+                id=ATTRIBUTE_DEFAULT_ID,
+                disabled=True,
+            ),
+            Input(placeholder='证据来源（可选）', id=ATTRIBUTE_EVIDENCE_ID, disabled=True),
+            Input(placeholder='原因或备注', id=ATTRIBUTE_NOTE_ID, disabled=True),
+            Button('保存', id=SAVE_ATTRIBUTE_ID, disabled=True, variant='primary'),
+            self._classification_review(),
+            id='audit-attribute-review',
+        )
+
+    def _classification_review(self) -> Vertical:
+        return Vertical(
+            Static('分类确认', classes='audit-section-title'),
+            AuditSelect((), prompt='选择分类属性组合', id=VARIANT_SELECT_ID, disabled=True),
+            Button('查看该组合的地图', id=VIEW_GROUP_OCCURRENCES_ID, disabled=True),
+            AuditSelect(_observation_question_options(), id=OBSERVATION_QUESTION_ID, disabled=True),
+            AuditSelect(_observation_status_options(), id=OBSERVATION_STATUS_ID, disabled=True),
+            Button('确认的类别（已确认时必填）', id=OBSERVATION_KIND_ID, disabled=True),
+            Input(placeholder='证据来源（可选）', id=OBSERVATION_EVIDENCE_ID, disabled=True),
+            Input(placeholder='观察备注', id=OBSERVATION_NOTE_ID, disabled=True),
+            Button('保存', id=SAVE_OBSERVATION_ID, disabled=True, variant='primary'),
+            id='audit-classification-review',
+        )
 
     def on_mount(self) -> None:
         self.query_one(f'#{ENTITY_FILTER_ID}', Input).focus()
@@ -910,10 +825,10 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self._selected_group = None
         self._refresh_detail()
         self._update_entity_controls(self._selected_entity)
-        attributes = self.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select)
-        attributes.disabled = False
-        attributes.set_options(_attribute_options(self._selected_entity.attributes))
-        attributes.clear()
+        attribute_select = self.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select)
+        attribute_select.disabled = False
+        attribute_select.set_options(_attribute_options(self._selected_entity.attr_summaries))
+        attribute_select.clear()
         self._disable_attribute_controls()
         self._refresh_variants()
         self._disable_observation_controls()
@@ -925,7 +840,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
             return
         self._selected_attribute = next(
             attribute
-            for attribute in self._selected_entity.attributes
+            for attribute in self._selected_entity.attr_summaries
             if attribute.name == event.value
         )
         self._update_attribute_controls(self._selected_attribute)
@@ -1008,8 +923,8 @@ class EntityAuditApp(RefreshableCssApp[None]):
         """Keep the audit TUI responsive while a read-only browser preview is open."""
         self.run_worker(
             self._preview_occurrences(occurrences),
-            name='collectible-audit-map-preview',
-            group='collectible-audit-map-preview',
+            name='entity-audit-map-preview',
+            group='entity-audit-map-preview',
             exclusive=False,
         )
 
@@ -1076,7 +991,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         if kind is None:
             return
         self._kind_values[control_id] = kind
-        self.query_one(f'#{control_id}', Button).label = _kind_button_label(
+        self.query_one(f'#{control_id}', Button).label = kind_button_label(
             self._rules, kind, prompt='选择类别'
         )
 
@@ -1109,35 +1024,34 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self, result: NewKind, previous_name: str | None
     ) -> EntityRules | None:
         """Persist a kind created or edited from a classification picker."""
-        name, label, parent, sprite, stat, table_field, select_value = result
         try:
             rules = (
                 self._rules.with_kind(
-                    name,
-                    label,
-                    parent=parent,
-                    sprite=sprite,
-                    stat=stat,
-                    table_field=table_field,
-                    select_value=select_value,
+                    result.name,
+                    result.label,
+                    parent=result.parent,
+                    sprite=result.sprite,
+                    stat=result.stat,
+                    table_field=result.table_field,
+                    select_value=result.select_value,
                 )
                 if previous_name is None
                 else self._rules.with_renamed_kind(
                     previous_name,
-                    name,
-                    label,
-                    parent=parent,
-                    sprite=sprite,
-                    stat=stat,
-                    table_field=table_field,
-                    select_value=select_value,
+                    result.name,
+                    result.label,
+                    parent=result.parent,
+                    sprite=result.sprite,
+                    stat=result.stat,
+                    table_field=result.table_field,
+                    select_value=result.select_value,
                 )
             )
-            if previous_name is not None and previous_name != name:
-                self._kind_store.rename_kind(previous_name, name, rules)
-                self._store.rename_kind(previous_name, name)
+            if previous_name is not None and previous_name != result.name:
+                self._kind_store.rename_kind(previous_name, result.name, rules)
+                self._store.rename_kind(previous_name, result.name)
                 self._kind_values = {
-                    control_id: name if value == previous_name else value
+                    control_id: result.name if value == previous_name else value
                     for control_id, value in self._kind_values.items()
                 }
             else:
@@ -1149,8 +1063,14 @@ class EntityAuditApp(RefreshableCssApp[None]):
         if self._selected_entity is not None:
             self._reload_selected_entity()
         self._refresh_kind_options()
-        action = '新增' if previous_name is None else '重命名' if previous_name != name else '更新'
-        self.notify(f'已{action}类别：{label} ({name})。')
+        action = (
+            '新增'
+            if previous_name is None
+            else '重命名'
+            if previous_name != result.name
+            else '更新'
+        )
+        self.notify(f'已{action}类别：{result.label} ({result.name})。')
         return self._rules
 
     def _delete_kind_from_picker(self, kind: str) -> EntityRules | None:
@@ -1211,13 +1131,13 @@ class EntityAuditApp(RefreshableCssApp[None]):
     def action_save_entity(self) -> None:
         self.save_entity()
 
-    def _map_progress(self, map_file: str) -> int:
+    def _map_progress(self, map_file: str) -> MapProgress:
         if self._save_reader is None:
-            return 3
+            return MapProgress.UNRECORDED
         try:
             return self._save_reader.map_progress(map_file)
         except ValueError:
-            return 2
+            return MapProgress.ENTERED
 
     def _entity_items(self) -> tuple[EntityAuditItem | EntityAuditGroupItem, ...]:
         summaries_by_status: dict[EntityAuditStatus, list[EntityAuditSummary]] = defaultdict(list)
@@ -1238,7 +1158,10 @@ class EntityAuditApp(RefreshableCssApp[None]):
         return self._summary_sort_keys.setdefault(
             summary.entity_name,
             (
-                min((self._map_progress(map_file) for map_file in summary.map_files), default=3),
+                min(
+                    (self._map_progress(map_file) for map_file in summary.map_files),
+                    default=MapProgress.UNRECORDED,
+                ),
                 -summary.occurrence_count,
                 summary.entity_name.casefold(),
             ),
@@ -1251,15 +1174,15 @@ class EntityAuditApp(RefreshableCssApp[None]):
         )
         self._refresh_detail()
         self._update_entity_controls(self._selected_entity)
-        attributes = self.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select)
-        attributes.set_options(_attribute_options(self._selected_entity.attributes))
+        attribute_select = self.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select)
+        attribute_select.set_options(_attribute_options(self._selected_entity.attr_summaries))
         if self._selected_attribute is not None:
             self._selected_attribute = next(
                 attribute
-                for attribute in self._selected_entity.attributes
+                for attribute in self._selected_entity.attr_summaries
                 if attribute.name == self._selected_attribute.name
             )
-            attributes.value = self._selected_attribute.name
+            attribute_select.value = self._selected_attribute.name
             self._update_attribute_controls(self._selected_attribute)
         self._refresh_variants()
         self._disable_observation_controls()
@@ -1274,21 +1197,17 @@ class EntityAuditApp(RefreshableCssApp[None]):
             updated if item.entity_name == name else item for item in self._summaries
         )
         entities = self.query_one(f'#{ENTITY_LIST_ID}', ListView)
+        item = next(
+            item for item in entities.query(EntityAuditItem) if item.summary.entity_name == name
+        )
+
         if previous_status is self._selected_entity.status:
-            next(
-                item
-                for item in entities.query(EntityAuditItem)
-                if item.summary.entity_name == name
-            ).update_summary(updated)
+            item.update_summary(updated)
             return
+
         query = self.query_one(f'#{ENTITY_FILTER_ID}', Input).value
         self._status_counts[previous_status] -= 1
         self._status_counts[self._selected_entity.status] += 1
-        item = next(
-            item
-            for item in entities.query(EntityAuditItem)
-            if item.summary.entity_name == name
-        )
         self.run_worker(
             self._move_entity_item(
                 entities,
@@ -1340,9 +1259,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self._update_group_visibility(entities, status)
 
     @staticmethod
-    def _group_item(
-        entities: ListView, status: EntityAuditStatus
-    ) -> EntityAuditGroupItem | None:
+    def _group_item(entities: ListView, status: EntityAuditStatus) -> EntityAuditGroupItem | None:
         return next(
             (
                 item
@@ -1455,7 +1372,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self._kind_values[ENTITY_KIND_ID] = confirmed_kind
         kind_button = self.query_one(f'#{ENTITY_KIND_ID}', Button)
         kind_button.disabled = False
-        kind_button.label = _kind_button_label(
+        kind_button.label = kind_button_label(
             self._rules, confirmed_kind, prompt='确认整实体类别（不受属性影响时使用）'
         )
         self.query_one(f'#{CONFIRM_ENTITY_KIND_ID}', Button).disabled = False
@@ -1473,7 +1390,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         default = self.query_one(f'#{ATTRIBUTE_DEFAULT_ID}', Input)
         default.disabled = False
         default.value = (
-            json.dumps(summary.default_value) if summary.default_value is not _UNKNOWN else ''
+            json.dumps(summary.default_value) if summary.default_value is not UNKNOWN else ''
         )
         evidence = self.query_one(f'#{ATTRIBUTE_EVIDENCE_ID}', Input)
         evidence.disabled = False
@@ -1515,7 +1432,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
             kind = self.query_one(f'#{OBSERVATION_KIND_ID}', Button)
             if observation.kind in self._rules.kinds:
                 self._kind_values[OBSERVATION_KIND_ID] = observation.kind
-                kind.label = _kind_button_label(self._rules, observation.kind, prompt='选择 kind')
+                kind.label = kind_button_label(self._rules, observation.kind, prompt='选择 kind')
             else:
                 self._kind_values[OBSERVATION_KIND_ID] = None
                 kind.label = '确认的类别（已确认时必填）'
@@ -1568,7 +1485,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
 
     def _refresh_kind_options(self) -> None:
         for widget_id, kind in self._kind_values.items():
-            self.query_one(f'#{widget_id}', Button).label = _kind_button_label(
+            self.query_one(f'#{widget_id}', Button).label = kind_button_label(
                 self._rules, kind, prompt='选择类别'
             )
 
@@ -1577,22 +1494,16 @@ class EntityAuditApp(RefreshableCssApp[None]):
         text = Text()
         text.append(f'{detail.entity_name}\n', style='bold cyan')
         text.append(
-            f'实体状态: {_entity_status_text(detail.status)}\n',
-            style=_entity_status_style(detail.status),
+            f'实体状态: {ENTITY_STATUS_LABELS[detail.status]}\n',
+            style=ENTITY_STATUS_STYLES[detail.status],
         )
         if detail.reason:
             text.append(f'备注: {detail.reason}\n')
         if detail.kind_confirmation is not None:
             text.append(f'整实体类别: {detail.kind_confirmation.kind}\n', style='green')
-        elif detail.legacy_kind_confirmation is not None:
-            text.append(
-                f'历史逐变体记录推断为: {detail.legacy_kind_confirmation.kind}\n',
-                style='dark_orange',
-            )
-            text.append('尚未转为整实体确认；属性审查保持可用。\n', style='dim')
         likely_irrelevant = [
             attribute.name
-            for attribute in detail.attributes
+            for attribute in detail.attr_summaries
             if attribute.status is AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND
         ]
         if likely_irrelevant:
@@ -1632,7 +1543,7 @@ async def review_entity_audit(
 
 
 def _entity_status_options() -> tuple[tuple[str, str], ...]:
-    return tuple((_entity_status_text(status), status.value) for status in EntityAuditStatus)
+    return tuple((ENTITY_STATUS_LABELS[status], status.value) for status in EntityAuditStatus)
 
 
 def _entity_stat_options() -> tuple[tuple[str, str], ...]:
@@ -1651,18 +1562,6 @@ def _entity_status_order() -> tuple[EntityAuditStatus, ...]:
         EntityAuditStatus.ENTITY_CANDIDATE,
         EntityAuditStatus.IGNORED,
     )
-
-
-def _entity_status_label(status: EntityAuditStatus) -> str:
-    return {
-        EntityAuditStatus.UNKNOWN: '未审查',
-        EntityAuditStatus.ENTITY_CANDIDATE: '实体候选',
-        EntityAuditStatus.IGNORED: '已排除',
-    }[status]
-
-
-def _entity_status_text(status: EntityAuditStatus) -> str:
-    return _entity_status_label(status)
 
 
 def _audit_layer_diff(current: EntityRuleLayer, refreshed: EntityRuleLayer) -> str:
@@ -1701,93 +1600,32 @@ def _audit_layer_diff_text(diff: str) -> Text:
 
 
 def _attribute_status_options() -> tuple[tuple[str, str], ...]:
-    return tuple((_attribute_status_text(status), status.value) for status in AttributeAuditStatus)
-
-
-def _attribute_status_text(status: AttributeAuditStatus) -> str:
-    label = {
-        AttributeAuditStatus.UNKNOWN: '未审查',
-        AttributeAuditStatus.AFFECTS_KIND: '影响分类',
-        AttributeAuditStatus.DOES_NOT_AFFECT_KIND: '不影响分类',
-        AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND: '暂定不影响分类',
-        AttributeAuditStatus.UNSURE_DEFAULT: '默认值待确认',
-        AttributeAuditStatus.AFFECTS_BEHAVIOR: '影响行为',
-    }[status]
-    return label
+    return tuple((ATTRIBUTE_STATUS_LABELS[status], status.value) for status in AttributeAuditStatus)
 
 
 def _attribute_options(
-    attributes: tuple[AttributeAuditSummary, ...],
+    attr_summaries: tuple[AttributeAuditSummary, ...],
 ) -> tuple[tuple[str, str], ...]:
     return tuple(
         (
             (
                 f'{_audit_attribute_name(attribute.name)} · {_value_counts_text(attribute)} '
-                f'[{_attribute_status_text(attribute.status)}]'
+                f'[{ATTRIBUTE_STATUS_LABELS[attribute.status]}]'
             ),
             attribute.name,
         )
-        for attribute in attributes
+        for attribute in attr_summaries
     )
-
-
-def _kind_button_label(rules: EntityRules, kind: str | None, *, prompt: str) -> str:
-    """Format a selected kind for its button, or retain the descriptive prompt."""
-    if kind is None:
-        return prompt
-    definition = rules.kinds[kind]
-    return f'{definition.label} ({kind})'
-
-
-def _add_kind_nodes(parent: TreeNode[str], rules: EntityRules) -> None:
-    """Add the configured kind hierarchy beneath one Tree node."""
-    children: dict[str | None, list[str]] = defaultdict(list)
-    for name, kind in rules.kinds.items():
-        children[kind.parent].append(name)
-
-    def visit(node: TreeNode[str], parent_name: str | None) -> None:
-        for name in sorted(
-            children[parent_name], key=lambda child: rules.kinds[child].label.casefold()
-        ):
-            kind = rules.kinds[name]
-            child = node.add(
-                f'{kind.label} ({name})',
-                data=name,
-                allow_expand=bool(children[name]),
-            )
-            visit(child, name)
-
-    visit(parent, None)
 
 
 def _observation_question_options() -> tuple[tuple[str, str], ...]:
     return tuple(
-        (_observation_question_text(question), question.value) for question in ObservationQuestion
+        (OBSERVATION_QUESTION_LABELS[question], question.value) for question in ObservationQuestion
     )
 
 
 def _observation_status_options() -> tuple[tuple[str, str], ...]:
-    return tuple((_observation_status_text(status), status.value) for status in ObservationStatus)
-
-
-def _observation_question_text(question: ObservationQuestion) -> str:
-    label = {
-        ObservationQuestion.ENTITY_CLASSIFICATION: '实体分类',
-        ObservationQuestion.PAUSE_MENU_COUNT: '暂停菜单计数',
-        ObservationQuestion.DEBUG_MAP_COLOR: 'Debug Map 颜色',
-        ObservationQuestion.TOTAL_STRAWBERRY_COUNT: '草莓总数',
-    }[question]
-    return label
-
-
-def _observation_status_text(status: ObservationStatus) -> str:
-    label = {
-        ObservationStatus.UNKNOWN: '未确认',
-        ObservationStatus.CONFIRMED: '已确认',
-        ObservationStatus.NOT_COLLECTIBLE: '排除',
-        ObservationStatus.CONFLICT: '有冲突',
-    }[status]
-    return label
+    return tuple((OBSERVATION_STATUS_LABELS[status], status.value) for status in ObservationStatus)
 
 
 def _classification_groups(detail: EntityAuditDetail) -> tuple[ClassificationGroup, ...]:
@@ -1798,7 +1636,7 @@ def _classification_groups(detail: EntityAuditDetail) -> tuple[ClassificationGro
         AttributeAuditStatus.AFFECTS_BEHAVIOR,
     }
     names = tuple(
-        attribute.name for attribute in detail.attributes if attribute.status not in excluded
+        attribute.name for attribute in detail.attr_summaries if attribute.status not in excluded
     )
     groups: dict[tuple[AttrValue | None, ...], list[EntityVariant]] = defaultdict(list)
     for variant in detail.variants:
@@ -1869,9 +1707,7 @@ def _classification_group_label(group: ClassificationGroup, rules: EntityRules) 
     return label
 
 
-def _classification_conditions_text(
-    attrs: Mapping[str, object], meta: Mapping[str, object]
-) -> str:
+def _classification_conditions_text(attrs: Mapping[str, object], meta: Mapping[str, object]) -> str:
     """Render entity and map conditions without implying separate per-field counts."""
     fields = [
         *(f'{name} = {_display_attr_value(value)}' for name, value in attrs.items()),
@@ -1888,7 +1724,7 @@ def _default_value(value: str) -> DefaultValue:
     """Parse a JSON default, where blank is unknown and ``null`` is a confirmed default."""
     value = value.strip()
     if not value:
-        return _UNKNOWN
+        return UNKNOWN
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as error:
@@ -1904,7 +1740,7 @@ def _set_optional_evidence(input: Input, evidence: str | None) -> None:
 
 def _value_counts_text(summary: AttributeAuditSummary) -> str:
     return ', '.join(
-        f'{_display_attr_value(value)}: {count}' for value, count in summary.value_counts
+        [f'{_display_attr_value(value)}: {count}' for value, count in summary.value_counts]
     )
 
 
@@ -1916,10 +1752,9 @@ def _audit_attribute_name(name: str) -> str:
 
 
 def _attrs_text(attrs: Mapping[str, object]) -> str:
-    return (
-        ', '.join(f'{name} = {_display_attr_value(value)}' for name, value in attrs.items())
-        or '无分类属性'
-    )
+    if not attrs:
+        return '无分类属性'
+    return ', '.join([f'{name} = {_display_attr_value(value)}' for name, value in attrs.items()])
 
 
 def _display_attr_value(value: object) -> str:
@@ -1941,101 +1776,3 @@ def _rule_candidate_text(candidate: RuleCandidate) -> str:
     if candidate.provisional:
         notes.append('含暂定无关属性')
     return result if not notes else f'{result}（{"；".join(notes)}）'
-
-
-def _map_occurrences(
-    occurrences: tuple[RawEntityOccurrence, ...],
-    map_progress: Callable[[str], int],
-) -> tuple[MapOccurrences, ...]:
-    occurrences_by_map: dict[tuple[str, str, str | None, str | None], list[RawEntityOccurrence]] = (
-        defaultdict(list)
-    )
-    for occurrence in occurrences:
-        source = occurrence.source
-        occurrences_by_map[(source.scope, source.map_file, source.mod_file, source.package)].append(
-            occurrence
-        )
-    return tuple(
-        MapOccurrences(
-            values[0].source,
-            tuple(
-                sorted(
-                    Counter(occurrence.room for occurrence in values).items(),
-                    key=lambda item: (-item[1], item[0].casefold()),
-                )
-            ),
-            tuple(values),
-        )
-        for _, values in sorted(
-            occurrences_by_map.items(),
-            key=lambda item: (
-                map_progress(item[1][0].source.map_file),
-                -len(item[1]),
-                item[1][0].source.map_name.casefold(),
-                item[1][0].source.map_file.casefold(),
-            ),
-        )
-    )
-
-
-def _load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[LocalMap, MapLayout]:
-    """Locate one immutable audit source without rescanning or decoding other maps."""
-    map_file = source.map_file
-    match source.scope:
-        case 'official':
-            root = game_dir / 'Content'
-            prefix = 'Content/'
-            if not map_file.startswith(prefix):
-                raise ValueError(f'无效的官方地图路径：{map_file}')
-            map_file = map_file.removeprefix(prefix)
-        case 'mod':
-            if not source.mod_file:
-                raise ValueError(f'审计报告缺少 Mod 文件名：{source.map_file}')
-            root = game_dir / 'Mods' / source.mod_file
-        case _:
-            raise ValueError(f'不支持预览此审计来源：{source.scope}')
-    if not root.exists():
-        raise ValueError(f'地图包已不存在：{root}')
-    try:
-        dialog_key = dialog_key_for_map_file(map_file)
-    except ValueError:
-        dialog_key = PurePosixPath(map_file).stem
-    map_info = LocalMap(
-        file_path=map_file,
-        dialog_key=dialog_key,
-        names={'en': source.map_name},
-    )
-    return map_info, load_map_layout_from_path(root, map_file)
-
-
-def _occurrence_markers(
-    occurrences: tuple[RawEntityOccurrence, ...],
-) -> dict[str, tuple[MapMarker, ...]]:
-    """Mark every stored raw entity position while retaining standard collectible markers."""
-    markers: dict[str, list[MapMarker]] = defaultdict(list)
-    for occurrence in occurrences:
-        x = occurrence.attrs.get('x')
-        y = occurrence.attrs.get('y')
-        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            continue
-        markers[occurrence.room].append(MapMarker(x, y, 'audit'))
-    return {room: tuple(values) for room, values in markers.items()}
-
-
-def _entity_status_style(status: EntityAuditStatus) -> str:
-    return {
-        EntityAuditStatus.UNKNOWN: 'yellow',
-        EntityAuditStatus.IGNORED: 'dim',
-        EntityAuditStatus.ENTITY_CANDIDATE: 'cyan',
-    }[status]
-
-
-def _attribute_status_style(status: AttributeAuditStatus) -> str:
-    return {
-        AttributeAuditStatus.UNKNOWN: 'yellow',
-        AttributeAuditStatus.AFFECTS_KIND: 'cyan',
-        AttributeAuditStatus.DOES_NOT_AFFECT_KIND: 'green',
-        AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND: 'dark_orange',
-        AttributeAuditStatus.UNSURE_DEFAULT: 'magenta',
-        AttributeAuditStatus.AFFECTS_BEHAVIOR: 'dark_orange',
-    }[status]

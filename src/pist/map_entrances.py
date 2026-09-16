@@ -2,14 +2,15 @@
 
 import tomllib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from pist.game.binmap import AttrValue
+from pist.game.binmap import AttrValue, NumericAttrValue
 
-SHARED_MAP_ENTRANCES_PATH = Path(__file__).parent.parent / 'data' / 'map_entrances.toml'
+SHARED_MAP_ENTRANCES_PATH = Path(__file__).parent / 'data' / 'map_entrances.toml'
 LOCAL_MAP_ENTRANCES_PATH = Path('.pist/map_entrances.toml')
 
 
@@ -20,15 +21,24 @@ class MapEntranceSource(StrEnum):
     TRIGGER = 'trigger'
 
 
+@dataclass(frozen=True, slots=True)
+class MapEntranceRuleKey:
+    """The fields that make one map-entrance rule override another."""
+
+    source: MapEntranceSource
+    name: str
+    when: frozenset[tuple[str, AttrValue]]
+
+
 class EntranceValue(BaseModel):
     """One number read from an attribute or supplied as a constant."""
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
     attr: str | None = None
-    value: int | float | None = None
-    default: int | float | None = None
-    offset: int | float = 0
+    value: NumericAttrValue | None = None
+    default: NumericAttrValue | None = None
+    offset: NumericAttrValue = 0
 
     @model_validator(mode='after')
     def validate_source(self) -> EntranceValue:
@@ -40,7 +50,7 @@ class EntranceValue(BaseModel):
             raise ValueError('Entrance value attribute cannot be empty.')
         return self
 
-    def resolve(self, attrs: Mapping[str, AttrValue]) -> int | float | None:
+    def resolve(self, attrs: Mapping[str, AttrValue]) -> NumericAttrValue | None:
         """Resolve this value from one map element's attributes."""
         if self.attr is None:
             return self.value + self.offset if self.value is not None else None
@@ -92,11 +102,11 @@ class MapEntranceRules(BaseModel):
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
-    rules: tuple[MapEntranceRule, ...]
+    rules: tuple[MapEntranceRule, ...] = ()
 
     @model_validator(mode='after')
     def validate_unique_rules(self) -> MapEntranceRules:
-        seen: set[tuple[MapEntranceSource, str, tuple[tuple[str, AttrValue], ...]]] = set()
+        seen: set[MapEntranceRuleKey] = set()
         for rule in self.rules:
             key = _rule_key(rule)
             if key in seen:
@@ -125,9 +135,13 @@ def load_map_entrance_rule_layers(
 ) -> MapEntranceRules:
     """Load shared map-entrance rules with optional local overrides."""
     try:
-        shared = _load_toml(shared_path)
-        local = _load_toml(local_path) if local_path.is_file() else {}
-        return MapEntranceRules.model_validate(_merge_rule_data(shared, local))
+        shared = MapEntranceRules.model_validate(_load_toml(shared_path))
+        local = (
+            MapEntranceRules.model_validate(_load_toml(local_path))
+            if local_path.is_file()
+            else MapEntranceRules()
+        )
+        return _merge_rule_layers(shared, local)
     except (OSError, tomllib.TOMLDecodeError, TypeError, ValidationError, ValueError) as error:
         raise ValueError(
             f'Invalid map entrance rules config layers: {shared_path!r}, {local_path!r}'
@@ -136,52 +150,21 @@ def load_map_entrance_rule_layers(
 
 def _load_toml(path: Path) -> dict[str, object]:
     with path.open('rb') as file:
-        data = tomllib.load(file)
-    if not isinstance(data, dict):
-        raise TypeError('Expected a TOML table.')
-    return data
+        return tomllib.load(file)
 
 
-def _merge_rule_data(shared: dict[str, object], local: dict[str, object]) -> dict[str, object]:
-    shared_rules = _toml_rules(shared.get('rules'))
-    local_rules = _toml_rules(local.get('rules'))
-    local_keys = {_raw_rule_key(rule) for rule in local_rules}
-    rules = [
-        *local_rules,
-        *(rule for rule in shared_rules if _raw_rule_key(rule) not in local_keys),
-    ]
-    return {**shared, **local, 'rules': rules}
+def _merge_rule_layers(shared: MapEntranceRules, local: MapEntranceRules) -> MapEntranceRules:
+    local_keys = {_rule_key(rule) for rule in local.rules}
+    return MapEntranceRules(
+        rules=(*local.rules, *(rule for rule in shared.rules if _rule_key(rule) not in local_keys))
+    )
 
 
-def _toml_rules(value: object) -> list[dict[str, object]]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(rule, dict) for rule in value):
-        raise TypeError('Expected map entrance rules to be a TOML array.')
-    return value
+def _rule_key(rule: MapEntranceRule) -> MapEntranceRuleKey:
+    return MapEntranceRuleKey(rule.source, rule.name, frozenset(rule.when.items()))
 
 
-def _raw_rule_key(rule: dict[str, object]) -> tuple[str, str, tuple[tuple[str, AttrValue], ...]]:
-    source = rule.get('source')
-    name = rule.get('name')
-    when = rule.get('when', {})
-    if not isinstance(source, str) or not isinstance(name, str):
-        raise TypeError('Expected map entrance rule source and name to be strings.')
-    if not isinstance(when, dict) or not all(
-        isinstance(attr, str) and type(value) in {bool, int, float, str}
-        for attr, value in when.items()
-    ):
-        raise TypeError('Expected map entrance rule condition to be a TOML table.')
-    return source, name, tuple(sorted(when.items()))
-
-
-def _rule_key(
-    rule: MapEntranceRule,
-) -> tuple[MapEntranceSource, str, tuple[tuple[str, AttrValue], ...]]:
-    return rule.source, rule.name, tuple(sorted(rule.when.items()))
-
-
-def _number(value: object) -> int | float | None:
+def _number(value: object) -> NumericAttrValue | None:
     match value:
         case bool() | str() | None:
             return None

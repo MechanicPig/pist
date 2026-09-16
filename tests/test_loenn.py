@@ -1,7 +1,7 @@
 from pathlib import Path
 from zipfile import ZipFile
 
-from pist.game.modpath import ModPath
+from pist.game.mod_path import ModPath
 from pist.loenn import LoennMod, load_loenn_registry
 
 

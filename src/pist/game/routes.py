@@ -7,38 +7,43 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from pist.game.binmap import BinElement, BinMap, parse_map_bin
-from pist.game.entities import (
+from pist.entities.analysis import (
     ClassifiedEntity,
-    EntityRules,
-    EntityStat,
     MapEntities,
     MapEntityStats,
     analyze_map_entities,
+)
+from pist.entities.rules import (
+    EntityRules,
+    EntityStat,
     kind_select_value,
     load_entity_rule_layers,
     stat_owner,
 )
-from pist.game.map_entrances import (
+from pist.game.binmap import BinElement, BinMap, NumericAttrValue, parse_map_bin
+from pist.game.mod_path import BadModPath, ModPath
+from pist.game.mods import InstalledMod, LocalMap
+from pist.game.saves import SAVE_EXT, SAVES_DIRNAME, sid_for_map_file
+from pist.game.time import Time
+from pist.map_entrances import (
     DEFAULT_MAP_ENTRANCE_RULES,
     MapEntranceRules,
     MapEntranceSource,
 )
-from pist.game.modpath import BadModPath, ModPath
-from pist.game.saves import SAVE_EXT, SAVES_DIRNAME, sid_for_map_file
-from pist.models import InstalledMod, LocalMap
-from pist.time import Time
+from pist.types import RecordValues
 
 ENDERS_BLENDER_MOD_NAME = 'EndersBlender'
 ENDERS_BLENDER_ROOM_ORDER_KEY = 'mapDict_roomStat_firstClear_roomOrder'
 ENDERS_BLENDER_ROOM_DEATH_KEY = 'mapDict_roomStat_firstClear_death'
 ENDERS_BLENDER_ROOM_TIMER_KEY = 'mapDict_roomStat_firstClear_timer'
+
+
 @dataclass(frozen=True, slots=True)
 class MapMarker:
     """One configured entity marker positioned within a map room."""
 
-    x: int | float
-    y: int | float
+    x: NumericAttrValue
+    y: NumericAttrValue
     kind: str
     sprite: str | None = None
     key: str | None = None
@@ -64,10 +69,10 @@ class MapLink:
 
     room: str
     target_sid: str
-    x: int | float | None = None
-    y: int | float | None = None
-    width: int | float | None = None
-    height: int | float | None = None
+    x: NumericAttrValue | None = None
+    y: NumericAttrValue | None = None
+    width: NumericAttrValue | None = None
+    height: NumericAttrValue | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,34 +225,63 @@ def load_map_layout_from_path(path: Path, map_file: str) -> MapLayout:
     return map_layout(_load_map_bin(path, map_file))
 
 
-def load_map_entity_table_values_from_path(
+def load_map_entity_record_values_from_path(
     path: Path,
     map_file: str,
     *,
     excluded_markers: frozenset[str] = frozenset(),
     entity_rules: EntityRules | None = None,
-) -> dict[str, dict[str, int | bool | str]]:
+) -> RecordValues:
     """Read one map and summarize only entities not excluded by its saved route."""
-    return map_entity_table_values(
+    return map_entity_stats(
+        _load_map_bin(path, map_file),
+        excluded_markers=excluded_markers,
+        entity_rules=entity_rules,
+    ).record_values
+
+
+def load_map_entity_stats_from_path(
+    path: Path,
+    map_file: str,
+    *,
+    excluded_markers: frozenset[str] = frozenset(),
+    entity_rules: EntityRules | None = None,
+) -> MapEntityStats:
+    """Read one map and summarize only entities not excluded by its saved route."""
+    return map_entity_stats(
         _load_map_bin(path, map_file),
         excluded_markers=excluded_markers,
         entity_rules=entity_rules,
     )
 
 
-def map_entity_table_values(
+def map_entity_record_values(
     map_data: BinMap,
     *,
     excluded_markers: frozenset[str] = frozenset(),
     entity_rules: EntityRules | None = None,
-) -> dict[str, dict[str, int | bool | str]]:
+) -> RecordValues:
     """Return configured table values after applying per-entity route exclusions.
 
     The preview stores exclusions using the stable marker key, rather than a rule
     condition, because an inaccessible instance does not make every matching
-    entity inaccessible. Rebuilding the aggregate here keeps draft data aligned
+    entity inaccessible. Rebuilding the aggregate here keeps local record data aligned
     with the correction summary shown in the preview.
     """
+    return map_entity_stats(
+        map_data,
+        excluded_markers=excluded_markers,
+        entity_rules=entity_rules,
+    ).record_values
+
+
+def map_entity_stats(
+    map_data: BinMap,
+    *,
+    excluded_markers: frozenset[str] = frozenset(),
+    entity_rules: EntityRules | None = None,
+) -> MapEntityStats:
+    """Summarize configured entities after applying per-instance route exclusions."""
     rules = load_entity_rule_layers() if entity_rules is None else entity_rules
     entities = analyze_map_entities(map_data, rules=rules)
     counted: dict[str, list[ClassifiedEntity]] = {}
@@ -274,7 +308,7 @@ def map_entity_table_values(
         stat_types=entities.stats.stat_types,
         select_values={kind: frozenset(values) for kind, values in select_values.items()},
     )
-    return stats.table_values
+    return stats
 
 
 def _load_map_bin(path: Path, map_file: str) -> BinMap:
@@ -468,7 +502,7 @@ def _classified_entities(entities: MapEntities) -> tuple[ClassifiedEntity, ...]:
 
 
 def _marker_key(entity: ClassifiedEntity) -> str:
-    """Return the persisted per-instance key shared by previews and draft aggregation."""
+    """Return the persisted per-instance key shared by previews and record aggregation."""
     return f'{entity.room}\x1f{entity.name}\x1f{entity.entity_id}\x1f{entity.x}\x1f{entity.y}'
 
 
@@ -488,7 +522,7 @@ def _int_attr(value: object) -> int | None:
     return value if type(value) is int else None
 
 
-def _number_attr(value: object) -> int | float | None:
+def _number_attr(value: object) -> NumericAttrValue | None:
     if type(value) is int:
         return value
     if type(value) is float:

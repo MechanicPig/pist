@@ -5,21 +5,19 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
-from pydantic import JsonValue
-
-from pist.models import (
-    FileIdConversion,
-    GetSheetsData,
-    InspectionReport,
-    JsonObject,
-    RecordDraft,
-    SmartSheet,
-    SubSheetInspection,
-    TencentApiResp,
-    parse_json_object,
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
 )
+
+from pist.records import MANUAL_RECORD_FIELD_TITLES, MapRecord
 from pist.secrets import CredentialStore
-from pist.sheet_report import MANUAL_DRAFT_FIELD_TITLES
+from pist.types import CellValue
 
 API_BASE_URL = 'https://docs.qq.com/openapi/smartbook/v2/'
 DRIVE_API_URL = 'https://docs.qq.com/openapi/drive/v2/util/converter'
@@ -27,6 +25,87 @@ REQUEST_TIMEOUT = ClientTimeout(total=20)
 MAIN_TABLE_TITLE = '主表'
 RECORD_PAGE_SIZE = 100
 INCOMPLETE_STATUSES = frozenset({'进行中', '未开始'})
+
+type SmartSheetSourceValue = CellValue | tuple[str, ...] | datetime
+type JsonObject = dict[str, JsonValue]
+
+
+_json_object_adapter = TypeAdapter(JsonObject)
+
+
+def parse_json_object(value: object, *, context: str) -> JsonObject:
+    """Validate a dynamically named API operation result as a JSON object."""
+    try:
+        return _json_object_adapter.validate_python(value)
+    except ValidationError as error:
+        raise TypeError(f'Tencent Docs returned an invalid {context} object.') from error
+
+
+class TencentApiResp(BaseModel):
+    """Common OpenAPI response envelope."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    ret: int
+    msg: str | None = None
+    data: JsonObject = Field(default_factory=dict)
+
+
+class FileIdConversion(BaseModel):
+    """Possible fields returned by the file-ID conversion endpoint."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    file_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices('fileID', 'fileId', 'ID', 'id'),
+    )
+
+
+class SmartSheet(BaseModel):
+    """A Smart Sheet sub-sheet."""
+
+    model_config = ConfigDict(extra='allow', populate_by_name=True)
+
+    sheet_id: str = Field(validation_alias='sheetID')
+    title: str = ''
+    is_visible: bool | None = Field(default=None, validation_alias='isVisible')
+    type: str | None = None
+
+
+class SmartSheetField(BaseModel):
+    """One Smart Sheet field, as returned by the metadata operation."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    field_id: str = Field(validation_alias='fieldID')
+    field_title: str = Field(validation_alias='fieldTitle')
+    field_type: int = Field(validation_alias='fieldType')
+    property_formula: object | None = Field(default=None, validation_alias='propertyFormula')
+
+
+class GetSheetsData(BaseModel):
+    """Data payload for the Smart Sheet metadata operation."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    sheets: list[SmartSheet] = Field(default_factory=list, validation_alias='getSheet')
+
+
+class SubSheetInspection(BaseModel):
+    """Raw metadata returned for one sub-sheet."""
+
+    sheet: SmartSheet
+    views: JsonObject
+    fields: JsonObject
+    records: JsonObject
+
+
+class InspectionReport(BaseModel):
+    """Persisted raw output of a read-only Smart Sheet inspection."""
+
+    file_id: str
+    sheets: list[SubSheetInspection]
 
 
 def extract_file_id(source: str) -> str:
@@ -66,8 +145,8 @@ class TencentSmartSheetClient:
             )
         return InspectionReport(file_id=file_id, sheets=details)
 
-    async def submit_draft(self, file_id: str, draft: RecordDraft, *, update: bool) -> str:
-        """Add a draft to the main table, or update its one unambiguous match."""
+    async def sync_record(self, file_id: str, record: MapRecord, *, update: bool) -> str:
+        """Add a local record to the main table, or update its one unambiguous match."""
         credentials = await self._store.load_credentials()
         headers = {
             'Access-Token': credentials.access_token,
@@ -89,14 +168,14 @@ class TencentSmartSheetClient:
             fields = await self._post_operation(
                 session, endpoint, 'getFields', {'offset': 0, 'limit': 100}
             )
-            values = _draft_record_values(draft, fields)
+            values = _record_values(record, fields)
             if not update:
                 result = await self._post_write_operation(
                     session, endpoint, 'addRecords', {'records': [{'values': values}]}
                 )
                 return _submitted_record_id(result)
             records = await self._all_records(session, endpoint)
-            matches = _matching_record_ids(records, draft)
+            matches = _matching_record_ids(records, record)
             if not matches:
                 raise ValueError('未找到同 Mod 元数据名和地图名的既有记录，不能更新。')
             if len(matches) != 1:
@@ -195,8 +274,8 @@ class TencentSmartSheetClient:
         return payload
 
 
-def _draft_record_values(draft: RecordDraft, fields: JsonObject) -> JsonObject:
-    """Encode the present draft values according to the live main-table schema."""
+def _record_values(record: MapRecord, fields: JsonObject) -> JsonObject:
+    """Encode present local record values according to the live main-table schema."""
     raw_fields = fields.get('fields', [])
     if not isinstance(raw_fields, list):
         raise TypeError('Tencent Docs returned invalid field metadata.')
@@ -207,30 +286,30 @@ def _draft_record_values(draft: RecordDraft, fields: JsonObject) -> JsonObject:
         and isinstance(title := field.get('fieldTitle'), str)
         and isinstance(field_type := field.get('fieldType'), int)
     }
-    source_values: dict[str, int | bool | str | tuple[str, ...] | datetime] = {
-        'Mod元数据名': draft.mod_metadata_name,
-        '地图名': draft.map_name,
-        '作者': draft.authors,
+    source_values: dict[str, SmartSheetSourceValue] = {
+        'Mod元数据名': record.mod_metadata_name,
+        '地图名': record.map_name,
+        '作者': record.authors,
     }
-    if draft.mod_name is not None and draft.mod_url is not None:
-        source_values['Mod名'] = (draft.mod_name, draft.mod_url)
-    if draft.mod_updated_at is not None:
-        source_values['更新时间'] = draft.mod_updated_at
-    if draft.time_played is not None:
-        source_values['用时'] = draft.time_played
-    if draft.deaths is not None:
-        source_values['死亡数'] = draft.deaths
-    main_table_values = draft.table_values.get(MAIN_TABLE_TITLE, {})
-    if main_table_values.get('状态') in INCOMPLETE_STATUSES:
+    if record.mod_name is not None and record.mod_url is not None:
+        source_values['Mod名'] = (record.mod_name, record.mod_url)
+    if record.mod_updated_at is not None:
+        source_values['更新时间'] = record.mod_updated_at
+    if record.time_played is not None:
+        source_values['用时'] = record.time_played
+    if record.deaths is not None:
+        source_values['死亡数'] = record.deaths
+    main_record_values = record.record_values.get(MAIN_TABLE_TITLE, {})
+    if main_record_values.get('状态') in INCOMPLETE_STATUSES:
         source_values.update(
             {
                 title: value
-                for title, value in main_table_values.items()
-                if title in MANUAL_DRAFT_FIELD_TITLES
+                for title, value in main_record_values.items()
+                if title in MANUAL_RECORD_FIELD_TITLES
             }
         )
     else:
-        source_values.update(main_table_values)
+        source_values.update(main_record_values)
     values: JsonObject = {
         title: _encode_field_value(value, types[title])
         for title, value in source_values.items()
@@ -239,9 +318,7 @@ def _draft_record_values(draft: RecordDraft, fields: JsonObject) -> JsonObject:
     return values
 
 
-def _encode_field_value(
-    value: int | bool | str | tuple[str, ...] | datetime, field_type: int
-) -> JsonValue:
+def _encode_field_value(value: SmartSheetSourceValue, field_type: int) -> JsonValue:
     """Encode one native value in Tencent Smart Sheet's field-value shape."""
     if field_type == 1 and isinstance(value, str):
         return [{'type': 'text', 'text': value}]
@@ -263,22 +340,22 @@ def _encode_field_value(
     raise ValueError(f'Unsupported value {value!r} for Smart Sheet field type {field_type}.')
 
 
-def _matching_record_ids(records: JsonObject, draft: RecordDraft) -> list[str]:
-    """Return existing main-table record IDs matching the stable draft identity."""
+def _matching_record_ids(records: JsonObject, record: MapRecord) -> list[str]:
+    """Return existing main-table record IDs matching the stable local-record identity."""
     raw_records = records.get('records', [])
     if not isinstance(raw_records, list):
         raise TypeError('Tencent Docs returned invalid record data.')
     matches: list[str] = []
-    for record in raw_records:
-        if not isinstance(record, dict):
+    for remote_record in raw_records:
+        if not isinstance(remote_record, dict):
             continue
-        values = record.get('values')
-        record_id = record.get('recordID')
+        values = remote_record.get('values')
+        record_id = remote_record.get('recordID')
         if not isinstance(values, dict) or not isinstance(record_id, str):
             continue
         if (
-            _field_text(values.get('Mod元数据名')) == draft.mod_metadata_name
-            and _field_text(values.get('地图名')) == draft.map_name
+            _field_text(values.get('Mod元数据名')) == record.mod_metadata_name
+            and _field_text(values.get('地图名')) == record.map_name
         ):
             matches.append(record_id)
     return matches

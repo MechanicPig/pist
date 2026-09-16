@@ -4,7 +4,8 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import combinations
@@ -13,15 +14,16 @@ from pathlib import Path
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import Sentinel as sentinel
 
-from .binmap import AttrValue
-from .entities import EntityRule, EntityRuleLayer, EntityRulesForId
+from pist.game.binmap import AttrValue
 
-LOCAL_AUDIT_DB_PATH = Path('.pist/collectible-audit.sqlite3')
+from .rules import EntityRule, EntityRuleLayer, EntityRulesForId
+
+LOCAL_AUDIT_DB_PATH = Path('.pist/entity-audit.sqlite3')
 LOCATION_ATTR_NAMES = frozenset({'id', 'x', 'y', 'width', 'height', 'originX', 'originY'})
 META_ATTRIBUTE_PREFIX = '@meta.'
-_UNKNOWN = sentinel('_UNKNOWN')
+UNKNOWN = sentinel('UNKNOWN')
 
-type DefaultValue = AttrValue | None | _UNKNOWN
+type DefaultValue = AttrValue | None | UNKNOWN
 
 
 class EntityAuditStatus(StrEnum):
@@ -100,9 +102,7 @@ class AuditReport(BaseModel):
 
     model_config = ConfigDict(extra='ignore')
 
-    entities: tuple[AuditGroup, ...] = Field(
-        validation_alias=AliasChoices('entities', 'unmatched')
-    )
+    entities: tuple[AuditGroup, ...] = Field(validation_alias=AliasChoices('entities', 'unmatched'))
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,8 +190,7 @@ class EntityAuditDetail:
     reason: str
     evidence: str | None
     kind_confirmation: EntityKindConfirmation | None
-    legacy_kind_confirmation: EntityKindConfirmation | None
-    attributes: tuple[AttributeAuditSummary, ...]
+    attr_summaries: tuple[AttributeAuditSummary, ...]
     variants: tuple[EntityVariant, ...]
     occurrences: tuple[RawEntityOccurrence, ...]
 
@@ -228,27 +227,27 @@ class EntityAuditStore:
         except ValidationError as error:
             raise ValueError(f'Invalid entity audit report: {path!r}') from error
         digest = hashlib.sha256(data).hexdigest()
-        with self._connect() as connection:
-            row = connection.execute(
+        with self._connect() as conn:
+            row = conn.execute(
                 'SELECT id FROM audit_reports WHERE digest = ?', (digest,)
             ).fetchone()
             if row is not None:
                 return int(row['id'])
-            cursor = connection.execute(
+            cursor = conn.execute(
                 'INSERT INTO audit_reports(path, digest) VALUES (?, ?)', (str(path), digest)
             )
             if cursor.lastrowid is None:
                 raise RuntimeError('SQLite did not return an audit report ID.')
             report_id = cursor.lastrowid
             for group in report.entities:
-                connection.execute(
+                conn.execute(
                     'INSERT OR IGNORE INTO entity_knowledge(entity_name) VALUES (?)',
                     (group.entity_name,),
                 )
                 for occurrence in group.occurrences:
                     source = occurrence.source
                     attrs_json = _json(occurrence.attrs)
-                    connection.execute(
+                    conn.execute(
                         """
                         INSERT INTO raw_entity_occurrences(
                             report_id, entity_name, attrs_json, scope, map_file, map_name,
@@ -274,11 +273,11 @@ class EntityAuditStore:
 
     def entity_summaries(self, report_id: int | None = None) -> tuple[EntityAuditSummary, ...]:
         """Return entity-level counts for one imported report, newest by default."""
-        with self._connect() as connection:
-            report_id = self._report_id(connection, report_id)
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
             if report_id is None:
                 return ()
-            rows = connection.execute(
+            rows = conn.execute(
                 """
                 SELECT raw.entity_name, COUNT(*) AS occurrence_count,
                     COUNT(DISTINCT raw.attrs_json) AS variant_count, knowledge.status
@@ -291,7 +290,7 @@ class EntityAuditStore:
                 (report_id,),
             )
             map_files: dict[str, set[str]] = defaultdict(set)
-            for row in connection.execute(
+            for row in conn.execute(
                 """
                 SELECT entity_name, map_file FROM raw_entity_occurrences
                 WHERE report_id = ?
@@ -312,35 +311,32 @@ class EntityAuditStore:
 
     def latest_report_id(self) -> int | None:
         """Return the most recently imported raw report, if one exists."""
-        with self._connect() as connection:
-            return self._report_id(connection, None)
+        with self._connect() as conn:
+            return self._report_id(conn, None)
 
     def entity_detail(self, entity_name: str, report_id: int | None = None) -> EntityAuditDetail:
         """Return raw occurrences and attribute knowledge for one entity ID."""
-        with self._connect() as connection:
-            report_id = self._report_id(connection, report_id)
-            row = connection.execute(
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            row = conn.execute(
                 'SELECT status, reason, evidence FROM entity_knowledge WHERE entity_name = ?',
                 (entity_name,),
             ).fetchone()
             if row is None:
                 raise ValueError(f'Unknown audited entity: {entity_name!r}')
             occurrences = (
-                () if report_id is None else self._occurrences(connection, report_id, entity_name)
+                () if report_id is None else self._occurrences(conn, report_id, entity_name)
             )
-            attributes = self._attributes(connection, entity_name, occurrences)
-            variants = self._variants(connection, entity_name, occurrences)
-            confirmation = self._entity_kind_confirmation(connection, entity_name)
+            attr_summaries = self._attr_summaries(conn, entity_name, occurrences)
+            variants = self._variants(conn, entity_name, occurrences)
+            confirmation = self._entity_kind_confirmation(conn, entity_name)
             return EntityAuditDetail(
                 entity_name,
                 EntityAuditStatus(row['status']),
                 row['reason'],
                 row['evidence'],
                 confirmation,
-                None
-                if confirmation is not None
-                else self._legacy_entity_kind_confirmation(connection, entity_name),
-                attributes,
+                attr_summaries,
                 variants,
                 occurrences,
             )
@@ -354,8 +350,8 @@ class EntityAuditStore:
         evidence: str | None = None,
     ) -> None:
         """Update the deliberate entity-level review outcome."""
-        with self._connect() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 INSERT INTO entity_knowledge(entity_name, status, reason, evidence)
                 VALUES (?, ?, ?, ?)
@@ -373,11 +369,11 @@ class EntityAuditStore:
         *,
         reason: str = '',
         evidence: str | None = None,
-        default_value: DefaultValue = _UNKNOWN,
+        default_value: DefaultValue = UNKNOWN,
     ) -> None:
         """Update knowledge scoped to exactly one entity ID and attribute name."""
-        with self._connect() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 INSERT INTO attribute_knowledge(
                     entity_name, name, status, reason, evidence, default_json
@@ -392,7 +388,7 @@ class EntityAuditStore:
                     status,
                     reason,
                     evidence,
-                    None if default_value is _UNKNOWN else _value_json(default_value),
+                    None if default_value is UNKNOWN else _value_json(default_value),
                 ),
             )
 
@@ -410,8 +406,8 @@ class EntityAuditStore:
     ) -> None:
         """Save one manual behavior observation for an exact raw attribute variant."""
         _validate_observation_kind(status, kind)
-        with self._connect() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 INSERT INTO variant_observations(
                     entity_name, attrs_json, question, status, kind, reason, evidence
@@ -450,8 +446,8 @@ class EntityAuditStore:
             reason=reason,
             evidence=evidence,
         )
-        with self._connect() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 INSERT INTO entity_kind_confirmations(entity_name, kind, reason, evidence)
                 VALUES (?, ?, ?, ?)
@@ -460,11 +456,11 @@ class EntityAuditStore:
                 """,
                 (entity_name, kind, reason, evidence),
             )
-            connection.execute(
+            conn.execute(
                 'DELETE FROM entity_kind_confirmation_variants WHERE entity_name = ?',
                 (entity_name,),
             )
-            connection.executemany(
+            conn.executemany(
                 """
                 INSERT INTO entity_kind_confirmation_variants(entity_name, attrs_json)
                 VALUES (?, ?)
@@ -478,13 +474,13 @@ class EntityAuditStore:
 
     def revoke_entity_kind(self, entity_name: str) -> int:
         """Withdraw a whole-entity confirmation without removing later individual review."""
-        with self._connect() as connection:
-            confirmation = self._entity_kind_confirmation(connection, entity_name)
+        with self._connect() as conn:
+            confirmation = self._entity_kind_confirmation(conn, entity_name)
             if confirmation is None:
                 return 0
             keys = tuple(
                 (row['attrs_json'],)
-                for row in connection.execute(
+                for row in conn.execute(
                     """
                     SELECT attrs_json FROM entity_kind_confirmation_variants
                     WHERE entity_name = ?
@@ -495,7 +491,7 @@ class EntityAuditStore:
             removed = 0
             for candidate_keys in keys:
                 for key in candidate_keys:
-                    cursor = connection.execute(
+                    cursor = conn.execute(
                         """
                         DELETE FROM variant_observations
                         WHERE entity_name = ? AND attrs_json = ? AND question = ?
@@ -514,11 +510,11 @@ class EntityAuditStore:
                         ),
                     )
                     removed += cursor.rowcount
-            connection.execute(
+            conn.execute(
                 'DELETE FROM entity_kind_confirmation_variants WHERE entity_name = ?',
                 (entity_name,),
             )
-            connection.execute(
+            conn.execute(
                 'DELETE FROM entity_kind_confirmations WHERE entity_name = ?',
                 (entity_name,),
             )
@@ -528,12 +524,12 @@ class EntityAuditStore:
         """Move persisted audit conclusions to a renamed shared kind ID."""
         if old_name == new_name:
             return
-        with self._connect() as connection:
-            connection.execute(
+        with self._connect() as conn:
+            conn.execute(
                 'UPDATE variant_observations SET kind = ? WHERE kind = ?',
                 (new_name, old_name),
             )
-            connection.execute(
+            conn.execute(
                 'UPDATE entity_kind_confirmations SET kind = ? WHERE kind = ?',
                 (new_name, old_name),
             )
@@ -551,9 +547,9 @@ class EntityAuditStore:
     ) -> None:
         """Save one observation for each raw variant belonging to a review group."""
         _validate_observation_kind(status, kind)
-        with self._connect() as connection:
+        with self._connect() as conn:
             for variant in variants:
-                connection.execute(
+                conn.execute(
                     """
                     INSERT INTO variant_observations(
                         entity_name, attrs_json, question, status, kind, reason, evidence
@@ -592,13 +588,13 @@ class EntityAuditStore:
                 ),
             )
         provisional = any(
-            attribute.status is AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND
-            for attribute in detail.attributes
+            attr.status is AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND
+            for attr in detail.attr_summaries
         )
         affecting_names = {
-            attribute.name
-            for attribute in detail.attributes
-            if attribute.status is AttributeAuditStatus.AFFECTS_KIND
+            attr.name
+            for attr in detail.attr_summaries
+            if attr.status is AttributeAuditStatus.AFFECTS_KIND
         }
         classifications: list[tuple[dict[str, AttrValue], dict[str, AttrValue], str | None]] = []
         for variant in detail.variants:
@@ -677,11 +673,11 @@ class EntityAuditStore:
         probes the current report once per reviewed entity.  Its candidate-only count
         retains the old generated-file order: most frequently seen entities first.
         """
-        with self._connect() as connection:
-            report_id = self._report_id(connection, report_id)
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
             if report_id is None:
                 return ()
-            rows = connection.execute(
+            rows = conn.execute(
                 """
                 SELECT entity_name
                 FROM entity_knowledge
@@ -703,8 +699,8 @@ class EntityAuditStore:
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
+        with self._connect() as conn:
+            conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS audit_reports (
                     id INTEGER PRIMARY KEY,
@@ -768,45 +764,52 @@ class EntityAuditStore:
                 """
             )
             columns = {
-                row['name']
-                for row in connection.execute('PRAGMA table_info(raw_entity_occurrences)')
+                row['name'] for row in conn.execute('PRAGMA table_info(raw_entity_occurrences)')
             }
             if 'meta_json' not in columns:
-                connection.execute(
+                conn.execute(
                     "ALTER TABLE raw_entity_occurrences ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'"
                 )
-            attribute_columns = {
-                row['name'] for row in connection.execute('PRAGMA table_info(attribute_knowledge)')
+            attr_columns = {
+                row['name'] for row in conn.execute('PRAGMA table_info(attribute_knowledge)')
             }
-            if 'default_json' not in attribute_columns:
-                connection.execute('ALTER TABLE attribute_knowledge ADD COLUMN default_json TEXT')
-            connection.execute(
+            if 'default_json' not in attr_columns:
+                conn.execute('ALTER TABLE attribute_knowledge ADD COLUMN default_json TEXT')
+            conn.execute(
                 "UPDATE entity_knowledge SET status = 'entity_candidate' "
                 "WHERE status = 'collectible_candidate'"
             )
-            connection.execute(
+            conn.execute(
                 "UPDATE entity_knowledge SET status = 'entity_candidate' "
                 "WHERE status = 'rule_complete'"
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute('PRAGMA foreign_keys = ON')
-        return connection
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA foreign_keys = ON')
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @staticmethod
-    def _report_id(connection: sqlite3.Connection, report_id: int | None) -> int | None:
+    def _report_id(conn: sqlite3.Connection, report_id: int | None) -> int | None:
         if report_id is not None:
             return report_id
-        row = connection.execute('SELECT id FROM audit_reports ORDER BY id DESC LIMIT 1').fetchone()
+        row = conn.execute('SELECT id FROM audit_reports ORDER BY id DESC LIMIT 1').fetchone()
         return None if row is None else int(row['id'])
 
     @staticmethod
     def _occurrences(
-        connection: sqlite3.Connection, report_id: int, entity_name: str
+        conn: sqlite3.Connection, report_id: int, entity_name: str
     ) -> tuple[RawEntityOccurrence, ...]:
-        rows = connection.execute(
+        rows = conn.execute(
             """
             SELECT attrs_json, scope, map_file, map_name, mod_name, mod_file, package, meta_json,
                 room, entity_id
@@ -836,8 +839,8 @@ class EntityAuditStore:
         )
 
     @staticmethod
-    def _attributes(
-        connection: sqlite3.Connection,
+    def _attr_summaries(
+        conn: sqlite3.Connection,
         entity_name: str,
         occurrences: Iterable[RawEntityOccurrence],
     ) -> tuple[AttributeAuditSummary, ...]:
@@ -862,7 +865,7 @@ class EntityAuditStore:
                 counts[name][value] += 1
         knowledge_rows = {
             row['name']: row
-            for row in connection.execute(
+            for row in conn.execute(
                 """
                 SELECT name, status, reason, evidence, default_json
                 FROM attribute_knowledge WHERE entity_name = ?
@@ -881,14 +884,14 @@ class EntityAuditStore:
                 knowledge_rows[name]['evidence'] if name in knowledge_rows else None,
                 _value(knowledge_rows[name]['default_json'])
                 if name in knowledge_rows and knowledge_rows[name]['default_json'] is not None
-                else _UNKNOWN,
+                else UNKNOWN,
             )
             for name, values in sorted(counts.items(), key=lambda item: item[0].casefold())
         )
 
     @staticmethod
     def _variants(
-        connection: sqlite3.Connection,
+        conn: sqlite3.Connection,
         entity_name: str,
         occurrences: Iterable[RawEntityOccurrence],
     ) -> tuple[EntityVariant, ...]:
@@ -901,7 +904,7 @@ class EntityAuditStore:
             attrs_by_key[key] = attrs, meta
             counts[key] += 1
         observations_by_attrs: dict[str, list[VariantObservation]] = defaultdict(list)
-        for row in connection.execute(
+        for row in conn.execute(
             """
             SELECT attrs_json, question, status, kind, reason, evidence
             FROM variant_observations WHERE entity_name = ?
@@ -932,9 +935,9 @@ class EntityAuditStore:
 
     @staticmethod
     def _entity_kind_confirmation(
-        connection: sqlite3.Connection, entity_name: str
+        conn: sqlite3.Connection, entity_name: str
     ) -> EntityKindConfirmation | None:
-        row = connection.execute(
+        row = conn.execute(
             """
             SELECT kind, reason, evidence FROM entity_kind_confirmations
             WHERE entity_name = ?
@@ -946,22 +949,6 @@ class EntityAuditStore:
             if row is None
             else EntityKindConfirmation(row['kind'], row['reason'], row['evidence'])
         )
-
-    def _legacy_entity_kind_confirmation(
-        self, connection: sqlite3.Connection, entity_name: str
-    ) -> EntityKindConfirmation | None:
-        """Find a pre-table whole-entity confirmation in an older imported report."""
-        for row in connection.execute('SELECT id FROM audit_reports ORDER BY id DESC'):
-            report_id = int(row['id'])
-            variants = self._variants(
-                connection,
-                entity_name,
-                self._occurrences(connection, report_id, entity_name),
-            )
-            confirmation = _legacy_entity_kind_confirmation(variants)
-            if confirmation is not None:
-                return confirmation
-        return None
 
 
 def _json(attrs: dict[str, AttrValue]) -> str:
@@ -979,34 +966,6 @@ def _value(value: str) -> AttrValue | None:
     if parsed is not None and type(parsed) not in {bool, int, float, str}:
         raise TypeError('Expected a serialized collectible attribute value.')
     return parsed
-
-
-def _legacy_entity_kind_confirmation(
-    variants: tuple[EntityVariant, ...],
-) -> EntityKindConfirmation | None:
-    """Recognize the pre-confirmation-table bulk observations as one conclusion."""
-    observations = []
-    for variant in variants:
-        classification = tuple(
-            observation
-            for observation in variant.observations
-            if observation.question is ObservationQuestion.ENTITY_CLASSIFICATION
-            and observation.status is ObservationStatus.CONFIRMED
-        )
-        if len(classification) != 1:
-            return None
-        observations.append(classification[0])
-    if not observations:
-        return None
-    first = observations[0]
-    if any(
-        (observation.kind, observation.reason, observation.evidence)
-        != (first.kind, first.reason, first.evidence)
-        for observation in observations[1:]
-    ):
-        return None
-    assert first.kind is not None
-    return EntityKindConfirmation(first.kind, first.reason, first.evidence)
 
 
 def _variant_key(attrs: dict[str, AttrValue], meta: dict[str, AttrValue] | None = None) -> str:
@@ -1078,9 +1037,9 @@ def _default_fallback_candidates(
 ) -> tuple[RuleCandidate, ...]:
     """Offer safe fallbacks only for explicitly confirmed runtime defaults."""
     defaults = {
-        attribute.name: default
-        for attribute in detail.attributes
-        if (default := attribute.default_value) is not _UNKNOWN and default is not None
+        attr.name: default
+        for attr in detail.attr_summaries
+        if (default := attr.default_value) is not UNKNOWN and default is not None
     }
     fallbacks: dict[tuple[str | None, str, str], RuleCandidate] = {}
     for candidate in candidates:

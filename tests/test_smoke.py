@@ -3,8 +3,8 @@ from pydantic import ValidationError
 
 from pist import __doc__
 from pist.__main__ import build_parser
-from pist.models import TencentApiResp, TencentDocsCredentials, parse_json_object
-from pist.smartsheet import extract_file_id
+from pist.secrets import TencentDocsCredentials
+from pist.smartsheet import TencentApiResp, extract_file_id, parse_json_object
 
 
 def test_package_loads() -> None:
@@ -17,15 +17,15 @@ def test_mod_browse_defaults_to_save_slot_zero() -> None:
     assert args.save_slot == 0
 
 
-def test_saved_draft_submit_requires_an_explicit_write_mode() -> None:
+def test_saved_record_sync_requires_an_explicit_write_mode() -> None:
     parser = build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(['draft', 'submit', '1'])
+        parser.parse_args(['record', 'sync', '1'])
 
-    args = parser.parse_args(['draft', 'submit', '42', '--update'])
+    args = parser.parse_args(['record', 'sync', '42', '--update'])
 
-    assert args.draft_id == 42
+    assert args.record_id == 42
     assert args.update is True
 
 

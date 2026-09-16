@@ -21,6 +21,9 @@ MAX_STATIC_CALL_DEPTH = 2
 type LuaKey = str | int | float
 type LuaScalar = str | int | float | bool | None
 type LuaNumber = int | float
+type LuaNumericOperation = (
+    ast.AddOp | ast.SubOp | ast.MultOp | ast.FloatDivOp | ast.FloorDivOp | ast.ModOp | ast.ExpoOp
+)
 
 
 @dataclass(slots=True)
@@ -408,13 +411,7 @@ class _Evaluator:
 
     def _numeric(
         self,
-        node: ast.AddOp
-        | ast.SubOp
-        | ast.MultOp
-        | ast.FloatDivOp
-        | ast.FloorDivOp
-        | ast.ModOp
-        | ast.ExpoOp,
+        node: LuaNumericOperation,
     ) -> LuaValue:
         if not _is_number(left := self.value(node.left)):
             return UNKNOWN

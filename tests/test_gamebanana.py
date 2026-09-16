@@ -3,8 +3,7 @@ import json
 from collections.abc import Callable
 from typing import Self
 
-from pist.gamebanana import GameBananaClient, GameBananaLookupError
-from pist.models import GameBananaSearchResp
+from pist.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSearchResp
 
 
 class _Response:

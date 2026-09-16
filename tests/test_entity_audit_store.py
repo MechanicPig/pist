@@ -3,8 +3,7 @@ import sqlite3
 
 import pytest
 
-from pist.game.entities import entity_rules_toml
-from pist.game.entity_audit import (
+from pist.entities.audit import (
     AttributeAuditStatus,
     EntityAuditStatus,
     EntityAuditStore,
@@ -13,6 +12,7 @@ from pist.game.entity_audit import (
     ObservationStatus,
     RuleCandidate,
 )
+from pist.entities.rules import entity_rules_toml
 
 
 def test_audit_store_preserves_raw_attributes_and_attribute_missingness(tmp_path) -> None:
@@ -60,7 +60,7 @@ def test_audit_store_preserves_raw_attributes_and_attribute_missingness(tmp_path
     )
     detail = store.entity_detail('Example/Berry', report_id)
     assert detail.occurrences[0].attrs == {'moon': True, 'x': 8, 'y': 16}
-    assert [(attribute.name, attribute.value_counts) for attribute in detail.attributes] == [
+    assert [(attribute.name, attribute.value_counts) for attribute in detail.attr_summaries] == [
         ('moon', ((False, 1), (True, 1))),
         ('tempo', ((None, 1), (1, 1))),
     ]
@@ -126,10 +126,12 @@ def test_audit_store_scopes_knowledge_to_one_entity_and_attribute(tmp_path) -> N
     assert detail.status is EntityAuditStatus.ENTITY_CANDIDATE
     assert detail.reason == '需要验证暂停菜单。'
     assert detail.evidence == '人工审查'
-    assert detail.attributes == ()
+    assert detail.attr_summaries == ()
 
 
-def test_generated_rule_layer_contains_only_complete_candidate_entities(tmp_path, monkeypatch) -> None:
+def test_generated_rule_layer_contains_only_complete_candidate_entities(
+    tmp_path, monkeypatch
+) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -345,59 +347,6 @@ def test_audit_store_renames_saved_kind_references(tmp_path) -> None:
     assert detail.variants[0].observations[0].kind == 'redberry'
 
 
-def test_legacy_whole_entity_confirmation_is_shown_without_collapsing_review(tmp_path) -> None:
-    report_path = tmp_path / 'report.json'
-    report_path.write_text(
-        json.dumps(
-            {
-                'unmatched': [
-                    {
-                        'entity_name': 'Example/Heart',
-                        'occurrences': [
-                            {
-                                'source': {
-                                    'scope': 'mod',
-                                    'map_file': 'Maps/Test.bin',
-                                    'map_name': 'Test',
-                                },
-                                'room': 'a',
-                                'attrs': {'variant': 'one'},
-                            },
-                            {
-                                'source': {
-                                    'scope': 'mod',
-                                    'map_file': 'Maps/Test.bin',
-                                    'map_name': 'Test',
-                                },
-                                'room': 'b',
-                                'attrs': {'variant': 'two'},
-                            },
-                        ],
-                    }
-                ]
-            }
-        ),
-        encoding='utf-8',
-    )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
-    report_id = store.import_report(report_path)
-    variants = store.entity_detail('Example/Heart', report_id).variants
-    store.save_group_observation(
-        'Example/Heart',
-        variants,
-        ObservationQuestion.ENTITY_CLASSIFICATION,
-        ObservationStatus.CONFIRMED,
-        kind='end_level_heart',
-        reason='旧版整实体确认',
-        evidence='in_game_test',
-    )
-
-    detail = store.entity_detail('Example/Heart', report_id)
-    assert detail.kind_confirmation is None
-    assert detail.legacy_kind_confirmation is not None
-    assert detail.legacy_kind_confirmation.kind == 'end_level_heart'
-
-
 def test_non_collectible_variant_is_a_negative_rule_candidate_example(tmp_path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
@@ -532,7 +481,7 @@ def test_map_metadata_is_preserved_and_can_distinguish_rule_candidates(tmp_path)
     detail = store.entity_detail('Example/Heart', report_id)
 
     assert detail.variants[0].meta == {'HeartIsEnd': False}
-    assert detail.attributes[0].name == '@meta.HeartIsEnd'
+    assert detail.attr_summaries[0].name == '@meta.HeartIsEnd'
     assert store.rule_candidates('Example/Heart', report_id) == (
         RuleCandidate('end_level_heart', {}, {'HeartIsEnd': True}, 1),
         RuleCandidate('keep_going_heart', {}, {'HeartIsEnd': False}, 1),
@@ -616,10 +565,10 @@ def test_attribute_default_value_is_saved_separately_from_missing_raw_values(tmp
     )
     detail = store.entity_detail('Example/Heart', report_id)
 
-    assert detail.attributes[0].name == 'fake'
-    assert detail.attributes[0].value_counts == ((None, 1), (True, 1))
-    assert detail.attributes[0].default_value is False
-    assert detail.attributes[0].evidence == '源码分析'
+    assert detail.attr_summaries[0].name == 'fake'
+    assert detail.attr_summaries[0].value_counts == ((None, 1), (True, 1))
+    assert detail.attr_summaries[0].default_value is False
+    assert detail.attr_summaries[0].evidence == '源码分析'
 
 
 def test_attribute_default_can_be_confirmed_as_json_null(tmp_path) -> None:
@@ -656,6 +605,6 @@ def test_attribute_default_can_be_confirmed_as_json_null(tmp_path) -> None:
         default_value=None,
     )
 
-    attribute = store.entity_detail('Example/Heart', report_id).attributes[0]
+    attribute = store.entity_detail('Example/Heart', report_id).attr_summaries[0]
 
     assert attribute.default_value is None

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -16,47 +17,46 @@ from textual.widgets import (
     Tree,
 )
 
+from pist.game.mods import Dependency, InstalledMod, LocalCampaign, LocalMap, ModScanReport
 from pist.game.routes import MapLayout, MapRoom, MapRoute
 from pist.game.saves import MapStats, SaveReader, SaveSlot
-from pist.gamebanana import GameBananaClient
+from pist.game.time import Time
+from pist.gamebanana import GameBananaClient, GameBananaSubmission
 from pist.local_data import LocalDataStore
-from pist.models import (
-    Dependency,
-    GameBananaSubmission,
-    InstalledMod,
-    LocalCampaign,
-    LocalMap,
-    ModScanReport,
-    PistSettings,
-    RecordDraft,
-)
-from pist.settings import SettingsStore
-from pist.sheet_report import ManualDraftField
-from pist.time import Time
-from pist.ui.browse import (
+from pist.records import MapRecord
+from pist.settings import PistSettings, SettingsStore
+from pist.sheet_report import ManualRecordField
+from pist.types import RecordValues
+from pist.ui.mods.browser import (
     DETAIL_SCROLL_ID,
     MAP_DETAIL_ID,
     AuthorSelectionScreen,
-    ConfirmDraftScreen,
     DatePickerScreen,
     DialogAuthorSelectionScreen,
-    DraftAuthorField,
-    DraftReferenceScreen,
-    DraftRouteField,
     MapItem,
     ModBrowserApp,
     ModTree,
+    RecordAuthorField,
+    RecordEditorScreen,
+    RecordReferenceScreen,
+    RecordRouteField,
     _plain_html,
     _recorded_maps_first,
     dependency_roots,
 )
 
 
+@dataclass(frozen=True, slots=True)
+class StubMapEntityStats:
+    record_values: RecordValues
+    select_conflicts: tuple[object, ...] = ()
+
+
 def test_gamebanana_html_description_is_rendered_as_plain_text() -> None:
     assert _plain_html('<p>适合初学者。<br>有进阶&nbsp;路线。</p>') == '适合初学者。\n有进阶 路线。'
 
 
-def test_draft_reference_and_collab_tags_are_shown_in_their_own_fields() -> None:
+def test_record_reference_and_collab_tags_are_shown_in_their_own_fields() -> None:
     map_info = LocalMap(
         file_path='Maps/Example/Map.bin',
         dialog_key='Example_Map',
@@ -89,12 +89,12 @@ def test_draft_reference_and_collab_tags_are_shown_in_their_own_fields() -> None
     )
     app._selected_mod = collab_mod
 
-    assert app._draft_reference(map_info, gamebanana) == ('简介', 'Ignored for collabs.')
+    assert app._record_reference(map_info, gamebanana) == ('简介', 'Ignored for collabs.')
     assert app._collab_tags(map_info) == 'Beginner'
 
 
-def test_draft_reference_opens_full_text_on_double_click() -> None:
-    draft = RecordDraft.model_validate(
+def test_record_reference_opens_full_text_on_double_click() -> None:
+    record = MapRecord.model_validate(
         {
             'created_at': '2026-09-04T12:00:00Z',
             'mod_metadata_name': 'Example',
@@ -102,6 +102,7 @@ def test_draft_reference_opens_full_text_on_double_click() -> None:
             'map_file': 'Maps/Example/Map.bin',
             'sid': 'Example/Map',
             'side': 'A',
+            'save_slot': 0,
         }
     )
     app = ModBrowserApp(
@@ -112,16 +113,16 @@ def test_draft_reference_opens_full_text_on_double_click() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(ConfirmDraftScreen(draft, reference=('简介', '完整介绍')))
+            app.push_screen(RecordEditorScreen(record, reference=('简介', '完整介绍')))
             await pilot.pause()
-            await pilot.double_click('#draft-reference-summary')
-            assert isinstance(app.screen, DraftReferenceScreen)
+            await pilot.double_click('#record-reference-summary')
+            assert isinstance(app.screen, RecordReferenceScreen)
 
     asyncio.run(check())
 
 
-def test_draft_author_value_reopens_its_source_selector() -> None:
-    draft = RecordDraft.model_validate(
+def test_record_author_value_reopens_its_source_selector() -> None:
+    record = MapRecord.model_validate(
         {
             'created_at': '2026-09-04T12:00:00Z',
             'mod_metadata_name': 'Example',
@@ -129,6 +130,7 @@ def test_draft_author_value_reopens_its_source_selector() -> None:
             'map_file': 'Maps/Example/Map.bin',
             'sid': 'Example/Map',
             'side': 'A',
+            'save_slot': 0,
             'authors': ['Alice'],
         }
     )
@@ -148,17 +150,17 @@ def test_draft_author_value_reopens_its_source_selector() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(ConfirmDraftScreen(draft, author_source=submission))
+            app.push_screen(RecordEditorScreen(record, author_source=submission))
             await pilot.pause()
-            await pilot.click(app.screen.query_one(DraftAuthorField))
+            await pilot.click(app.screen.query_one(RecordAuthorField))
             assert isinstance(app.screen, AuthorSelectionScreen)
-            assert app.screen.query_one('#draft-author-0', Checkbox).value
+            assert app.screen.query_one('#record-author-0', Checkbox).value
 
     asyncio.run(check())
 
 
-def test_draft_main_room_field_opens_route_editor() -> None:
-    draft = RecordDraft.model_validate(
+def test_record_main_room_field_opens_route_editor() -> None:
+    record = MapRecord.model_validate(
         {
             'created_at': '2026-09-04T12:00:00Z',
             'mod_metadata_name': 'Example',
@@ -166,6 +168,7 @@ def test_draft_main_room_field_opens_route_editor() -> None:
             'map_file': 'Maps/Example/Map.bin',
             'sid': 'Example/Map',
             'side': 'A',
+            'save_slot': 0,
         }
     )
     report = ModScanReport(
@@ -176,14 +179,58 @@ def test_draft_main_room_field_opens_route_editor() -> None:
     async def check() -> None:
         app = ModBrowserApp(report)
         async with app.run_test() as pilot:
-            app.push_screen(ConfirmDraftScreen(draft, edit_route=lambda: opened.append(None)))
+            app.push_screen(RecordEditorScreen(record, edit_route=lambda: opened.append(None)))
             await pilot.pause()
-            route_field = app.screen.query_one(DraftRouteField)
+            route_field = app.screen.query_one(RecordRouteField)
             assert route_field.render() == '单击编辑路线'
             await pilot.click(route_field)
 
     asyncio.run(check())
     assert opened == [None]
+
+
+def test_record_confirmation_prefills_saved_manual_values() -> None:
+    record = MapRecord.model_validate(
+        {
+            'created_at': '2026-09-04T12:00:00Z',
+            'mod_metadata_name': 'Example',
+            'map_name': 'Map',
+            'map_file': 'Maps/Example/Map.bin',
+            'sid': 'Example/Map',
+            'side': 'A',
+            'save_slot': 0,
+            'record_values': {
+                '主表': {
+                    '标注难度': '专家',
+                    '起始日期': '2026-09-01',
+                    '评分': 8,
+                    '备注': '好图',
+                }
+            },
+        }
+    )
+    manual_fields = (
+        ManualRecordField('标注难度', 17, ('高级', '专家')),
+        ManualRecordField('起始日期', 4),
+        ManualRecordField('评分', 2),
+        ManualRecordField('备注', 1),
+    )
+    app = ModBrowserApp(
+        ModScanReport(
+            mods_directory='C:/Celeste/Mods', blacklist_entries=[], skipped_blacklisted=[], mods=[]
+        )
+    )
+
+    async def check() -> None:
+        async with app.run_test() as pilot:
+            app.push_screen(RecordEditorScreen(record, manual_fields=manual_fields))
+            await pilot.pause()
+            assert app.screen.query_one('#record-manual-0', Select).value == '专家'
+            assert app.screen.query_one('#record-manual-1', Input).value == '2026-09-01'
+            assert app.screen.query_one('#record-manual-2', Input).value == '8'
+            assert app.screen.query_one('#record-manual-3', Input).value == '好图'
+
+    asyncio.run(check())
 
 
 def test_recorded_maps_are_displayed_before_unrecorded_maps() -> None:
@@ -300,6 +347,40 @@ def test_tree_includes_enabled_disabled_and_missing_dependencies() -> None:
         None,
         None,
     ]
+
+
+def test_tree_tracks_only_the_current_dependency_path() -> None:
+    root = InstalledMod(
+        source='zip',
+        filename='Root.zip',
+        path='C:/Celeste/Mods/Root.zip',
+        metadata_name='Root',
+        metadata_version='1.0.0',
+        dependencies=[Dependency(name='Child', version='1.0.0')],
+    )
+    child = InstalledMod(
+        source='zip',
+        filename='Child.zip',
+        path='C:/Celeste/Mods/Child.zip',
+        metadata_name='Child',
+        metadata_version='1.0.0',
+        dependencies=[Dependency(name='Root', version='1.0.0')],
+    )
+    app = ModBrowserApp(
+        ModScanReport(
+            mods_directory='C:/Celeste/Mods',
+            blacklist_entries=[],
+            skipped_blacklisted=[],
+            mods=[root, child],
+        )
+    )
+    tree: Tree[InstalledMod] = Tree('Mods')
+    ancestry: set[str] = set()
+
+    app._add_tree_node(tree.root, root, is_optional=False, ancestry=ancestry)
+
+    assert ancestry == set()
+    assert str(tree.root.children[0].children[0].children[0].label) == '↻ Root (循环依赖)'
 
 
 def test_detail_pane_scrolls_with_shortcut() -> None:
@@ -458,7 +539,7 @@ def test_save_slot_switch_reorders_maps_by_recorded_status() -> None:
     asyncio.run(check())
 
 
-def test_map_selection_requires_right_click_to_write_record_draft(
+def test_map_selection_requires_right_click_to_write_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_info = LocalMap(
@@ -485,8 +566,8 @@ def test_map_selection_requires_right_click_to_write_record_draft(
 
     save_slot = SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)})
     monkeypatch.setattr(
-        'pist.ui.browse.load_map_entity_table_values_from_path',
-        lambda *_args, **_kwargs: {'主表': {'红草莓数': 2}},
+        'pist.ui.mods.browser.load_map_entity_stats_from_path',
+        lambda *_args, **_kwargs: StubMapEntityStats({'主表': {'红草莓数': 2}}),
     )
 
     async def check() -> None:
@@ -495,19 +576,19 @@ def test_map_selection_requires_right_click_to_write_record_draft(
             map_list = app.query_one(ListView)
             map_list.focus()
             await pilot.press('enter')
-            with pytest.raises(ValueError, match='No saved local draft'):
-                local_data.load_draft(1)
+            with pytest.raises(ValueError, match='No saved local record'):
+                local_data.load_record(1)
             await pilot.click(map_list.query_one(MapItem), button=3)
-            await pilot.click('#draft-confirm-save')
+            await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
-    draft = local_data.load_draft(1)
-    assert draft.map_name == 'Example Map'
-    assert draft.mod_metadata_name == 'Example'
-    assert draft.table_values == {'主表': {'红草莓数': 2}}
+    record = local_data.load_record(1)
+    assert record.map_name == 'Example Map'
+    assert record.mod_metadata_name == 'Example'
+    assert record.record_values == {'主表': {'红草莓数': 2}}
 
 
-def test_record_draft_includes_saved_main_room_count(
+def test_record_includes_saved_main_room_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_info = LocalMap(
@@ -533,8 +614,8 @@ def test_record_draft_includes_saved_main_room_count(
     local_data = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
     local_data.save_route(MapRoute(map_file=map_info.file_path, rooms=('start', 'middle', 'goal')))
     monkeypatch.setattr(
-        'pist.ui.browse.load_map_entity_table_values_from_path',
-        lambda *_args, **_kwargs: {'主表': {'红草莓数': 2}},
+        'pist.ui.mods.browser.load_map_entity_stats_from_path',
+        lambda *_args, **_kwargs: StubMapEntityStats({'主表': {'红草莓数': 2}}),
     )
 
     async def check() -> None:
@@ -545,11 +626,11 @@ def test_record_draft_includes_saved_main_room_count(
         )
         async with app.run_test() as pilot:
             await pilot.click(app.query_one(MapItem), button=3)
-            await pilot.click('#draft-confirm-save')
+            await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
-    draft = local_data.load_draft(1)
-    assert draft.table_values == {'主表': {'红草莓数': 2, '主房间数': 3}}
+    record = local_data.load_record(1)
+    assert record.record_values == {'主表': {'红草莓数': 2, '主房间数': 3}}
 
 
 @pytest.mark.parametrize('trigger', ('shortcut', 'double_click'))
@@ -573,7 +654,7 @@ def test_map_preview_triggers_and_persists_highlighted_map(
         ],
     )
     layout = MapLayout((MapRoom('start', 0, 0, 320, 184), MapRoom('goal', 400, 0, 320, 184)))
-    monkeypatch.setattr('pist.ui.browse.load_map_layout', lambda *_: layout)
+    monkeypatch.setattr('pist.ui.mods.browser.load_map_layout', lambda *_: layout)
     local_data = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
     started = asyncio.Event()
     finish = asyncio.Event()
@@ -587,7 +668,7 @@ def test_map_preview_triggers_and_persists_highlighted_map(
             await finish.wait()
             return MapRoute(map_file=map_info.file_path, rooms=('start',))
 
-    monkeypatch.setattr('pist.ui.browse.MapPreview', Preview)
+    monkeypatch.setattr('pist.ui.mods.browser.MapPreview', Preview)
 
     async def check() -> None:
         app = ModBrowserApp(report, local_data=local_data)
@@ -611,7 +692,7 @@ def test_map_preview_triggers_and_persists_highlighted_map(
     assert route.rooms == ('start',)
 
 
-def test_map_selected_in_detail_edits_credit_authors_from_the_draft(
+def test_map_selected_in_detail_edits_credit_authors_from_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
@@ -653,8 +734,8 @@ def test_map_selected_in_detail_edits_credit_authors_from_the_draft(
     local_data = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
     save_slot = SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)})
     monkeypatch.setattr(
-        'pist.ui.browse.load_map_entity_table_values_from_path',
-        lambda *_args, **_kwargs: {},
+        'pist.ui.mods.browser.load_map_entity_stats_from_path',
+        lambda *_args, **_kwargs: StubMapEntityStats({}),
     )
 
     async def check() -> None:
@@ -666,23 +747,23 @@ def test_map_selected_in_detail_edits_credit_authors_from_the_draft(
         )
         async with app.run_test() as pilot:
             await pilot.click(app.query_one(MapItem), button=3)
-            assert isinstance(app.screen, ConfirmDraftScreen)
-            await pilot.click(app.screen.query_one(DraftAuthorField))
+            assert isinstance(app.screen, RecordEditorScreen)
+            await pilot.click(app.screen.query_one(RecordAuthorField))
             assert isinstance(app.screen, AuthorSelectionScreen)
-            await pilot.click('#draft-author-0')
+            await pilot.click('#record-author-0')
             await pilot.pause()
             await pilot.click('#author-select-save')
-            assert isinstance(app.screen, ConfirmDraftScreen)
+            assert isinstance(app.screen, RecordEditorScreen)
             await pilot.pause()
-            await pilot.click('#draft-confirm-save')
+            await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
-    draft = local_data.load_draft(1)
-    assert draft.authors == ('Alice',)
-    assert draft.credits[1]['groupName'] == 'Special Thanks'
+    record = local_data.load_record(1)
+    assert record.authors == ('Alice',)
+    assert record.credits[1].group_name == 'Special Thanks'
 
 
-def test_collab_map_edits_multiple_dialog_authors_from_the_draft(
+def test_collab_map_edits_multiple_dialog_authors_from_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     map_info = LocalMap(
@@ -709,16 +790,16 @@ def test_collab_map_edits_multiple_dialog_authors_from_the_draft(
     local_data = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
     save_slot = SaveSlot(0, {('Expert/Example', 0): MapStats(Time(1_000), 1)})
     monkeypatch.setattr(
-        'pist.ui.browse.load_map_entity_table_values_from_path',
-        lambda *_args, **_kwargs: {},
+        'pist.ui.mods.browser.load_map_entity_stats_from_path',
+        lambda *_args, **_kwargs: StubMapEntityStats({}),
     )
 
     async def check() -> None:
         app = ModBrowserApp(report, local_data=local_data, save_slot=save_slot)
         async with app.run_test() as pilot:
             await pilot.click(app.query_one(MapItem), button=3)
-            assert isinstance(app.screen, ConfirmDraftScreen)
-            await pilot.click(app.screen.query_one(DraftAuthorField))
+            assert isinstance(app.screen, RecordEditorScreen)
+            await pilot.click(app.screen.query_one(RecordAuthorField))
             assert isinstance(app.screen, DialogAuthorSelectionScreen)
             text_area = app.screen.query_one(TextArea)
             text_area.selection = Selection((0, 3), (0, 14))
@@ -737,16 +818,16 @@ def test_collab_map_edits_multiple_dialog_authors_from_the_draft(
             await pilot.pause()
             assert app.screen.query_one('#dialog-author-0', Input).value == 'Robert Jones'
             await pilot.click('#dialog-author-save')
-            assert isinstance(app.screen, ConfirmDraftScreen)
-            await pilot.click('#draft-confirm-save')
+            assert isinstance(app.screen, RecordEditorScreen)
+            await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
-    draft = local_data.load_draft(1)
-    assert draft.authors == ('Robert Jones',)
+    record = local_data.load_record(1)
+    assert record.authors == ('Robert Jones',)
 
 
-def test_draft_confirmation_saves_optional_manual_main_table_values() -> None:
-    draft = RecordDraft.model_validate(
+def test_record_confirmation_saves_optional_manual_main_record_values() -> None:
+    record = MapRecord.model_validate(
         {
             'created_at': '2026-09-04T12:00:00Z',
             'mod_metadata_name': 'Example',
@@ -754,55 +835,56 @@ def test_draft_confirmation_saves_optional_manual_main_table_values() -> None:
             'map_file': 'Maps/Example/Map.bin',
             'sid': 'Example/Map',
             'side': 'A',
-            'table_values': {'主表': {'红草莓数': 2}},
+            'save_slot': 0,
+            'record_values': {'主表': {'红草莓数': 2}},
         }
     )
     manual_fields = (
-        ManualDraftField('体感难度', 17, ('高级',)),
-        ManualDraftField('难度子阶', 17, ('低',)),
-        ManualDraftField('标注难度', 17, ('专家',)),
-        ManualDraftField('标注难度子阶', 17, ('高',)),
-        ManualDraftField('起始日期', 4),
-        ManualDraftField('状态', 17, ('通关', '进行中')),
-        ManualDraftField('评分', 2),
-        ManualDraftField('备注', 1),
+        ManualRecordField('体感难度', 17, ('高级',)),
+        ManualRecordField('难度子阶', 17, ('低',)),
+        ManualRecordField('标注难度', 17, ('专家',)),
+        ManualRecordField('标注难度子阶', 17, ('高',)),
+        ManualRecordField('起始日期', 4),
+        ManualRecordField('状态', 17, ('通关', '进行中')),
+        ManualRecordField('评分', 2),
+        ManualRecordField('备注', 1),
     )
     report = ModScanReport(
         mods_directory='C:/Celeste/Mods', blacklist_entries=[], skipped_blacklisted=[], mods=[]
     )
-    saved: list[RecordDraft] = []
+    saved: list[MapRecord] = []
 
     async def check() -> None:
         app = ModBrowserApp(report)
         async with app.run_test() as pilot:
             app.push_screen(
-                ConfirmDraftScreen(draft, manual_fields=manual_fields),
+                RecordEditorScreen(record, manual_fields=manual_fields),
                 lambda result: saved.append(result) if result is not None else None,
             )
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmDraftScreen)
-            app.screen.query_one('#draft-manual-0', Select).value = '高级'
-            app.screen.query_one('#draft-manual-1', Select).value = '低'
-            app.screen.query_one('#draft-manual-2', Select).value = '专家'
-            app.screen.query_one('#draft-manual-3', Select).value = '高'
+            assert isinstance(app.screen, RecordEditorScreen)
+            app.screen.query_one('#record-manual-0', Select).value = '高级'
+            app.screen.query_one('#record-manual-1', Select).value = '低'
+            app.screen.query_one('#record-manual-2', Select).value = '专家'
+            app.screen.query_one('#record-manual-3', Select).value = '高'
             await pilot.pause()
-            app.screen.query_one('#draft-manual-4-picker', Button).press()
+            app.screen.query_one('#record-manual-4-picker', Button).press()
             await pilot.pause()
             assert isinstance(app.screen, DatePickerScreen)
             app.screen.query_one('#date-picker-day-1', Button).press()
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmDraftScreen)
-            app.screen.query_one('#draft-manual-4', Input).value = '2026-09-12'
-            app.screen.query_one('#draft-manual-5', Select).value = '通关'
-            app.screen.query_one('#draft-manual-6', Input).value = '8'
-            app.screen.query_one('#draft-manual-7', Input).value = '好图'
-            await pilot.click('#draft-confirm-save')
+            assert isinstance(app.screen, RecordEditorScreen)
+            app.screen.query_one('#record-manual-4', Input).value = '2026-09-12'
+            app.screen.query_one('#record-manual-5', Select).value = '通关'
+            app.screen.query_one('#record-manual-6', Input).value = '8'
+            app.screen.query_one('#record-manual-7', Input).value = '好图'
+            await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
     assert saved == [
-        draft.model_copy(
+        record.model_copy(
             update={
-                'table_values': {
+                'record_values': {
                     '主表': {
                         '红草莓数': 2,
                         '体感难度': '高级',
@@ -820,7 +902,7 @@ def test_draft_confirmation_saves_optional_manual_main_table_values() -> None:
     ]
 
 
-def test_map_without_record_does_not_open_draft_confirmation(tmp_path: Path) -> None:
+def test_map_without_record_does_not_open_record_confirmation(tmp_path: Path) -> None:
     map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
     report = ModScanReport(
         mods_directory='C:/Celeste/Mods',
@@ -844,11 +926,11 @@ def test_map_without_record_does_not_open_draft_confirmation(tmp_path: Path) -> 
         app = ModBrowserApp(report, local_data=local_data, save_slot=save_slot)
         async with app.run_test() as pilot:
             await pilot.click(app.query_one(MapItem), button=3)
-            assert not isinstance(app.screen, ConfirmDraftScreen)
+            assert not isinstance(app.screen, RecordEditorScreen)
 
     asyncio.run(check())
-    with pytest.raises(ValueError, match='No saved local draft'):
-        local_data.load_draft(1)
+    with pytest.raises(ValueError, match='No saved local record'):
+        local_data.load_record(1)
 
 
 def test_theme_shortcut_persists_selection(tmp_path: Path) -> None:

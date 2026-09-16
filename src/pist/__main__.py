@@ -8,21 +8,22 @@ from datetime import UTC, datetime
 from getpass import getpass
 from pathlib import Path
 
-from pist.game.mods import ModScanner
+from pist.game.mods import ModScanner, ModScanReport
 from pist.game.routes import EndersBlenderReader
 from pist.game.saves import SaveReader
 from pist.local_data import LocalDataStore
-from pist.models import InspectionReport, ModScanReport, PistSettings
 from pist.secrets import CredentialStore
-from pist.settings import SettingsStore
+from pist.settings import PistSettings, SettingsStore
 from pist.sheet_report import field_coverage_report
-from pist.smartsheet import TencentSmartSheetClient, extract_file_id
-from pist.ui.browse import browse_mods
-from pist.ui.entity_audit import review_entity_audit
-from pist.ui.entity_rules import manage_entity_rules
+from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
+from pist.ui.entities.audit import review_entity_audit
+from pist.ui.entities.rules import manage_entity_rules
+from pist.ui.mods.browser import browse_mods
 
 INSPECT_DIR = Path('.pist/inspect')
 MOD_REPORT_DIR = Path('.pist/mods')
+
+type SettingValue = Path | str | None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,14 +85,20 @@ def build_parser() -> argparse.ArgumentParser:
         '--output-path', type=Path, help='Markdown output path; defaults beside input.'
     )
 
-    draft = subcommands.add_parser('draft', help='Submit saved local record drafts.')
-    draft_subcommands = draft.add_subparsers(dest='draft_command', required=True)
-    submit = draft_subcommands.add_parser('submit', help='Submit one saved local draft to the main table.')
-    submit.add_argument('draft_id', type=int, help='Local draft identifier shown after saving a draft.')
-    mode = submit.add_mutually_exclusive_group(required=True)
+    record = subcommands.add_parser('record', help='Manage saved local map records.')
+    record_subcommands = record.add_subparsers(dest='record_command', required=True)
+    sync = record_subcommands.add_parser(
+        'sync', help='Synchronize one saved local record to the main table.'
+    )
+    sync.add_argument(
+        'record_id', type=int, help='Local record identifier shown after saving a record.'
+    )
+    mode = sync.add_mutually_exclusive_group(required=True)
     mode.add_argument('--add', dest='update', action='store_false', help='Add a new record.')
-    mode.add_argument('--update', dest='update', action='store_true', help='Update one matching record.')
-    submit.add_argument('--sheet-source', help='Smart Sheet URL or file ID; defaults to settings.')
+    mode.add_argument(
+        '--update', dest='update', action='store_true', help='Update one matching record.'
+    )
+    sync.add_argument('--sheet-source', help='Smart Sheet URL or file ID; defaults to settings.')
     mods = subcommands.add_parser('mods', help='Inspect locally enabled Mods.')
     mods_subcommands = mods.add_subparsers(dest='mods_command', required=True)
     scan = mods_subcommands.add_parser('scan', help='Save an offline enabled-Mod inventory.')
@@ -156,11 +163,11 @@ def set_dialog_languages(store: SettingsStore, languages: list[str]) -> None:
     print(f'Dialog language preference saved: {", ".join(preferences)}')
 
 
-def setting_value(args: argparse.Namespace) -> Path | str | None:
+def setting_value(args: argparse.Namespace) -> SettingValue:
     return getattr(args, 'directory', None) or getattr(args, 'url', None)
 
 
-def set_default_setting(store: SettingsStore, key: str, value: Path | str | None) -> None:
+def set_default_setting(store: SettingsStore, key: str, value: SettingValue) -> None:
     update_settings(store, **{key: value})
     action = 'cleared' if value is None else 'saved'
     print(f'Default {key} {action}.')
@@ -220,15 +227,15 @@ async def inspect_sheet(
     print(json.dumps(inspection_summary(result), ensure_ascii=False, indent=2))
 
 
-async def submit_saved_draft(
-    store: CredentialStore, source: str, draft_id: int, *, update: bool
+async def sync_saved_record(
+    store: CredentialStore, source: str, record_id: int, *, update: bool
 ) -> None:
-    """Submit one existing local draft using an explicit add or update operation."""
-    draft = LocalDataStore().load_draft(draft_id)
+    """Synchronize one local record using an explicit add or update operation."""
+    record = LocalDataStore().load_record(record_id)
     client = TencentSmartSheetClient(store)
-    record_id = await client.submit_draft(extract_file_id(source), draft, update=update)
+    remote_record_id = await client.sync_record(extract_file_id(source), record, update=update)
     action = '更新' if update else '新增'
-    print(f'已{action}表格记录：{record_id}')
+    print(f'已{action}表格记录：{remote_record_id}')
 
 
 def create_sheet_report(input_path: Path, output_path: Path | None) -> Path:
@@ -335,11 +342,11 @@ async def async_main(args: argparse.Namespace) -> None:
     elif args.command == 'sheet' and args.sheet_command == 'report':
         output_path = create_sheet_report(args.input_path, args.output_path)
         print(f'Field-coverage report saved to: {output_path}')
-    elif args.command == 'draft' and args.draft_command == 'submit':
-        await submit_saved_draft(
+    elif args.command == 'record' and args.record_command == 'sync':
+        await sync_saved_record(
             store,
             default_sheet_source(args.sheet_source, settings_store.load()),
-            args.draft_id,
+            args.record_id,
             update=args.update,
         )
     elif args.command == 'mods' and args.mods_command == 'scan':

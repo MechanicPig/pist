@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from pist.game.saves import MapStats, SaveReader, sid_for_map_file
-from pist.models import LocalMap
-from pist.time import Time
+from pist.game.mods import LocalMap
+from pist.game.saves import MapProgress, MapStats, SaveReader, sid_for_map_file
+from pist.game.time import Time
 
 
 def test_time_converts_celeste_filetime_and_formats_seconds() -> None:
@@ -72,10 +72,10 @@ def test_save_reader_uses_native_stats_and_falls_back_to_mod_save_data(tmp_path:
         LocalMap(file_path='Maps/Author/Pack/Other.bin', dialog_key='Other')
     ) == MapStats(time_played=Time(4_000), deaths=4)
     reader = SaveReader(tmp_path / 'Celeste')
-    assert reader.map_progress('Maps/Author/Pack/Map.bin') == 0
-    assert reader.map_progress('Maps/Author/Pack/Map-B.bin') == 2
-    assert reader.map_progress('Maps/Author/Pack/Other.bin') == 2
-    assert reader.map_progress('Maps/Author/Pack/Missing.bin') == 3
+    assert reader.map_progress('Maps/Author/Pack/Map.bin') is MapProgress.SINGLE_RUN_COMPLETED
+    assert reader.map_progress('Maps/Author/Pack/Map-B.bin') is MapProgress.ENTERED
+    assert reader.map_progress('Maps/Author/Pack/Other.bin') is MapProgress.ENTERED
+    assert reader.map_progress('Maps/Author/Pack/Missing.bin') is MapProgress.UNRECORDED
 
 
 def test_save_reader_lists_standard_and_mod_save_data_slots(tmp_path: Path) -> None:

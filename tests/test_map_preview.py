@@ -5,8 +5,8 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, web
 
-from pist import map_preview
-from pist.game.entities import EntityStat
+from pist.entities.rules import EntityStat
+from pist.game.mods import InstalledMod, LocalMap
 from pist.game.routes import (
     EndersBlenderSave,
     MapLayout,
@@ -15,10 +15,11 @@ from pist.game.routes import (
     MapRoom,
     MapRoute,
 )
+from pist.game.time import Time
 from pist.local_data import LocalDataStore
-from pist.map_preview import MAP_PREVIEW_HTML, MapPreview, _web_file
-from pist.models import InstalledMod, LocalMap
-from pist.time import Time
+from pist.map_preview import MapPreview
+from pist.map_preview import server as map_preview_server
+from pist.map_preview.server import MAP_PREVIEW_HTML, _web_file
 
 
 class _Request:
@@ -319,17 +320,17 @@ def test_map_preview_serves_packaged_game_assets() -> None:
 
 
 def test_map_preview_serves_any_existing_safe_packaged_sprite() -> None:
-    assert map_preview._sprite_data('silverberry.png') is not None
+    assert map_preview_server._sprite_data('silverberry.png') is not None
 
 
 def test_map_preview_serves_only_safe_local_configured_sprites(tmp_path, monkeypatch) -> None:
     sprites = tmp_path / 'sprites'
     sprites.mkdir()
     (sprites / 'seed.png').write_bytes(b'png')
-    monkeypatch.setattr(map_preview, 'LOCAL_SPRITES_DIR', sprites)
+    monkeypatch.setattr(map_preview_server, 'LOCAL_SPRITES_DIR', sprites)
 
-    assert map_preview._sprite_data('seed.png') == b'png'
-    assert map_preview._sprite_data('../seed.png') is None
+    assert map_preview_server._sprite_data('seed.png') == b'png'
+    assert map_preview_server._sprite_data('../seed.png') is None
 
 
 def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, monkeypatch) -> None:
@@ -361,7 +362,7 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
         enders_blender_save=EndersBlenderSave(0, {'Author/Pack/Target': ('target',)}),
     )
     monkeypatch.setattr(
-        'pist.map_preview.load_map_layout',
+        'pist.map_preview.server.load_map_layout',
         lambda _mod, _map: MapLayout(
             (MapRoom('target', 0, 0, 320, 184), MapRoom('saved', 400, 0, 320, 184))
         ),
@@ -393,9 +394,7 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
     assert forwarded['title'] == 'Target'
 
 
-def test_map_preview_serves_loopback_state_and_persists_saved_route(
-    tmp_path, monkeypatch
-) -> None:
+def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, monkeypatch) -> None:
     map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
@@ -404,7 +403,9 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(
         local_data=local_data,
     )
     urls: list[str] = []
-    monkeypatch.setattr('pist.map_preview.webbrowser.open', lambda url: urls.append(url) or True)
+    monkeypatch.setattr(
+        'pist.map_preview.server.webbrowser.open', lambda url: urls.append(url) or True
+    )
 
     async def check() -> MapRoute | None:
         task = asyncio.create_task(preview.preview())

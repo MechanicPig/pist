@@ -3,8 +3,7 @@ from pathlib import Path
 import pytest
 
 from pist.__main__ import default_game_dir, default_sheet_source, set_default_setting
-from pist.models import PistSettings
-from pist.settings import SettingsStore
+from pist.settings import PistSettings, SettingsStore
 
 
 def test_settings_store_uses_dark_theme_until_saved(tmp_path: Path) -> None:
