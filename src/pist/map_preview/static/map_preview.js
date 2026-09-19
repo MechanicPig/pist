@@ -31,7 +31,7 @@ let selectedRoomToReveal;
 let canvasSelectedRoom;
 let flashingRoom;
 let flashTimer;
-let excludedMarkers = new Set();
+let excludedEntities = new Set();
 let openingMap = false;
 
 const MAP_MARGIN = 100;
@@ -114,21 +114,21 @@ function tileRows(room, rows, color) {
   }
 }
 
-function marker(item, room) {
-  const x = room.x + item.x;
-  const y = room.y + item.y;
-  const excluded = item.key && excludedMarkers.has(item.key);
+function drawEntity(entity, room) {
+  const x = room.x + entity.x;
+  const y = room.y + entity.y;
+  const excluded = entity.key && excludedEntities.has(entity.key);
   if (excluded) ctx.globalAlpha = .25;
-  if (item.kind === 'audit') {
+  if (entity.kind === 'audit') {
     ctx.strokeStyle = '#f25b9a';
     ctx.lineWidth = 2 / scale;
     ctx.strokeRect(x - 4 / scale, y - 4 / scale, 8 / scale, 8 / scale);
     if (excluded) ctx.globalAlpha = 1;
     return;
   }
-  const legacyName = item.kind === 'strawberry' || item.kind === 'moonberry' || item.kind === 'cassette'
-    ? item.kind : item.kind.includes('goldenberry') ? 'goldenberry' : item.kind.includes('heart') ? 'heart' : undefined;
-  if (!drawSprite(item.sprite ?? legacyName, x, y)) {
+  const legacyName = entity.kind === 'strawberry' || entity.kind === 'moonberry' || entity.kind === 'cassette'
+    ? entity.kind : entity.kind.includes('goldenberry') ? 'goldenberry' : entity.kind.includes('heart') ? 'heart' : undefined;
+  if (!drawSprite(entity.sprite ?? legacyName, x, y)) {
     ctx.strokeStyle = '#f25b9a';
     ctx.lineWidth = 2 / scale;
     ctx.strokeRect(x - 4, y - 4, 8, 8);
@@ -151,18 +151,18 @@ function drawSprite(name, x, y) {
   return true;
 }
 
-function triggerBox(link, room) {
-  if (!room || !Number.isFinite(link.x) || !Number.isFinite(link.y)) return;
-  const width = Number.isFinite(link.width) ? link.width : 0;
-  const height = Number.isFinite(link.height) ? link.height : 0;
-  return { x: room.x + link.x, y: room.y + link.y, width, height };
+function entranceBox(entrance, room) {
+  if (!room || !Number.isFinite(entrance.x) || !Number.isFinite(entrance.y)) return;
+  const width = Number.isFinite(entrance.width) ? entrance.width : 0;
+  const height = Number.isFinite(entrance.height) ? entrance.height : 0;
+  return { x: room.x + entrance.x, y: room.y + entrance.y, width, height };
 }
 
-function trigger(link, room) {
-  const box = triggerBox(link, room);
+function drawEntrance(entrance, room) {
+  const box = entranceBox(entrance, room);
   if (!box) return;
   const x = box.x + box.width / 2;
-  const color = link.available ? '#ffad42' : '#775b37';
+  const color = entrance.available ? '#ffad42' : '#775b37';
   if (box.width || box.height) {
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5 / scale;
@@ -172,7 +172,7 @@ function trigger(link, room) {
   ctx.font = `${12 / scale}px sans-serif`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  const label = link.targetTitle;
+  const label = entrance.targetTitle;
   const metrics = ctx.measureText(label);
   const labelX = x - metrics.width / 2;
   const labelY = box.y - 9 / scale;
@@ -231,9 +231,9 @@ function draw() {
     ctx.strokeStyle = highlighted ? '#f06464' : selected.has(room.name) ? '#75ee47' : '#65717d';
     ctx.lineWidth = (highlighted || selected.has(room.name) ? 3 : 1) / scale;
     ctx.strokeRect(room.x, room.y, room.width, room.height);
-    for (const item of room.markers) marker(item, room);
+    for (const entity of room.entities) drawEntity(entity, room);
     for (const item of room.respawns) respawn(item, room);
-    for (const link of state.links) if (link.room === room.name) trigger(link, room);
+    for (const entrance of state.entrances) if (entrance.room === room.name) drawEntrance(entrance, room);
     const index = order.get(room.name);
     if (index) {
       ctx.font = `${15 / scale}px sans-serif`;
@@ -414,19 +414,19 @@ function setRoomCount(room, count) {
 function collectibleSummaryText() {
   const groups = new Map();
   for (const room of state.rooms) {
-    for (const marker of room.markers) {
-      if (!marker.summary || !marker.key) continue;
-      const key = marker.summary.kind;
+    for (const entity of room.entities) {
+      if (!entity.summary || !entity.key) continue;
+      const key = entity.summary.kind;
       let group = groups.get(key);
       if (!group) {
-        group = { ...marker.summary, total: 0, active: 0, values: new Set() };
+        group = { ...entity.summary, total: 0, active: 0, values: new Set() };
         groups.set(key, group);
       }
       group.total += 1;
-      if (!excludedMarkers.has(marker.key)) {
+      if (!excludedEntities.has(entity.key)) {
         group.active += 1;
-        if (marker.summary.stat === 'select' && marker.summary.value) {
-          group.values.add(marker.summary.value);
+        if (entity.summary.stat === 'select' && entity.summary.value) {
+          group.values.add(entity.summary.value);
         }
       }
     }
@@ -464,11 +464,11 @@ function roomAt(point) {
   );
 }
 
-function nearestTrigger(point) {
+function nearestEntrance(point) {
   const maximumDistance = 16 / scale;
-  return state.links
-    .filter(link => link.available)
-    .map(link => ({ link, box: triggerBox(link, roomByName.get(link.room)) }))
+  return state.entrances
+    .filter(entrance => entrance.available)
+    .map(entrance => ({ entrance, box: entranceBox(entrance, roomByName.get(entrance.room)) }))
     .filter(item => item.box)
     .map(item => ({
       ...item,
@@ -480,35 +480,35 @@ function nearestTrigger(point) {
         && point.y >= item.box.y && point.y <= item.box.y + item.box.height,
     }))
     .filter(item => item.contains || item.distance <= maximumDistance)
-    .sort((left, right) => left.distance - right.distance)[0]?.link;
+    .sort((left, right) => left.distance - right.distance)[0]?.entrance;
 }
 
-function nearestCollectibleMarker(point) {
+function nearestCollectibleEntity(point) {
   const maximumDistance = 12 / scale;
   return state.rooms
-    .flatMap(room => room.markers.map(marker => ({ room, marker })))
-    .filter(item => item.marker.key && item.marker.summary)
+    .flatMap(room => room.entities.map(entity => ({ room, entity })))
+    .filter(item => item.entity.key && item.entity.summary)
     .map(item => ({
       ...item,
       distance: Math.hypot(
-        point.x - (item.room.x + item.marker.x),
-        point.y - (item.room.y + item.marker.y),
+        point.x - (item.room.x + item.entity.x),
+        point.y - (item.room.y + item.entity.y),
       ),
     }))
     .filter(item => item.distance <= maximumDistance)
-    .sort((left, right) => left.distance - right.distance)[0]?.marker;
+    .sort((left, right) => left.distance - right.distance)[0]?.entity;
 }
 
-function nearestInspectableMarker(point) {
+function nearestInspectableEntity(point) {
   const maximumDistance = 12 / scale;
   return state.rooms
-    .flatMap(room => room.markers.map(marker => ({ room, marker })))
-    .filter(item => item.marker.entityId)
+    .flatMap(room => room.entities.map(entity => ({ room, entity })))
+    .filter(item => item.entity.entityId)
     .map(item => ({
       ...item,
       distance: Math.hypot(
-        point.x - (item.room.x + item.marker.x),
-        point.y - (item.room.y + item.marker.y),
+        point.x - (item.room.x + item.entity.x),
+        point.y - (item.room.y + item.entity.y),
       ),
     }))
     .filter(item => item.distance <= maximumDistance)
@@ -516,9 +516,9 @@ function nearestInspectableMarker(point) {
 }
 
 function showInspectable(item, event) {
-  entityInfoId.textContent = item.marker.entityId;
-  entityInfoSource.textContent = `${item.marker.kind} · ${item.room.name}`;
-  entityInfoAttrs.textContent = JSON.stringify(item.marker.attrs, null, 2);
+  entityInfoId.textContent = item.entity.entityId;
+  entityInfoSource.textContent = `${item.entity.kind} · ${item.room.name}`;
+  entityInfoAttrs.textContent = JSON.stringify(item.entity.attrs, null, 2);
   entityInfo.style.left = `${Math.min(event.clientX + 12, innerWidth - 24)}px`;
   entityInfo.style.top = `${Math.min(event.clientY + 12, innerHeight - 24)}px`;
   entityInfo.hidden = false;
@@ -632,17 +632,17 @@ addEventListener('mouseup', event => {
       && Math.hypot(point.x - lastRightClick.point.x, point.y - lastRightClick.point.y) <= 12 / scale;
     lastRightClick = isDoubleClick ? undefined : { time: event.timeStamp, point };
     if (mode === 'navigate' && isDoubleClick) {
-      const link = nearestTrigger(point);
-      if (link) openMap(link.targetSid);
+      const entrance = nearestEntrance(point);
+      if (entrance) openMap(entrance.targetSid);
     } else if (!drag.moved && mode === 'collectibles') {
-      const marker = nearestCollectibleMarker(point);
-      if (marker?.key) {
-        if (excludedMarkers.has(marker.key)) excludedMarkers.delete(marker.key);
-        else excludedMarkers.add(marker.key);
+      const entity = nearestCollectibleEntity(point);
+      if (entity?.key) {
+        if (excludedEntities.has(entity.key)) excludedEntities.delete(entity.key);
+        else excludedEntities.add(entity.key);
         update();
       }
     } else {
-      const inspectable = nearestInspectableMarker(point);
+      const inspectable = nearestInspectableEntity(point);
       if (inspectable) showInspectable(inspectable, event);
     }
     return;
@@ -696,8 +696,8 @@ function loadState(next) {
   else if (initial) mode = 'review';
   selected.clear();
   roomCounts.clear();
-  excludedMarkers = new Set(
-    state.rooms.flatMap(room => room.markers.filter(marker => marker.excluded).map(marker => marker.key)),
+  excludedEntities = new Set(
+    state.rooms.flatMap(room => room.entities.filter(entity => entity.excluded).map(entity => entity.key)),
   );
   roomByName.clear();
   highlightedRoom = undefined;
@@ -761,7 +761,7 @@ function finishPage(message) {
 }
 
 async function saveRoute() {
-  const response = await fetch(`${base}/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rooms: [...selected], roomCounts: Object.fromEntries([...selected].map(name => [name, roomCounts.get(name) ?? 1])), excludedMarkers: [...excludedMarkers] }) });
+  const response = await fetch(`${base}/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rooms: [...selected], roomCounts: Object.fromEntries([...selected].map(name => [name, roomCounts.get(name) ?? 1])), excludedEntities: [...excludedEntities] }) });
   if (!response.ok) { showError((await response.json()).error); return; }
   showStatus('已保存。');
 }

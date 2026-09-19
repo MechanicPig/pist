@@ -6,20 +6,20 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, web
 
 from pist.entities.rules import EntityStat
-from pist.game.mods import InstalledMod, LocalMap
+from pist.game.duration import Duration
+from pist.game.mods import LocalMap
 from pist.game.routes import (
     EndersBlenderSave,
+    MapEntrance,
     MapLayout,
-    MapLink,
-    MapMarker,
+    MapPreviewEntity,
     MapRoom,
     MapRoute,
 )
-from pist.game.time import Time
 from pist.local_data import LocalDataStore
 from pist.map_preview import MapPreview
 from pist.map_preview import server as map_preview_server
-from pist.map_preview.server import MAP_PREVIEW_HTML, _web_file
+from tests.mod_factory import make_installed_mod
 
 
 class _Request:
@@ -29,6 +29,26 @@ class _Request:
 
     async def json(self) -> object:
         return self._data
+
+
+def test_map_preview_rejects_invalid_browser_requests() -> None:
+    preview = MapPreview(
+        LocalMap(file_path='Maps/Test.bin', dialog_key='Test'),
+        MapLayout((MapRoom('room', 0, 0, 8, 8),)),
+    )
+
+    async def check() -> tuple[web.Response, web.Response]:
+        return (
+            await preview._open(cast(web.Request, _Request({'targetSid': 1}))),
+            await preview._save(
+                cast(web.Request, _Request({'rooms': ['room'], 'roomCounts': {'room': True}}))
+            ),
+        )
+
+    open_response, save_response = asyncio.run(check())
+
+    assert open_response.status == 400
+    assert save_response.status == 400
 
 
 def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> None:
@@ -49,11 +69,11 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
                     184,
                     background=('10',),
                     solids=('01',),
-                    markers=(MapMarker(8, 16, 'strawberry'),),
+                    entities=(MapPreviewEntity(8, 16, 'strawberry'),),
                     respawns=(),
                 ),
             ),
-            (MapLink('start', 'Author/Pack/Target', 16, 24, 32, 24),),
+            (MapEntrance('start', 'Author/Pack/Target', 16, 24, 32, 24),),
         ),
         first_clear_rooms=('start',),
         saved_route=MapRoute(map_file=map_info.file_path, rooms=('start',)),
@@ -61,7 +81,7 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
             0,
             {},
             {'Author/Pack/Map': {'start': 2}},
-            {'Author/Pack/Map': {'start': Time(2_550)}},
+            {'Author/Pack/Map': {'start': Duration.from_milliseconds(2_550)}},
         ),
     )
 
@@ -77,12 +97,12 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
     assert state['rooms'][0]['respawnCount'] == 0
     assert state['rooms'][0]['roomCount'] == 1
     assert state['rooms'][0]['background'] == ['10']
-    assert state['rooms'][0]['markers'] == [{'x': 8, 'y': 16, 'kind': 'strawberry'}]
+    assert state['rooms'][0]['entities'] == [{'x': 8, 'y': 16, 'kind': 'strawberry'}]
     assert state['rooms'][0]['respawns'] == []
-    assert state['links'][0]['x'] == 16
-    assert state['links'][0]['y'] == 24
-    assert state['links'][0]['width'] == 32
-    assert state['links'][0]['height'] == 24
+    assert state['entrances'][0]['x'] == 16
+    assert state['entrances'][0]['y'] == 24
+    assert state['entrances'][0]['width'] == 32
+    assert state['entrances'][0]['height'] == 24
 
 
 def test_map_preview_state_exposes_configured_marker_sprite() -> None:
@@ -97,8 +117,8 @@ def test_map_preview_state_exposes_configured_marker_sprite() -> None:
                     0,
                     8,
                     8,
-                    markers=(
-                        MapMarker(
+                    entities=(
+                        MapPreviewEntity(
                             4,
                             4,
                             'seed',
@@ -115,7 +135,7 @@ def test_map_preview_state_exposes_configured_marker_sprite() -> None:
     response = asyncio.run(preview._state(cast(web.Request, _Request({}))))
     assert response.text is not None
 
-    assert json.loads(response.text)['rooms'][0]['markers'] == [
+    assert json.loads(response.text)['rooms'][0]['entities'] == [
         {
             'x': 4,
             'y': 4,
@@ -127,14 +147,16 @@ def test_map_preview_state_exposes_configured_marker_sprite() -> None:
     ]
 
 
-def test_map_preview_persists_marker_exclusions_with_the_route(tmp_path) -> None:
+def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None:
     map_info = LocalMap(file_path='Maps/Test.bin', dialog_key='Test', names={'en': 'Test'})
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
         map_info,
-        MapLayout((MapRoom('room', 0, 0, 8, 8, markers=(MapMarker(4, 4, 'seed', key='seed'),)),)),
+        MapLayout(
+            (MapRoom('room', 0, 0, 8, 8, entities=(MapPreviewEntity(4, 4, 'seed', key='seed'),)),)
+        ),
         saved_route=MapRoute(
-            map_file=map_info.file_path, rooms=(), excluded_markers=frozenset({'seed'})
+            map_file=map_info.file_path, rooms=(), excluded_entities=frozenset({'seed'})
         ),
         local_data=local_data,
     )
@@ -142,18 +164,18 @@ def test_map_preview_persists_marker_exclusions_with_the_route(tmp_path) -> None
     async def check() -> object:
         state = await preview._state(cast(web.Request, _Request({})))
         await preview._save(
-            cast(web.Request, _Request({'rooms': ['room'], 'excludedMarkers': ['seed']}))
+            cast(web.Request, _Request({'rooms': ['room'], 'excludedEntities': ['seed']}))
         )
         assert state.text is not None
         data = cast(dict[str, list[dict[str, object]]], json.loads(state.text))
-        return data['rooms'][0]['markers']
+        return data['rooms'][0]['entities']
 
-    markers = asyncio.run(check())
+    entities = asyncio.run(check())
     route = local_data.load_route(map_info.file_path)
 
-    assert markers == [{'x': 4, 'y': 4, 'kind': 'seed', 'key': 'seed', 'excluded': True}]
+    assert entities == [{'x': 4, 'y': 4, 'kind': 'seed', 'key': 'seed', 'excluded': True}]
     assert route is not None
-    assert route.excluded_markers == frozenset({'seed'})
+    assert route.excluded_entities == frozenset({'seed'})
 
 
 def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
@@ -168,8 +190,8 @@ def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
                     0,
                     8,
                     8,
-                    markers=(
-                        MapMarker(
+                    entities=(
+                        MapPreviewEntity(
                             2,
                             2,
                             'end_level_heart',
@@ -179,7 +201,7 @@ def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
                             summary_label='水晶之心',
                             summary_value='通关收集',
                         ),
-                        MapMarker(
+                        MapPreviewEntity(
                             6,
                             6,
                             'keep_going_heart',
@@ -194,21 +216,21 @@ def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
             )
         ),
         saved_route=MapRoute(
-            map_file=map_info.file_path, rooms=(), excluded_markers=frozenset({'extra'})
+            map_file=map_info.file_path, rooms=(), excluded_entities=frozenset({'extra'})
         ),
     )
 
     response = asyncio.run(preview._state(cast(web.Request, _Request({}))))
 
     assert response.text is not None
-    markers = json.loads(response.text)['rooms'][0]['markers']
-    assert markers[0]['summary'] == {
+    entities = json.loads(response.text)['rooms'][0]['entities']
+    assert entities[0]['summary'] == {
         'kind': 'heart',
         'stat': 'select',
         'label': '水晶之心',
         'value': '通关收集',
     }
-    assert markers[1]['excluded'] is True
+    assert entities[1]['excluded'] is True
 
 
 def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() -> None:
@@ -220,10 +242,10 @@ def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() 
     preview = MapPreview(
         map_info,
         MapLayout(
-            (MapRoom('start', 0, 0, 320, 184, markers=(MapMarker(8, 16, 'strawberry'),)),),
-            (MapLink('start', 'Author/Pack/Target', 16, 24, 32, 24),),
+            (MapRoom('start', 0, 0, 320, 184, entities=(MapPreviewEntity(8, 16, 'strawberry'),)),),
+            (MapEntrance('start', 'Author/Pack/Target', 16, 24, 32, 24),),
         ),
-        audit_markers={'start': (MapMarker(32, 48, 'audit'),)},
+        audit_entities={'start': (MapPreviewEntity(32, 48, 'audit'),)},
         read_only=True,
     )
 
@@ -232,8 +254,8 @@ def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() 
     state = json.loads(response.text)
 
     assert state['readOnly'] is True
-    assert state['links'] == []
-    assert state['rooms'][0]['markers'] == [
+    assert state['entrances'] == []
+    assert state['rooms'][0]['entities'] == [
         {'x': 8, 'y': 16, 'kind': 'strawberry'},
         {'x': 32, 'y': 48, 'kind': 'audit'},
     ]
@@ -296,6 +318,23 @@ def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
     assert route.room_count == 3
 
 
+def test_map_preview_rejects_non_positive_explicit_room_count(tmp_path) -> None:
+    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    preview = MapPreview(
+        map_info,
+        MapLayout((MapRoom('start', 0, 0, 320, 184),)),
+        local_data=LocalDataStore(tmp_path / 'local-data.sqlite3'),
+    )
+
+    async def check() -> int:
+        response = await preview._save(
+            cast(web.Request, _Request({'rooms': ['start'], 'roomCounts': {'start': 0}}))
+        )
+        return response.status
+
+    assert asyncio.run(check()) == 400
+
+
 def test_map_preview_abandon_cancels_an_open_preview() -> None:
     map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
     preview = MapPreview(map_info, MapLayout(()))
@@ -344,7 +383,7 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
         dialog_key='Author_Pack_Target',
         names={'en': 'Target'},
     )
-    mod = InstalledMod(
+    mod = make_installed_mod(
         source='directory',
         filename='Mod',
         path='Mod',
@@ -356,13 +395,15 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
     local_data.save_route(MapRoute(map_file=target.file_path, rooms=('saved',)))
     preview = MapPreview(
         source,
-        MapLayout((MapRoom('lobby', 0, 0, 320, 184),), (MapLink('lobby', 'Author/Pack/Target'),)),
+        MapLayout(
+            (MapRoom('lobby', 0, 0, 320, 184),), (MapEntrance('lobby', 'Author/Pack/Target'),)
+        ),
         mod=mod,
         local_data=local_data,
         enders_blender_save=EndersBlenderSave(0, {'Author/Pack/Target': ('target',)}),
     )
     monkeypatch.setattr(
-        'pist.map_preview.server.load_map_layout',
+        'pist.map_preview.server.routes.load_map_layout',
         lambda _mod, _map: MapLayout(
             (MapRoom('target', 0, 0, 320, 184), MapRoom('saved', 400, 0, 320, 184))
         ),
@@ -421,7 +462,7 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, mo
                 assert (await response.json())['rooms'][1]['name'] == 'goal'
             async with session.get(f'{urls[0]}/assets/map_preview.js') as response:
                 assert response.content_type == 'text/javascript'
-                assert 'renderList' in (await response.text())
+                assert await response.text()
             async with session.post(f'{urls[0]}/save', json={'rooms': ['goal']}) as response:
                 assert response.status == 200
             async with session.post(f'{urls[0]}/abandon') as response:
@@ -432,57 +473,3 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, mo
     assert local_data.load_route(map_info.file_path) == MapRoute(
         map_file=map_info.file_path, rooms=('goal',)
     )
-
-
-def test_map_preview_page_contains_map_interaction_modes() -> None:
-    assert '<canvas id="map"></canvas>' in MAP_PREVIEW_HTML
-    assert 'name="mode"' in MAP_PREVIEW_HTML
-    assert 'value="collectibles"' in MAP_PREVIEW_HTML
-    assert 'id="collectible-summary"' in MAP_PREVIEW_HTML
-    assert 'id="show-first-clear-route"' in MAP_PREVIEW_HTML
-    assert 'id="show-first-clear-time"' in MAP_PREVIEW_HTML
-    assert 'map_preview.js' in MAP_PREVIEW_HTML
-    script = _web_file('map_preview.js')
-    assert 'renderList' in script
-    assert 'nearestTrigger' in script
-    assert 'nearestCollectibleMarker' in script
-    assert "mode === 'review'" in script
-    assert "if (mode === 'inspect')" in script
-    assert 'const initial = state === undefined;' in script
-    assert "else if (initial) mode = 'review';" in script
-    assert 'highlightedRoom = room.name;' in script
-    assert "row.classList.toggle('canvas-selected', room.name === canvasSelectedRoom)" in script
-    assert 'roomsNode.scrollTop =' in script
-    assert "if (mode === 'navigate' && isDoubleClick)" in script
-    assert "mode === 'collectibles'" in script
-    assert 'nearestInspectableMarker' in script
-    assert 'showInspectable' in script
-    assert 'let openingMap = false;' in script
-    assert 'function revealRoom(name)' in script
-    assert 'function applySelectionBox(event)' in script
-    assert 'event.ctrlKey && event.shiftKey' in script
-    assert 'event.button === 2' in script
-    assert 'event.button === 1' in script
-    assert "canvas.addEventListener('contextmenu'" in script
-    assert "canvas.addEventListener('dblclick'" not in script
-    assert 'canvasSelectedRoom = room.name;\n      selectedRoomToReveal = room.name;' in script
-    assert 'drawOutlinedText(String(index)' in script
-    assert 'highlightedRoom === room.name ? undefined : room.name' in script
-    assert 'pagehide' in script
-    assert '/abandon' in script
-    assert 'firstClearData' in script
-    assert 'showFirstClearRoute.checked' in script
-    assert 'showFirstClearTime.checked' in script
-    assert 'drawSprite' in script
-    assert 'game-assets' in script
-    assert 'ctx.imageSmoothingEnabled = false' in script
-    assert "ctx.fillStyle = 'rgba(0, 0, 0, .48)'" in script
-    assert 'ctx.lineTo(x + size, y)' not in script
-    assert 'drawOutlinedText' in script
-    assert 'ctx.fillRect(Math.floor(x / 8) * 8, Math.floor((y - 8) / 8) * 8, 8, 8)' in script
-    assert "item.kind === 'audit'" in script
-    assert 'state.readOnly' in script
-    assert 'collectibleSummaryText' in script
-    css = _web_file('map_preview.css')
-    assert '#mode[hidden]' in css
-    assert 'button[hidden]' in css

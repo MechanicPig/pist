@@ -2,7 +2,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-import tomli_w
+import tomlkit
 
 from pist.entities.rules import (
     SHARED_ENTITIES_PATH,
@@ -25,13 +25,37 @@ from pist.entities.rules import (
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
 
 
+def test_entity_rule_configuration_normalizes_required_names() -> None:
+    table_field = EntityTableField(table=' maps ', field=' strawberries ')
+    kind = EntityKind(label='Berry', select_value=' end_level_heart ')
+
+    assert table_field.table == 'maps'
+    assert table_field.field == 'strawberries'
+    assert kind.select_value == 'end_level_heart'
+
+
+@pytest.mark.parametrize(
+    'model',
+    (
+        lambda: EntityTableField(table=' ', field='strawberries'),
+        lambda: EntityTableField(table='maps', field=' '),
+        lambda: EntityKind(label='Berry', select_value=' '),
+        lambda: EntityRule(missing=('',)),
+        lambda: EntityRule(missing_meta=('',)),
+    ),
+)
+def test_entity_rule_configuration_rejects_blank_required_names(model) -> None:
+    with pytest.raises(ValueError):
+        model()
+
+
 def _split_config(path: Path) -> Path:
     """Move a compact test fixture's kinds table into its required sibling file."""
     config = tomllib.loads(path.read_text(encoding='utf-8'))
     kinds = config.pop('kinds', {})
     kinds_path = path.with_name('kinds.toml')
-    kinds_path.write_text(tomli_w.dumps({'kinds': kinds}), encoding='utf-8')
-    path.write_text(tomli_w.dumps(config), encoding='utf-8')
+    kinds_path.write_text(tomlkit.dumps({'kinds': kinds}), encoding='utf-8')
+    path.write_text(tomlkit.dumps(config), encoding='utf-8')
     return kinds_path
 
 
@@ -64,34 +88,28 @@ def test_stat_owner_is_inherited_from_the_kind_tree() -> None:
     assert stat_owner('strawberry', rules=SHARED_RULES) == (
         'strawberry',
         EntityStat.COUNT,
-        EntityTableField(table='主表', field='红草莓数'),
     )
     assert stat_owner('moonberry', rules=SHARED_RULES) == (
         'moonberry',
         EntityStat.COUNT,
-        EntityTableField(table='主表', field='月莓数'),
     )
     assert stat_owner('goldenberry', rules=SHARED_RULES) is None
     assert stat_owner('grabless_goldenberry', rules=SHARED_RULES) is None
     assert stat_owner('cassette', rules=SHARED_RULES) == (
         'cassette',
         EntityStat.EXIST,
-        EntityTableField(table='主表', field='磁带'),
     )
     assert stat_owner('heart', rules=SHARED_RULES) == (
         'heart',
         EntityStat.SELECT,
-        EntityTableField(table='主表', field='水晶之心'),
     )
     assert stat_owner('end_level_heart', rules=SHARED_RULES) == (
         'heart',
         EntityStat.SELECT,
-        EntityTableField(table='主表', field='水晶之心'),
     )
     assert stat_owner('keep_going_heart', rules=SHARED_RULES) == (
         'heart',
         EntityStat.SELECT,
-        EntityTableField(table='主表', field='水晶之心'),
     )
 
 
@@ -143,7 +161,6 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
     assert stat_owner('testberry', rules=rules) == (
         'testberry',
         EntityStat.COUNT,
-        EntityTableField(table='maps', field='test berries'),
     )
 
 
@@ -179,6 +196,7 @@ parent = 'heart'
 rules = [
   { when = { fake = true } },
   { kind = 'end_level_heart', meta = { HeartIsEnd = true } },
+  { kind = 'end_level_heart', missing = ['fake'], missing_meta = ['HeartIsEnd'] },
 ]
 """,
         encoding='utf-8',
@@ -192,13 +210,24 @@ rules = [
         == 'end_level_heart'
     )
     assert entity_kind('TestHelper/Heart', {'fake': False}, rules=rules) is None
+    assert entity_kind('TestHelper/Heart', {}, rules=rules) == 'end_level_heart'
+    assert entity_kind('TestHelper/Heart', {'fake': False}, meta={}, rules=rules) is None
+    assert entity_kind('TestHelper/Heart', {}, meta={'HeartIsEnd': False}, rules=rules) is None
 
     serialized = entity_rules_toml(rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}))
     assert 'exclude' not in serialized
+    assert '[[' not in serialized
+    assert '.rules.' not in serialized
+    assert 'missing = ["fake"]' in serialized
     assert (
         EntityRuleLayer.model_validate(tomllib.loads(serialized)).entities
         == rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}).entities
     )
+
+
+def test_entity_rules_reject_overlapping_value_and_missing_conditions() -> None:
+    with pytest.raises(ValueError, match='both matched and missing'):
+        EntityRule(when={'moon': False}, missing=('moon',))
 
 
 def test_more_specific_rules_precede_defaults_regardless_of_write_order(tmp_path) -> None:
@@ -616,8 +645,8 @@ rules = [{ kind = 'moonberry' }]
     assert len(store.conflicts) == 1
     conflict = store.conflicts[0]
     assert conflict.entity_name == 'TestHelper/Berry'
-    assert conflict.when == ()
-    assert conflict.meta == ()
+    assert conflict.conditions.when == ()
+    assert conflict.conditions.meta == ()
     assert conflict.shared_kind == 'strawberry'
     assert conflict.local_kind == 'moonberry'
 

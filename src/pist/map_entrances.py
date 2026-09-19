@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from pist.game.binmap import AttrValue, NumericAttrValue
+from pist.models import FrozenModel
+from pist.types import NonEmptyStr
 
 SHARED_MAP_ENTRANCES_PATH = Path(__file__).parent / 'data' / 'map_entrances.toml'
 LOCAL_MAP_ENTRANCES_PATH = Path('.pist/map_entrances.toml')
@@ -30,12 +32,10 @@ class MapEntranceRuleKey:
     when: frozenset[tuple[str, AttrValue]]
 
 
-class EntranceValue(BaseModel):
+class EntranceValue(FrozenModel):
     """One number read from an attribute or supplied as a constant."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
-
-    attr: str | None = None
+    attr: NonEmptyStr | None = None
     value: NumericAttrValue | None = None
     default: NumericAttrValue | None = None
     offset: NumericAttrValue = 0
@@ -46,8 +46,6 @@ class EntranceValue(BaseModel):
             raise ValueError('Entrance value needs exactly one of attr or value.')
         if self.attr is None and self.default is not None:
             raise ValueError('Entrance value default requires attr.')
-        if self.attr is not None and not self.attr:
-            raise ValueError('Entrance value attribute cannot be empty.')
         return self
 
     def resolve(self, attrs: Mapping[str, AttrValue]) -> NumericAttrValue | None:
@@ -58,10 +56,8 @@ class EntranceValue(BaseModel):
         return value + self.offset if value is not None else None
 
 
-class MapEntranceRegion(BaseModel):
+class MapEntranceRegion(FrozenModel):
     """The actual in-game rectangle represented by one map element."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     x: EntranceValue
     y: EntranceValue
@@ -69,24 +65,14 @@ class MapEntranceRegion(BaseModel):
     height: EntranceValue | None = None
 
 
-class MapEntranceRule(BaseModel):
+class MapEntranceRule(FrozenModel):
     """One exact static map entrance recognized in a map layer."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
-
     source: MapEntranceSource
-    name: str
-    target_attr: str = 'map'
+    name: NonEmptyStr
+    target_attr: NonEmptyStr = 'map'
     when: dict[str, AttrValue] = Field(default_factory=dict)
     region: MapEntranceRegion
-
-    @model_validator(mode='after')
-    def validate_names(self) -> MapEntranceRule:
-        if not self.name:
-            raise ValueError('Map entrance name cannot be empty.')
-        if not self.target_attr:
-            raise ValueError('Map entrance target attribute cannot be empty.')
-        return self
 
     def matches(self, source: MapEntranceSource, name: str, attrs: Mapping[str, AttrValue]) -> bool:
         """Return whether this rule applies to one concrete map element."""
@@ -97,10 +83,8 @@ class MapEntranceRule(BaseModel):
         )
 
 
-class MapEntranceRules(BaseModel):
+class MapEntranceRules(FrozenModel):
     """Validated static map entrance rules loaded from TOML."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     rules: tuple[MapEntranceRule, ...] = ()
 

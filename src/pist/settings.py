@@ -1,22 +1,22 @@
 """Local non-secret settings persisted under the ignored ``.pist`` directory."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from annotated_types import MinLen
+from pydantic import ValidationError
 
 from pist.game.dialog import DIALOG_LANGUAGES
+from pist.models import FrozenModel
 
 SETTINGS_PATH = Path('.pist/settings.json')
 
 
-class PistSettings(BaseModel):
+class PistSettings(FrozenModel):
     """Persisted local presentation settings for pist."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
-
     theme: Literal['textual-dark', 'textual-light'] = 'textual-dark'
-    dialog_languages: tuple[str, ...] = DIALOG_LANGUAGES
+    dialog_languages: Annotated[tuple[str, ...], MinLen(1)] = DIALOG_LANGUAGES
     game_dir: Path | None = None
     smartsheet_url: str | None = None
 

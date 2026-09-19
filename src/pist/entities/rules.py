@@ -7,17 +7,18 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Self
 
-import tomli_w
+import tomlkit
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     ValidationError,
     field_validator,
     model_validator,
 )
+from tomlkit.items import Array, InlineTable
 
 from pist.game.binmap import AttrValue
+from pist.models import FrozenModel
+from pist.types import NonEmptyStr, StrippedNonEmptyStr
 
 
 class EntityStat(StrEnum):
@@ -29,21 +30,11 @@ class EntityStat(StrEnum):
     SELECT = 'select'
 
 
-class EntityTableField(BaseModel):
+class EntityTableField(FrozenModel):
     """One table-and-field destination for a configured entity summary."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
-
-    table: str
-    field: str
-
-    @field_validator('table', 'field')
-    @classmethod
-    def validate_name(cls, value: str) -> str:
-        """Require a non-empty human-readable destination component."""
-        if not (name := value.strip()):
-            raise ValueError('Table and field names must not be empty.')
-        return name
+    table: StrippedNonEmptyStr
+    field: StrippedNonEmptyStr
 
 
 SHARED_ENTITIES_PATH = Path(__file__).parent.parent / 'data' / 'entities.toml'
@@ -51,16 +42,14 @@ SHARED_KINDS_PATH = Path(__file__).parent.parent / 'data' / 'kinds.toml'
 LOCAL_ENTITIES_PATH = Path('.pist/entities.toml')
 
 
-class EntityKind(BaseModel):
+class EntityKind(FrozenModel):
     """One user-extensible entity kind in the classification tree."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     label: str
     parent: str | None = None
     stat: EntityStat = EntityStat.NONE
     table_field: EntityTableField | None = None
-    select_value: str | None = None
+    select_value: StrippedNonEmptyStr | None = None
     sprite: str | None = None
 
     @model_validator(mode='after')
@@ -69,16 +58,6 @@ class EntityKind(BaseModel):
         if self.stat is EntityStat.NONE and self.table_field is not None:
             raise ValueError('A table field requires stat = "count" or "exist".')
         return self
-
-    @field_validator('select_value')
-    @classmethod
-    def validate_select_value(cls, value: str | None) -> str | None:
-        """Keep configured single-select values non-empty and whitespace-normalized."""
-        if value is None:
-            return None
-        if not (value := value.strip()):
-            raise ValueError('A select value must not be empty.')
-        return value
 
     @field_validator('sprite')
     @classmethod
@@ -92,25 +71,60 @@ class EntityKind(BaseModel):
         return sprite
 
 
-class EntityRule(BaseModel):
-    """One ordered entity rule whose optional kind is its terminal outcome."""
+@dataclass(frozen=True, slots=True)
+class EntityRuleConditions:
+    """The complete value and presence conditions identifying one entity rule."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    when: tuple[tuple[str, AttrValue], ...]
+    meta: tuple[tuple[str, AttrValue], ...]
+    missing: tuple[str, ...]
+    missing_meta: tuple[str, ...]
+
+    @property
+    def specificity(self) -> int:
+        """Return how many value or presence checks identify this condition."""
+        return len(self.when) + len(self.meta) + len(self.missing) + len(self.missing_meta)
+
+
+class EntityRule(FrozenModel):
+    """One ordered entity rule whose optional kind is its terminal outcome."""
 
     kind: str | None = None
     when: dict[str, AttrValue] = Field(default_factory=dict)
     meta: dict[str, AttrValue] = Field(default_factory=dict)
+    missing: tuple[NonEmptyStr, ...] = ()
+    missing_meta: tuple[NonEmptyStr, ...] = ()
+
+    @field_validator('missing', 'missing_meta')
+    @classmethod
+    def validate_missing_names(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        """Require each missing-condition name exactly once."""
+        if len(set(names)) != len(names):
+            raise ValueError('Missing condition names must be unique.')
+        return names
+
+    @model_validator(mode='after')
+    def validate_conditions(self) -> EntityRule:
+        """Keep value and missing conditions non-overlapping and unambiguous."""
+        if overlap := self.when.keys() & set(self.missing):
+            raise ValueError(f'Attribute cannot be both matched and missing: {overlap.pop()!r}.')
+        if overlap := self.meta.keys() & set(self.missing_meta):
+            raise ValueError(f'Metadata cannot be both matched and missing: {overlap.pop()!r}.')
+        return self
 
     @property
-    def identity(self) -> tuple[tuple[tuple[str, AttrValue], ...], ...]:
+    def identity(self) -> EntityRuleConditions:
         """Return the condition that identifies one local override."""
-        return tuple(sorted(self.when.items())), tuple(sorted(self.meta.items()))
+        return EntityRuleConditions(
+            tuple(sorted(self.when.items())),
+            tuple(sorted(self.meta.items())),
+            tuple(sorted(self.missing)),
+            tuple(sorted(self.missing_meta)),
+        )
 
 
-class EntityRulesForId(BaseModel):
+class EntityRulesForId(FrozenModel):
     """Ordered classification rules for one exact entity ID."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     rules: tuple[EntityRule, ...]
 
@@ -142,24 +156,19 @@ class EntityRuleConflict:
     """One local rule that overrides a shared rule with the same condition."""
 
     entity_name: str
-    when: tuple[tuple[str, AttrValue], ...]
-    meta: tuple[tuple[str, AttrValue], ...]
+    conditions: EntityRuleConditions
     shared_kind: str | None
     local_kind: str | None
 
 
-class EntityKindLayer(BaseModel):
+class EntityKindLayer(FrozenModel):
     """The category tree stored in ``kinds.toml``."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     kinds: dict[str, EntityKind] = Field(default_factory=dict)
 
 
-class EntityRuleLayer(BaseModel):
+class EntityRuleLayer(FrozenModel):
     """One shared or local entity-rule TOML layer."""
-
-    model_config = ConfigDict(extra='forbid', frozen=True)
 
     entities: dict[str, EntityRulesForId] = Field(default_factory=dict)
 
@@ -187,8 +196,7 @@ class EntityRuleLayer(BaseModel):
                     conflicts.append(
                         EntityRuleConflict(
                             entity_name,
-                            local_rule.identity[0],
-                            local_rule.identity[1],
+                            local_rule.identity,
                             shared_rule.kind,
                             local_rule.kind,
                         )
@@ -207,10 +215,9 @@ class EntityRuleLayer(BaseModel):
         return EntityRuleLayer(entities=entities)
 
 
-class EntityRules(BaseModel):
+class EntityRules(FrozenModel):
     """Validated entity kinds and rules ready for classification."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
     kinds: dict[str, EntityKind] = Field(default_factory=dict)
     entities: dict[str, EntityRulesForId] = Field(default_factory=dict)
 
@@ -287,8 +294,7 @@ class EntityRules(BaseModel):
         new_rule = EntityRule(kind=kind, when=dict(when), meta={} if meta is None else dict(meta))
         entity_rules = self.entities.get(entity_name, EntityRulesForId(rules=()))
         rules = tuple(
-            new_rule if rule.when == new_rule.when and rule.meta == new_rule.meta else rule
-            for rule in entity_rules.rules
+            new_rule if rule.identity == new_rule.identity else rule for rule in entity_rules.rules
         )
         if new_rule not in rules:
             rules = (new_rule, *rules)
@@ -308,8 +314,7 @@ class EntityRules(BaseModel):
         new_rule = EntityRule(kind=None, when=dict(when), meta={} if meta is None else dict(meta))
         entity_rules = self.entities.get(entity_name, EntityRulesForId(rules=()))
         rules = tuple(
-            new_rule if rule.when == new_rule.when and rule.meta == new_rule.meta else rule
-            for rule in entity_rules.rules
+            new_rule if rule.identity == new_rule.identity else rule for rule in entity_rules.rules
         )
         if new_rule not in rules:
             rules = (new_rule, *rules)
@@ -663,12 +668,16 @@ def _load_toml(path: Path) -> dict[str, object]:
 
 def _specific_rules_first(rules: tuple[EntityRule, ...]) -> tuple[EntityRule, ...]:
     """Keep specific conditions before defaults, regardless of write order."""
-    return tuple(sorted(rules, key=lambda rule: len(rule.when) + len(rule.meta), reverse=True))
+    return tuple(sorted(rules, key=_rule_specificity, reverse=True))
+
+
+def _rule_specificity(rule: EntityRule) -> int:
+    return rule.identity.specificity
 
 
 def entity_kinds_toml(kinds: EntityKindLayer) -> str:
     """Serialize the category tree in pist's canonical TOML layout."""
-    return tomli_w.dumps(kinds.model_dump(mode='json', exclude_none=True, exclude_defaults=True))
+    return tomlkit.dumps(kinds.model_dump(mode='json', exclude_none=True, exclude_defaults=True))
 
 
 def entity_rules_toml(
@@ -678,10 +687,64 @@ def entity_rules_toml(
     layer = EntityRuleLayer(entities=rules.entities)
     if baseline is not None:
         layer = layer.local_overrides(EntityRuleLayer(entities=baseline.entities))
-    return tomli_w.dumps(layer.model_dump(mode='json', exclude_none=True, exclude_defaults=True))
+    document = tomlkit.document()
+    entities = tomlkit.table()
+    document['entities'] = entities
+    for entity_name, rules_for_id in layer.entities.items():
+        entity = tomlkit.table()
+        entity['rules'] = _toml_rules(rules_for_id.rules)
+        entities[entity_name] = entity
+    return tomlkit.dumps(document)
 
 
-DEFAULT_ENTITY_RULES = load_entity_rule_layers()
+def _toml_rules(rules: tuple[EntityRule, ...]) -> Array:
+    if not rules:
+        return tomlkit.array()
+    values = tomlkit.array().multiline(True)
+    values.extend(_toml_rule(rule) for rule in rules)
+    return values
+
+
+def _toml_rule(rule: EntityRule) -> InlineTable:
+    fields: list[tuple[str, AttrValue | Mapping[str, AttrValue] | tuple[str, ...]]] = []
+    if rule.kind is not None:
+        fields.append(('kind', rule.kind))
+    if rule.when:
+        fields.append(('when', rule.when))
+    if rule.meta:
+        fields.append(('meta', rule.meta))
+    if rule.missing:
+        fields.append(('missing', rule.missing))
+    if rule.missing_meta:
+        fields.append(('missing_meta', rule.missing_meta))
+    table = _empty_inline_table()
+    for key, value in fields:
+        table[key] = _toml_value(value)
+        table.add(tomlkit.ws(' '))
+    return table
+
+
+def _toml_value(
+    value: AttrValue | Mapping[str, AttrValue] | tuple[str, ...],
+) -> AttrValue | Array | InlineTable:
+    if isinstance(value, Mapping):
+        table = _empty_inline_table()
+        for key, item in value.items():
+            table[key] = item
+            table.add(tomlkit.ws(' '))
+        return table
+    if isinstance(value, tuple):
+        values = tomlkit.array()
+        values.extend(value)
+        return values
+    return value
+
+
+def _empty_inline_table() -> InlineTable:
+    """Create an inline table with the canonical spaces inside its braces."""
+    value = tomlkit.parse('value = { }')['value']
+    assert isinstance(value, InlineTable)
+    return value
 
 
 def entity_kind(
@@ -689,30 +752,42 @@ def entity_kind(
     attrs: Mapping[str, AttrValue],
     *,
     meta: Mapping[str, AttrValue] | None = None,
-    rules: EntityRules = DEFAULT_ENTITY_RULES,
+    rules: EntityRules,
 ) -> str | None:
     """Return the first configured outcome matching entity attributes and map metadata."""
+    rule = matching_entity_rule(name, attrs, meta=meta, rules=rules)
+    return None if rule is None else rule.kind
+
+
+def matching_entity_rule(
+    name: str,
+    attrs: Mapping[str, AttrValue],
+    *,
+    meta: Mapping[str, AttrValue] | None = None,
+    rules: EntityRules,
+) -> EntityRule | None:
+    """Return the exact matching rule, preserving an explicit ``kind = null`` outcome."""
     entity_rules = rules.entities.get(name)
     if entity_rules is None:
         return None
     for rule in entity_rules.rules:
-        if _attrs_match(attrs, rule.when) and _attrs_match({} if meta is None else meta, rule.meta):
-            return rule.kind
+        if _rule_matches(rule, attrs, {} if meta is None else meta):
+            return rule
     return None
 
 
 def stat_owner(
     kind: str,
     *,
-    rules: EntityRules = DEFAULT_ENTITY_RULES,
-) -> tuple[str, EntityStat, EntityTableField | None] | None:
+    rules: EntityRules,
+) -> tuple[str, EntityStat] | None:
     """Return the closest summary-owning ancestor of a kind, if any."""
     while True:
         definition = rules.kinds.get(kind)
         if definition is None:
             return None
         if definition.stat is not EntityStat.NONE:
-            return kind, definition.stat, definition.table_field
+            return kind, definition.stat
         if definition.parent is None:
             return None
         kind = definition.parent
@@ -721,7 +796,7 @@ def stat_owner(
 def kind_select_value(
     kind: str,
     *,
-    rules: EntityRules = DEFAULT_ENTITY_RULES,
+    rules: EntityRules,
 ) -> str | None:
     """Return the closest configured output value beneath a select-stat owner."""
     while True:
@@ -738,7 +813,7 @@ def kind_select_value(
 def kind_sprite(
     kind: str,
     *,
-    rules: EntityRules = DEFAULT_ENTITY_RULES,
+    rules: EntityRules,
 ) -> str | None:
     """Return the closest configured preview sprite in the kind hierarchy."""
     while True:
@@ -756,7 +831,7 @@ def kind_is_a(
     kind: str,
     parent: str,
     *,
-    rules: EntityRules = DEFAULT_ENTITY_RULES,
+    rules: EntityRules,
 ) -> bool:
     """Return whether a kind is equal to or descends from another configured kind."""
     while True:
@@ -776,3 +851,14 @@ def _attrs_match(actual: Mapping[str, AttrValue], expected: Mapping[str, AttrVal
         if type(actual_value) is not type(expected_value) or actual_value != expected_value:
             return False
     return True
+
+
+def _rule_matches(
+    rule: EntityRule, attrs: Mapping[str, AttrValue], meta: Mapping[str, AttrValue]
+) -> bool:
+    return (
+        _attrs_match(attrs, rule.when)
+        and _attrs_match(meta, rule.meta)
+        and all(name not in attrs for name in rule.missing)
+        and all(name not in meta for name in rule.missing_meta)
+    )

@@ -1,7 +1,7 @@
 import pytest
 from luaparser import ast
 
-from pist.loenn.selene import SeleneSyntaxError, preprocess
+from pist.archive.loenn.selene import SeleneSyntaxError, preprocess
 
 
 @pytest.mark.parametrize(

@@ -10,18 +10,15 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 from aiohttp import web
+from pydantic import Field, PositiveInt
 
+from pist.game import routes
+from pist.game.binmap import AttrValue
 from pist.game.dialog import localized_name
 from pist.game.mods import InstalledMod, LocalMap
-from pist.game.routes import (
-    EndersBlenderSave,
-    MapLayout,
-    MapMarker,
-    MapRoute,
-    load_map_layout,
-)
 from pist.game.saves import sid_for_map_file
 from pist.local_data import LocalDataStore
+from pist.models import FrozenModel, StrictModel
 
 STATIC_DIR = 'static'
 GAME_ASSETS_DIR = 'game_assets'
@@ -34,15 +31,104 @@ class MapPreviewError(RuntimeError):
     """The local browser map-preview session could not be started."""
 
 
+class _OpenMapReq(StrictModel):
+    """One browser request to open an allowed linked map."""
+
+    target_sid: str = Field(alias='targetSid')
+
+
+class _SaveRouteReq(StrictModel):
+    """One browser request to persist route and entity-exclusion edits."""
+
+    rooms: list[str]
+    room_counts: dict[str, PositiveInt] = Field(default_factory=dict, alias='roomCounts')
+    excluded_entities: list[str] = Field(default_factory=list, alias='excludedEntities')
+
+
+class _PreviewEntitySummary(FrozenModel):
+    """One configured statistic represented by a preview entity."""
+
+    kind: str
+    stat: str
+    label: str
+    value: str | None = None
+
+
+class _PreviewEntityResp(FrozenModel):
+    """One entity projected into the browser preview protocol."""
+
+    x: int | float
+    y: int | float
+    kind: str
+    key: str | None = None
+    excluded: bool | None = None
+    sprite: str | None = None
+    entity_id: str | None = Field(default=None, serialization_alias='entityId')
+    attrs: dict[str, AttrValue] | None = None
+    summary: _PreviewEntitySummary | None = None
+
+
+class _PreviewRespawnResp(FrozenModel):
+    """One respawn position in the browser preview protocol."""
+
+    x: int | float
+    y: int | float
+
+
+class _PreviewRoomResp(FrozenModel):
+    """One room and its rendered content in the browser preview protocol."""
+
+    name: str
+    x: int | None
+    y: int | None
+    width: int | None
+    height: int | None
+    background: tuple[str, ...]
+    solids: tuple[str, ...]
+    entities: tuple[_PreviewEntityResp, ...]
+    respawns: tuple[_PreviewRespawnResp, ...]
+    respawn_count: int = Field(serialization_alias='respawnCount')
+    room_count: int = Field(serialization_alias='roomCount')
+    first_clear_death: int | None = Field(default=None, serialization_alias='firstClearDeath')
+    first_clear_time: int | None = Field(default=None, serialization_alias='firstClearTime')
+
+
+class _PreviewEntranceResp(FrozenModel):
+    """One available map transition in the browser preview protocol."""
+
+    room: str
+    target_sid: str = Field(serialization_alias='targetSid')
+    x: int | float | None
+    y: int | float | None
+    width: int | float | None
+    height: int | float | None
+    target_title: str = Field(serialization_alias='targetTitle')
+    available: bool
+
+
+class _MapPreviewStateResp(FrozenModel):
+    """The complete browser state returned by the local map-preview server."""
+
+    title: str
+    rooms: tuple[_PreviewRoomResp, ...]
+    selected: tuple[str, ...]
+    first_clear_rooms: tuple[str, ...] = Field(serialization_alias='firstClearRooms')
+    entrances: tuple[_PreviewEntranceResp, ...]
+    can_back: bool = Field(serialization_alias='canBack')
+    can_forward: bool = Field(serialization_alias='canForward')
+    can_home: bool = Field(serialization_alias='canHome')
+    read_only: bool = Field(serialization_alias='readOnly')
+
+
 @dataclass(slots=True)
 class _MapPreviewPage:
     """One map opened during a browser map-preview session."""
 
     map_info: LocalMap
-    layout: MapLayout
+    layout: routes.MapLayout
     selected: frozenset[str]
     room_counts: dict[str, int]
-    excluded_markers: frozenset[str]
+    excluded_entities: frozenset[str]
     first_clear_rooms: tuple[str, ...]
     first_clear_room_deaths: dict[str, int]
     first_clear_room_times: dict[str, int]
@@ -54,14 +140,14 @@ class MapPreview:
     def __init__(
         self,
         map_info: LocalMap,
-        layout: MapLayout,
+        layout: routes.MapLayout,
         *,
         first_clear_rooms: Iterable[str] = (),
-        saved_route: MapRoute | None = None,
+        saved_route: routes.MapRoute | None = None,
         local_data: LocalDataStore | None = None,
         mod: InstalledMod | None = None,
-        enders_blender_save: EndersBlenderSave | None = None,
-        audit_markers: dict[str, tuple[MapMarker, ...]] | None = None,
+        enders_blender_save: routes.EndersBlenderSave | None = None,
+        audit_entities: dict[str, tuple[routes.MapPreviewEntity, ...]] | None = None,
         read_only: bool = False,
     ) -> None:
         self._enders_blender_save = enders_blender_save
@@ -82,7 +168,7 @@ class MapPreview:
                     if saved_route is not None
                     else {}
                 ),
-                frozenset() if saved_route is None else saved_route.excluded_markers,
+                frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear,
                 self._first_clear_room_deaths(map_info, layout),
                 self._first_clear_room_times(map_info, layout),
@@ -91,15 +177,15 @@ class MapPreview:
         self._page_index = 0
         self._local_data = local_data
         self._mod = mod
-        self._audit_markers = audit_markers or {}
+        self._audit_entities = audit_entities or {}
         self._read_only = read_only
         self._maps_by_sid = (
             {sid_for_map_file(item.file_path): item for item in mod.maps} if mod is not None else {}
         )
         self._token = secrets.token_urlsafe(24)
-        self._result: asyncio.Future[MapRoute | None] | None = None
+        self._result: asyncio.Future[routes.MapRoute | None] | None = None
 
-    async def preview(self) -> MapRoute | None:
+    async def preview(self) -> routes.MapRoute | None:
         """Open the browser GUI and wait until it is closed or navigated back past its start."""
         self._result = asyncio.get_running_loop().create_future()
         app = web.Application()
@@ -134,132 +220,136 @@ class MapPreview:
         finally:
             await runner.cleanup()
 
-    async def _page(self, request: web.Request) -> web.Response:
-        html = _web_file(MAP_PREVIEW_HTML_FILE).replace('assets/', f'{request.path}/assets/')
+    async def _page(self, req: web.Request) -> web.Response:
+        html = _web_file(MAP_PREVIEW_HTML_FILE).replace('assets/', f'{req.path}/assets/')
         return web.Response(text=html, content_type='text/html')
 
-    async def _asset(self, request: web.Request) -> web.Response:
-        name = request.match_info['name']
+    async def _asset(self, req: web.Request) -> web.Response:
+        name = req.match_info['name']
         if name not in MAP_PREVIEW_ASSETS:
             raise web.HTTPNotFound()
         content_type = 'text/css' if name.endswith('.css') else 'text/javascript'
         return web.Response(text=_web_file(name), content_type=content_type)
 
-    async def _game_asset(self, request: web.Request) -> web.StreamResponse:
-        name = request.match_info['name']
+    async def _game_asset(self, req: web.Request) -> web.StreamResponse:
+        name = req.match_info['name']
         data = _sprite_data(name)
         if data is None:
             raise web.HTTPNotFound()
         return web.Response(body=data, content_type='image/png')
 
     async def _state(self, _: web.Request) -> web.Response:
-        return web.json_response(self._state_data())
+        return self._state_response()
 
-    def _state_data(self) -> dict[str, object]:
+    def _state_response(self) -> web.Response:
+        """Serialize the current page with the browser protocol's field aliases."""
+        return web.json_response(self._state_data().model_dump(by_alias=True, exclude_none=True))
+
+    def _state_data(self) -> _MapPreviewStateResp:
         page = self._pages[self._page_index]
         title = localized_name(page.map_info.names, ('zh-cn', 'en')) or page.map_info.fallback_name
-        links: list[dict[str, object]] = []
-        for link in () if self._read_only else page.layout.links:
-            target = self._maps_by_sid.get(link.target_sid)
-            links.append(
-                {
-                    'room': link.room,
-                    'targetSid': link.target_sid,
-                    'x': link.x,
-                    'y': link.y,
-                    'width': link.width,
-                    'height': link.height,
-                    'targetTitle': (
+        entrances: list[_PreviewEntranceResp] = []
+        for entrance in () if self._read_only else page.layout.entrances:
+            target = self._maps_by_sid.get(entrance.target_sid)
+            entrances.append(
+                _PreviewEntranceResp(
+                    room=entrance.room,
+                    target_sid=entrance.target_sid,
+                    x=entrance.x,
+                    y=entrance.y,
+                    width=entrance.width,
+                    height=entrance.height,
+                    target_title=(
                         localized_name(target.names, ('zh-cn', 'en')) or target.fallback_name
                         if target is not None
-                        else link.target_sid
+                        else entrance.target_sid
                     ),
-                    'available': target is not None,
-                }
+                    available=target is not None,
+                )
             )
-        return {
-            'title': title,
-            'rooms': [
-                {
-                    'name': room.name,
-                    'x': room.x,
-                    'y': room.y,
-                    'width': room.width,
-                    'height': room.height,
-                    'background': room.background,
-                    'solids': room.solids,
-                    'markers': [
-                        {
-                            'x': marker.x,
-                            'y': marker.y,
-                            'kind': str(marker.kind),
-                            **({} if marker.key is None else {'key': marker.key}),
-                            **(
-                                {}
-                                if marker.key not in page.excluded_markers
-                                else {'excluded': True}
-                            ),
-                            **({} if marker.sprite is None else {'sprite': marker.sprite}),
-                            **(
-                                {}
-                                if marker.entity_name is None
-                                else {'entityId': marker.entity_name}
-                            ),
-                            **({} if marker.attrs is None else {'attrs': marker.attrs}),
-                            **(
-                                {}
-                                if marker.summary_kind is None or marker.summary_stat is None
-                                else {
-                                    'summary': {
-                                        'kind': marker.summary_kind,
-                                        'stat': str(marker.summary_stat),
-                                        'label': marker.summary_label,
-                                        'value': marker.summary_value,
-                                    }
-                                }
-                            ),
-                        }
-                        for marker in (*room.markers, *self._audit_markers.get(room.name, ()))
-                    ],
-                    'respawns': [{'x': respawn.x, 'y': respawn.y} for respawn in room.respawns],
-                    'respawnCount': len(room.respawns),
-                    'roomCount': page.room_counts.get(room.name, 1),
-                    'firstClearDeath': page.first_clear_room_deaths.get(room.name),
-                    'firstClearTime': page.first_clear_room_times.get(room.name),
-                }
-                for room in page.layout.rooms
-            ],
-            'selected': sorted(page.selected),
-            'firstClearRooms': page.first_clear_rooms,
-            'links': links,
-            'canBack': self._page_index > 0,
-            'canForward': self._page_index < len(self._pages) - 1,
-            'canHome': self._page_index > 0,
-            'readOnly': self._read_only,
-        }
+        return _MapPreviewStateResp(
+            title=title,
+            rooms=tuple(self._room_resp(room, page) for room in page.layout.rooms),
+            selected=tuple(sorted(page.selected)),
+            first_clear_rooms=page.first_clear_rooms,
+            entrances=tuple(entrances),
+            can_back=self._page_index > 0,
+            can_forward=self._page_index < len(self._pages) - 1,
+            can_home=self._page_index > 0,
+            read_only=self._read_only,
+        )
 
-    async def _open(self, request: web.Request) -> web.Response:
+    def _room_resp(self, room: routes.MapRoom, page: _MapPreviewPage) -> _PreviewRoomResp:
+        """Project one decoded room into the browser protocol."""
+        entities = (*room.entities, *self._audit_entities.get(room.name, ()))
+        return _PreviewRoomResp(
+            name=room.name,
+            x=room.x,
+            y=room.y,
+            width=room.width,
+            height=room.height,
+            background=room.background,
+            solids=room.solids,
+            entities=tuple(
+                self._entity_resp(entity, page.excluded_entities) for entity in entities
+            ),
+            respawns=tuple(
+                _PreviewRespawnResp(x=respawn.x, y=respawn.y) for respawn in room.respawns
+            ),
+            respawn_count=len(room.respawns),
+            room_count=page.room_counts.get(room.name, 1),
+            first_clear_death=page.first_clear_room_deaths.get(room.name),
+            first_clear_time=page.first_clear_room_times.get(room.name),
+        )
+
+    @staticmethod
+    def _entity_resp(
+        entity: routes.MapPreviewEntity, excluded_entities: frozenset[str]
+    ) -> _PreviewEntityResp:
+        """Project one configured or audited entity into the browser protocol."""
+        summary = (
+            None
+            if entity.summary_kind is None or entity.summary_stat is None
+            else _PreviewEntitySummary(
+                kind=entity.summary_kind,
+                stat=str(entity.summary_stat),
+                label=entity.summary_label or entity.summary_kind,
+                value=entity.summary_value,
+            )
+        )
+        return _PreviewEntityResp(
+            x=entity.x,
+            y=entity.y,
+            kind=entity.kind,
+            key=entity.key,
+            excluded=True if entity.key in excluded_entities else None,
+            sprite=entity.sprite,
+            entity_id=entity.entity_name,
+            attrs=None if entity.attrs is None else dict(entity.attrs),
+            summary=summary,
+        )
+
+    async def _open(self, req: web.Request) -> web.Response:
         try:
-            data = await request.json()
+            target_sid = _OpenMapReq.model_validate(await req.json()).target_sid
         except ValueError, web.HTTPException:
             return web.json_response({'error': '无效的目标地图。'}, status=400)
-        target_sid = data.get('targetSid') if isinstance(data, dict) else None
         page = self._pages[self._page_index]
         source_index = self._page_index
         source_map_file = page.map_info.file_path
-        allowed = {link.target_sid for link in page.layout.links}
-        target = self._maps_by_sid.get(target_sid) if isinstance(target_sid, str) else None
+        allowed = {entrance.target_sid for entrance in page.layout.entrances}
+        target = self._maps_by_sid.get(target_sid)
         if target is None or target_sid not in allowed or self._mod is None:
             return web.json_response({'error': '此路由目标无法打开。'}, status=400)
         try:
-            layout = await asyncio.to_thread(load_map_layout, self._mod, target)
+            layout = await asyncio.to_thread(routes.load_map_layout, self._mod, target)
         except ValueError as error:
             return web.json_response({'error': str(error)}, status=400)
         if (
             self._page_index != source_index
             or self._pages[source_index].map_info.file_path != source_map_file
         ):
-            return web.json_response(self._state_data())
+            return self._state_response()
         del self._pages[self._page_index + 1 :]
         first_clear_rooms = (
             self._enders_blender_save.first_clear_room_order(target)
@@ -290,14 +380,14 @@ class MapPreview:
                     if saved_route is not None
                     else {}
                 ),
-                frozenset() if saved_route is None else saved_route.excluded_markers,
+                frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear_rooms,
                 self._first_clear_room_deaths(target, layout),
                 self._first_clear_room_times(target, layout),
             )
         )
         self._page_index += 1
-        return web.json_response(self._state_data())
+        return self._state_response()
 
     async def _back(self, _: web.Request) -> web.Response:
         if self._page_index == 0:
@@ -305,34 +395,34 @@ class MapPreview:
                 self._result.set_result(None)
             return web.json_response({'closed': True})
         self._page_index -= 1
-        return web.json_response(self._state_data())
+        return self._state_response()
 
     async def _forward(self, _: web.Request) -> web.Response:
         if self._page_index >= len(self._pages) - 1:
             return web.json_response({'error': '没有可前进的地图'}, status=400)
         self._page_index += 1
-        return web.json_response(self._state_data())
+        return self._state_response()
 
     async def _home(self, _: web.Request) -> web.Response:
         self._page_index = 0
-        return web.json_response(self._state_data())
+        return self._state_response()
 
-    async def _save(self, request: web.Request) -> web.Response:
+    async def _save(self, req: web.Request) -> web.Response:
         if self._read_only:
             return web.json_response({'error': '只读预览不能保存路线。'}, status=400)
-        saved = await self._saved_selection(request)
+        saved = await self._saved_selection(req)
         if saved is None:
             return web.json_response({'error': '无效的地图预览保存内容。'}, status=400)
-        selected, excluded_markers, room_counts = saved
+        selected, excluded_entities, room_counts = saved
         page = self._pages[self._page_index]
         page.selected = selected
         page.room_counts = room_counts
-        page.excluded_markers = excluded_markers
-        route = MapRoute(
+        page.excluded_entities = excluded_entities
+        route = routes.MapRoute(
             map_file=page.map_info.file_path,
             rooms=tuple(room.name for room in page.layout.rooms if room.name in selected),
             room_counts=room_counts,
-            excluded_markers=excluded_markers,
+            excluded_entities=excluded_entities,
         )
         if self._local_data is not None:
             self._local_data.save_route(route)
@@ -340,7 +430,7 @@ class MapPreview:
 
     async def _cancel(self, _: web.Request) -> web.Response:
         """Discard current browser edits by returning the most recently saved state."""
-        return web.json_response(self._state_data())
+        return self._state_response()
 
     async def _abandon(self, _: web.Request) -> web.Response:
         """End a browser session without changing its most recently saved routes."""
@@ -349,50 +439,36 @@ class MapPreview:
         return web.json_response({'ok': True})
 
     async def _saved_selection(
-        self, request: web.Request
+        self, req: web.Request
     ) -> tuple[frozenset[str], frozenset[str], dict[str, int]] | None:
         try:
-            data = await request.json()
+            data = _SaveRouteReq.model_validate(await req.json())
         except ValueError, web.HTTPException:
             return None
-        if not isinstance(data, dict):
-            return None
-        rooms = data.get('rooms')
-        room_counts = data.get('roomCounts', {})
-        excluded_markers = data.get('excludedMarkers', [])
-        if not isinstance(rooms, list) or not all(isinstance(room, str) for room in rooms):
-            return None
-        if not isinstance(excluded_markers, list) or not all(
-            isinstance(marker, str) for marker in excluded_markers
-        ):
-            return None
-        if not isinstance(room_counts, dict) or not all(
-            isinstance(room, str) and type(count) is int and count >= 1
-            for room, count in room_counts.items()
-        ):
-            return None
         page = self._pages[self._page_index]
-        selected = frozenset(rooms)
-        marker_keys = {
-            marker.key
+        selected = frozenset(data.rooms)
+        entity_keys = {
+            entity.key
             for room in page.layout.rooms
-            for marker in room.markers
-            if marker.key is not None
+            for entity in room.entities
+            if entity.key is not None
         }
-        excluded = frozenset(excluded_markers)
+        excluded = frozenset(data.excluded_entities)
         if (
             not selected <= page.layout.room_names
-            or not excluded <= marker_keys
-            or not room_counts.keys() <= selected
+            or not excluded <= entity_keys
+            or not data.room_counts.keys() <= selected
         ):
             return None
         return (
             selected,
             excluded,
-            {room: count for room, count in room_counts.items() if count != 1},
+            {room: count for room, count in data.room_counts.items() if count != 1},
         )
 
-    def _first_clear_room_deaths(self, map_info: LocalMap, layout: MapLayout) -> dict[str, int]:
+    def _first_clear_room_deaths(
+        self, map_info: LocalMap, layout: routes.MapLayout
+    ) -> dict[str, int]:
         if self._enders_blender_save is None:
             return {}
         return {
@@ -402,7 +478,9 @@ class MapPreview:
             is not None
         }
 
-    def _first_clear_room_times(self, map_info: LocalMap, layout: MapLayout) -> dict[str, int]:
+    def _first_clear_room_times(
+        self, map_info: LocalMap, layout: routes.MapLayout
+    ) -> dict[str, int]:
         if self._enders_blender_save is None:
             return {}
         return {
@@ -432,6 +510,3 @@ def _sprite_data(name: str) -> bytes | None:
     if builtin.is_file():
         return builtin.read_bytes()
     return None
-
-
-MAP_PREVIEW_HTML = _web_file(MAP_PREVIEW_HTML_FILE)

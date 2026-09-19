@@ -5,11 +5,14 @@ from pist.sheet_report import (
     manual_record_fields,
 )
 from pist.smartsheet import (
+    FieldsResult,
     FileIdConversion,
     GetSheetsData,
     InspectionReport,
+    RecordsResult,
     SmartSheet,
     SubSheetInspection,
+    ViewsResult,
 )
 
 
@@ -19,20 +22,22 @@ def test_field_coverage_report_classifies_current_planned_and_formula_fields() -
         sheets=[
             SubSheetInspection(
                 sheet=SmartSheet(sheet_id='sheet', title='初见'),
-                views={},
-                fields={
-                    'fields': [
-                        {'fieldID': 'mod', 'fieldTitle': 'Mod元数据名', 'fieldType': 1},
-                        {'fieldID': 'berry', 'fieldTitle': '红草莓数', 'fieldType': 2},
-                        {
-                            'fieldID': 'average',
-                            'fieldTitle': '平均单面死亡数',
-                            'fieldType': 19,
-                            'propertyFormula': {},
-                        },
-                    ]
-                },
-                records={},
+                views=ViewsResult(),
+                fields=FieldsResult.model_validate(
+                    {
+                        'fields': [
+                            {'fieldID': 'mod', 'fieldTitle': 'Mod元数据名', 'fieldType': 1},
+                            {'fieldID': 'berry', 'fieldTitle': '红草莓数', 'fieldType': 2},
+                            {
+                                'fieldID': 'average',
+                                'fieldTitle': '平均单面死亡数',
+                                'fieldType': 19,
+                                'propertyFormula': {},
+                            },
+                        ]
+                    }
+                ),
+                records=RecordsResult(records=[]),
             )
         ],
     )
@@ -67,59 +72,65 @@ def test_manual_record_fields_use_main_table_metadata_and_select_options() -> No
         sheets=[
             SubSheetInspection(
                 sheet=SmartSheet(sheet_id='other', title='其他'),
-                views={},
-                fields={'fields': [{'fieldID': 'note', 'fieldTitle': '备注', 'fieldType': 1}]},
-                records={},
+                views=ViewsResult(),
+                fields=FieldsResult.model_validate(
+                    {'fields': [{'fieldID': 'note', 'fieldTitle': '备注', 'fieldType': 1}]}
+                ),
+                records=RecordsResult(records=[]),
             ),
             SubSheetInspection(
                 sheet=SmartSheet(sheet_id='main', title='主表'),
-                views={},
-                fields={
-                    'fields': [
-                        {
-                            'fieldID': 'felt-difficulty',
-                            'fieldTitle': '体感难度',
-                            'fieldType': 17,
-                            'propertySingleSelect': {
-                                'options': [{'id': 'advanced', 'text': '高级'}]
+                views=ViewsResult(),
+                fields=FieldsResult.model_validate(
+                    {
+                        'fields': [
+                            {
+                                'fieldID': 'felt-difficulty',
+                                'fieldTitle': '体感难度',
+                                'fieldType': 17,
+                                'propertySingleSelect': {
+                                    'options': [{'id': 'advanced', 'text': '高级'}]
+                                },
                             },
-                        },
-                        {
-                            'fieldID': 'felt-subtier',
-                            'fieldTitle': '难度子阶',
-                            'fieldType': 17,
-                            'propertySingleSelect': {'options': [{'id': 'low', 'text': '低'}]},
-                        },
-                        {
-                            'fieldID': 'rated-difficulty',
-                            'fieldTitle': '标注难度',
-                            'fieldType': 17,
-                            'propertySingleSelect': {'options': [{'id': 'expert', 'text': '专家'}]},
-                        },
-                        {
-                            'fieldID': 'rated-subtier',
-                            'fieldTitle': '标注难度子阶',
-                            'fieldType': 17,
-                            'propertySingleSelect': {'options': [{'id': 'high', 'text': '高'}]},
-                        },
-                        {'fieldID': 'start', 'fieldTitle': '起始日期', 'fieldType': 4},
-                        {
-                            'fieldID': 'status',
-                            'fieldTitle': '状态',
-                            'fieldType': 17,
-                            'propertySingleSelect': {
-                                'options': [
-                                    {'id': 'done', 'text': '通关'},
-                                    {'id': 'playing', 'text': '进行中'},
-                                ]
+                            {
+                                'fieldID': 'felt-subtier',
+                                'fieldTitle': '难度子阶',
+                                'fieldType': 17,
+                                'propertySingleSelect': {'options': [{'id': 'low', 'text': '低'}]},
                             },
-                        },
-                        {'fieldID': 'score', 'fieldTitle': '评分', 'fieldType': 2},
-                        {'fieldID': 'note', 'fieldTitle': '备注', 'fieldType': 1},
-                        {'fieldID': 'tag', 'fieldTitle': '标签', 'fieldType': 9},
-                    ]
-                },
-                records={},
+                            {
+                                'fieldID': 'rated-difficulty',
+                                'fieldTitle': '标注难度',
+                                'fieldType': 17,
+                                'propertySingleSelect': {
+                                    'options': [{'id': 'expert', 'text': '专家'}]
+                                },
+                            },
+                            {
+                                'fieldID': 'rated-subtier',
+                                'fieldTitle': '标注难度子阶',
+                                'fieldType': 17,
+                                'propertySingleSelect': {'options': [{'id': 'high', 'text': '高'}]},
+                            },
+                            {'fieldID': 'start', 'fieldTitle': '起始日期', 'fieldType': 4},
+                            {
+                                'fieldID': 'status',
+                                'fieldTitle': '状态',
+                                'fieldType': 17,
+                                'propertySingleSelect': {
+                                    'options': [
+                                        {'id': 'done', 'text': '通关'},
+                                        {'id': 'playing', 'text': '进行中'},
+                                    ]
+                                },
+                            },
+                            {'fieldID': 'score', 'fieldTitle': '评分', 'fieldType': 2},
+                            {'fieldID': 'note', 'fieldTitle': '备注', 'fieldType': 1},
+                            {'fieldID': 'tag', 'fieldTitle': '标签', 'fieldType': 9},
+                        ]
+                    }
+                ),
+                records=RecordsResult(records=[]),
             ),
         ],
     )

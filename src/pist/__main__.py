@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 from getpass import getpass
 from pathlib import Path
 
-from pist.game.mods import ModScanner, ModScanReport
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+from pist.game.mods import DisabledMod, InstalledMod, ModScanner, ModScanReport
 from pist.game.routes import EndersBlenderReader
 from pist.game.saves import SaveReader
 from pist.local_data import LocalDataStore
@@ -17,7 +19,6 @@ from pist.settings import PistSettings, SettingsStore
 from pist.sheet_report import field_coverage_report
 from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
 from pist.ui.entities.audit import review_entity_audit
-from pist.ui.entities.rules import manage_entity_rules
 from pist.ui.mods.browser import browse_mods
 
 INSPECT_DIR = Path('.pist/inspect')
@@ -114,16 +115,26 @@ def build_parser() -> argparse.ArgumentParser:
     browse.add_argument(
         '--save-slot', type=int, default=0, help='Show native stats from this save slot.'
     )
+    for command in (scan, browse):
+        command.add_argument(
+            '--whitelist',
+            type=Path,
+            help='Everest --whitelist file; relative paths resolve under Mods.',
+        )
+        command.add_argument(
+            '--blacklist',
+            dest='temporary_blacklist',
+            type=Path,
+            help='Everest --blacklist file; relative paths resolve under Mods.',
+        )
+        command.add_argument(
+            '--whitelist-full-override',
+            action='store_true',
+            help='Match Everest WhitelistFullOverride behavior.',
+        )
 
     entities = subcommands.add_parser('entities', help='Manage map entity classification rules.')
     entities_subcommands = entities.add_subparsers(dest='entities_command', required=True)
-    rules = entities_subcommands.add_parser(
-        'rules', help='Browse static Loenn templates and add entity rules.'
-    )
-    rules.add_argument('--game-dir', type=Path, help='Game installation directory.')
-    rules.add_argument(
-        '--shared', action='store_true', help='Write reviewed rules to the shared package library.'
-    )
     audit = entities_subcommands.add_parser(
         'audit', help='Review one ignored entity audit report in a terminal UI.'
     )
@@ -196,9 +207,9 @@ def inspection_summary(result: InspectionReport) -> dict[str, object]:
         {
             'sheet_id': inspection.sheet.sheet_id,
             'title': inspection.sheet.title,
-            'field_count': inspection.fields.get('total'),
-            'view_count': inspection.views.get('total'),
-            'record_count': inspection.records.get('total'),
+            'field_count': inspection.fields.total,
+            'view_count': inspection.views.total,
+            'record_count': inspection.records.total,
         }
         for inspection in result.sheets
     ]
@@ -249,9 +260,11 @@ def create_sheet_report(input_path: Path, output_path: Path | None) -> Path:
 
 def mod_scan_summary(result: ModScanReport) -> dict[str, object]:
     return {
-        'mods_directory': result.mods_directory,
+        'mods_dir': result.mods_dir,
         'enabled_mod_count': len(result.mods),
-        'disabled_candidate_count': len(result.skipped_blacklisted),
+        'disabled_candidate_count': len(result.disabled_filenames),
+        'warning_count': len(result.warnings),
+        'warnings': [warning.model_dump() for warning in result.warnings],
         'map_mod_count': sum(bool(mod.map_files) for mod in result.mods),
         'collab_mod_count': sum(mod.collab_id is not None for mod in result.mods),
         'sample': [
@@ -267,8 +280,20 @@ def mod_scan_summary(result: ModScanReport) -> dict[str, object]:
     }
 
 
-async def scan_mods(game_dir: Path, output_dir: Path) -> None:
-    result = ModScanner(game_dir).scan()
+async def scan_mods(
+    game_dir: Path,
+    output_dir: Path,
+    *,
+    whitelist_path: Path | None,
+    temporary_blacklist_path: Path | None,
+    whitelist_full_override: bool,
+) -> None:
+    result = ModScanner(
+        game_dir,
+        whitelist_path=whitelist_path,
+        temporary_blacklist_path=temporary_blacklist_path,
+        whitelist_full_override=whitelist_full_override,
+    ).scan()
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%SZ')
     output_path = output_dir / f'mods-{timestamp}.json'
@@ -294,8 +319,48 @@ async def browse_enabled_mods(
     *,
     sheet_client: TencentSmartSheetClient,
     sheet_source: str | None,
+    whitelist_path: Path | None,
+    temporary_blacklist_path: Path | None,
+    whitelist_full_override: bool,
 ) -> None:
-    result = ModScanner(game_dir).scan()
+    scanner = ModScanner(
+        game_dir,
+        whitelist_path=whitelist_path,
+        temporary_blacklist_path=temporary_blacklist_path,
+        whitelist_full_override=whitelist_full_override,
+    )
+    preparation = scanner.prepare()
+    with Progress(
+        TextColumn('[progress.description]{task.description}'),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn('{task.fields[filename]}'),
+        transient=True,
+    ) as startup_progress:
+        total_task_id = startup_progress.add_task('准备 Mod 列表', total=2, filename='')
+        scan_task_id = startup_progress.add_task(
+            '正在扫描已启用 Mod', total=len(preparation.candidates), filename=''
+        )
+        scanned_mods: list[InstalledMod] = []
+        for candidate in preparation.candidates:
+            startup_progress.update(scan_task_id, filename=candidate.name)
+            if mod := scanner.scan_mod(candidate):
+                scanned_mods.append(mod)
+            startup_progress.advance(scan_task_id)
+        startup_progress.remove_task(scan_task_id)
+        startup_progress.advance(total_task_id)
+
+        scan_task_id = startup_progress.add_task(
+            '正在读取已禁用 Mod', total=len(preparation.disabled_candidates), filename=''
+        )
+        disabled_mods: list[DisabledMod] = []
+        for candidate in preparation.disabled_candidates:
+            startup_progress.update(scan_task_id, filename=candidate.name)
+            disabled_mods.append(scanner.scan_disabled_mod(candidate))
+            startup_progress.advance(scan_task_id)
+        startup_progress.remove_task(scan_task_id)
+        startup_progress.advance(total_task_id)
+    result = scanner.build_report(scanned_mods, disabled_mods)
     save_reader = SaveReader(game_dir)
     save_slot = save_reader.load(save_slot_number)
     await browse_mods(
@@ -306,13 +371,6 @@ async def browse_enabled_mods(
         inspection_report=latest_inspection_report(),
         sheet_client=sheet_client if sheet_source is not None else None,
         sheet_source=sheet_source,
-    )
-
-
-async def manage_rules(game_dir: Path, *, shared: bool) -> None:
-    result = ModScanner(game_dir).scan()
-    await manage_entity_rules(
-        ((Path(mod.path), mod.metadata_name) for mod in result.mods), shared=shared
     )
 
 
@@ -350,7 +408,13 @@ async def async_main(args: argparse.Namespace) -> None:
             update=args.update,
         )
     elif args.command == 'mods' and args.mods_command == 'scan':
-        await scan_mods(default_game_dir(args.game_dir, settings_store.load()), args.output_dir)
+        await scan_mods(
+            default_game_dir(args.game_dir, settings_store.load()),
+            args.output_dir,
+            whitelist_path=args.whitelist,
+            temporary_blacklist_path=args.temporary_blacklist,
+            whitelist_full_override=args.whitelist_full_override,
+        )
     elif args.command == 'mods' and args.mods_command == 'browse':
         settings = settings_store.load()
         await browse_enabled_mods(
@@ -358,10 +422,9 @@ async def async_main(args: argparse.Namespace) -> None:
             args.save_slot,
             sheet_client=TencentSmartSheetClient(store),
             sheet_source=settings.smartsheet_url,
-        )
-    elif args.command == 'entities' and args.entities_command == 'rules':
-        await manage_rules(
-            default_game_dir(args.game_dir, settings_store.load()), shared=args.shared
+            whitelist_path=args.whitelist,
+            temporary_blacklist_path=args.temporary_blacklist,
+            whitelist_full_override=args.whitelist_full_override,
         )
     elif args.command == 'entities' and args.entities_command == 'audit':
         settings = settings_store.load()

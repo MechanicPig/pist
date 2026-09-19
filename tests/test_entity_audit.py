@@ -2,27 +2,33 @@ import asyncio
 import json
 
 from textual.app import App
-from textual.widgets import Button, Input, ListView, Select, Tree
+from textual.widgets import Button, Input, OptionList, Select, Tree
 
 from pist.entities.audit import (
-    AttributeAuditStatus,
+    UNKNOWN,
+    AttrAuditStatus,
+    AuditMapOccurrences,
     AuditSource,
     EntityAuditStatus,
     EntityAuditStore,
     EntityAuditSummary,
+    ObservationQuestion,
+    ObservationStatus,
     RawEntityOccurrence,
     occurrences_for_variants,
 )
 from pist.entities.rules import (
     EntityKind,
+    EntityRuleLayer,
     EntityRules,
     EntityStat,
     EntityTableField,
 )
-from pist.game.routes import MapMarker
+from pist.game.map_source import MapSource
+from pist.game.routes import MapPreviewEntity
 from pist.ui.entities.audit import (
-    ATTRIBUTE_SELECT_ID,
-    ATTRIBUTE_STATUS_ID,
+    ATTR_SELECT_ID,
+    ATTR_STATUS_ID,
     ENTITY_LIST_ID,
     ENTITY_STATUS_ID,
     KIND_TREE_ID,
@@ -32,26 +38,55 @@ from pist.ui.entities.audit import (
     NEW_KIND_STAT_ID,
     NEW_KIND_TABLE_ID,
     REVOKE_ENTITY_KIND_ID,
-    UNKNOWN,
     VARIANT_SELECT_ID,
     VIEW_GROUP_OCCURRENCES_ID,
     EntityAuditApp,
-    EntityAuditGroupItem,
-    EntityAuditItem,
     KindContextScreen,
     KindEditorScreen,
     KindPickerScreen,
-    _classification_groups,
-    _default_value,
 )
+from pist.ui.entities.audit.app import _classification_groups, _default_value
+from pist.ui.entities.audit.rules_refresh import audit_layer_diff
 from pist.ui.entities.kinds import KindTree, add_kind_nodes
 from pist.ui.entities.occurrences import (
     MapOccurrenceItem,
-    MapOccurrences,
     OccurrenceScreen,
-    map_occurrences,
-    occurrence_markers,
+    occurrence_preview_entities,
 )
+
+
+def test_audit_rule_diff_groups_changes_by_entity() -> None:
+    current = EntityRuleLayer.model_validate(
+        {
+            'entities': {
+                'strawberry': {'rules': [{'kind': 'strawberry'}]},
+                'Unchanged/Entity': {'rules': [{'kind': 'strawberry'}]},
+            }
+        }
+    )
+    refreshed = EntityRuleLayer.model_validate(
+        {
+            'entities': {
+                'strawberry': {
+                    'rules': [
+                        {'kind': 'strawberry', 'when': {'moon': False}},
+                        {'kind': 'strawberry', 'missing': ['moon']},
+                    ]
+                },
+                'New/Entity': {'rules': [{'kind': 'moonberry'}]},
+                'Unchanged/Entity': {'rules': [{'kind': 'strawberry'}]},
+            }
+        }
+    )
+
+    diff = audit_layer_diff(current, refreshed)
+
+    assert '--- [entities."New/Entity"]（当前）' in diff
+    assert '+++ [entities."New/Entity"]（刷新后）' in diff
+    assert '--- [entities.strawberry]（当前）' in diff
+    assert '+++ [entities.strawberry]（刷新后）' in diff
+    assert '+    { kind = "strawberry", missing = ["moon"] },' in diff
+    assert 'Unchanged/Entity' not in diff
 
 
 def test_confirmed_default_input_distinguishes_json_null_from_blank() -> None:
@@ -90,13 +125,72 @@ def test_selecting_an_unreviewed_entity_opens_its_attribute_review(tmp_path) -> 
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(EntityAuditItem))
+            app.query_one(f'#{ENTITY_LIST_ID}', OptionList).action_select()
+            await pilot.pause()
             assert app.query_one(f'#{ENTITY_STATUS_ID}', Select).value == 'unknown'
 
     asyncio.run(check())
 
 
-def test_saving_attribute_knowledge_refreshes_attribute_options(tmp_path) -> None:
+def test_selecting_entity_calculates_deferred_unreviewed_variant_count(tmp_path) -> None:
+    report_path = tmp_path / 'report.json'
+    report_path.write_text(
+        json.dumps(
+            {
+                'unmatched': [
+                    {
+                        'entity_name': 'Example/Berry',
+                        'occurrences': [
+                            {
+                                'source': {
+                                    'scope': 'mod',
+                                    'map_file': 'Maps/Test.bin',
+                                    'map_name': 'Test',
+                                },
+                                'room': 'a',
+                                'attrs': {'moon': False},
+                            },
+                            {
+                                'source': {
+                                    'scope': 'mod',
+                                    'map_file': 'Maps/Test.bin',
+                                    'map_name': 'Test',
+                                },
+                                'room': 'b',
+                                'attrs': {'moon': True},
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding='utf-8',
+    )
+    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    report_id = store.import_report(report_path)
+    store.save_observation(
+        'Example/Berry',
+        {'moon': False},
+        ObservationQuestion.ENTITY_CLASSIFICATION,
+        ObservationStatus.CONFIRMED,
+        kind='strawberry',
+    )
+    app = EntityAuditApp(store, report_id)
+
+    async def check() -> None:
+        async with app.run_test():
+            summary = app._summaries[0]
+            assert summary.variant_count is None
+            assert summary.unreviewed_variant_count == 0
+            app._select_entity('Example/Berry')
+            summary = app._summaries[0]
+            assert summary.variant_count == 2
+            assert summary.unreviewed_variant_count == 1
+
+    asyncio.run(check())
+
+
+def test_saving_attr_knowledge_refreshes_attr_options(tmp_path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -126,14 +220,14 @@ def test_saving_attribute_knowledge_refreshes_attribute_options(tmp_path) -> Non
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(EntityAuditItem))
-            attributes = app.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select)
+            app._select_entity('Example/Berry')
+            attributes = app.query_one(f'#{ATTR_SELECT_ID}', Select)
             attributes.value = 'moon'
             await pilot.pause()
             app.query_one(
-                f'#{ATTRIBUTE_STATUS_ID}', Select
-            ).value = AttributeAuditStatus.DOES_NOT_AFFECT_KIND.value
-            app.save_attribute()
+                f'#{ATTR_STATUS_ID}', Select
+            ).value = AttrAuditStatus.DOES_NOT_AFFECT_KIND.value
+            app.save_attr()
 
             assert attributes.value == 'moon'
             label = next(label for label, value in attributes._options if value == 'moon')
@@ -182,7 +276,7 @@ def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch)
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(EntityAuditItem))
+            app._select_entity('Example/Entity')
             entity_filter = app.query_one('#audit-entity-filter', Input)
             entity_filter.value = 'Other'
             await pilot.pause()
@@ -193,15 +287,13 @@ def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch)
             await pilot.pause()
             assert calls == 1
             assert entity_filter.value == 'Other'
-            assert (
-                app.query_one(EntityAuditItem).summary.status is EntityAuditStatus.ENTITY_CANDIDATE
-            )
-            assert not app.query_one(EntityAuditItem).display
+            assert app._summaries[0].status is EntityAuditStatus.ENTITY_CANDIDATE
+            assert app.query_one(f'#{ENTITY_LIST_ID}', OptionList).option_count == 0
 
     asyncio.run(check())
 
 
-def test_saving_entity_moves_only_the_saved_navigation_item(tmp_path) -> None:
+def test_saving_entity_rebuilds_virtual_navigation(tmp_path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -233,24 +325,17 @@ def test_saving_entity_moves_only_the_saved_navigation_item(tmp_path) -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            entities = app.query_one(f'#{ENTITY_LIST_ID}', ListView)
-            items = {item.summary.entity_name: item for item in entities.query(EntityAuditItem)}
-            await pilot.click(items['First'])
+            entities = app.query_one(f'#{ENTITY_LIST_ID}', OptionList)
+            app._select_entity('First')
             app.query_one(
                 f'#{ENTITY_STATUS_ID}', Select
             ).value = EntityAuditStatus.ENTITY_CANDIDATE.value
             app.save_entity()
             await pilot.pause()
 
-            refreshed = {item.summary.entity_name: item for item in entities.query(EntityAuditItem)}
-            assert refreshed['First'] is not items['First']
-            assert refreshed['Second'] is items['Second']
-            assert refreshed['First'].summary.status is EntityAuditStatus.ENTITY_CANDIDATE
-            groups = entities.query(EntityAuditGroupItem)
-            assert [group.status for group in groups] == [
-                EntityAuditStatus.UNKNOWN,
-                EntityAuditStatus.ENTITY_CANDIDATE,
-            ]
+            summaries = {summary.entity_name: summary for summary in app._summaries}
+            assert summaries['First'].status is EntityAuditStatus.ENTITY_CANDIDATE
+            assert [option.id for option in entities.options if option.disabled] == [None, None]
 
     asyncio.run(check())
 
@@ -301,33 +386,23 @@ def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path) -> N
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(EntityAuditItem))
+            app._select_entity('Example/Heart')
             assert not app.query_one('#audit-attribute-review').display
             assert not app.query_one(f'#{REVOKE_ENTITY_KIND_ID}', Button).disabled
 
-            unreviewed = next(
-                item
-                for item in app.query(EntityAuditItem)
-                if item.summary.entity_name == 'Example/Unreviewed'
-            )
-            await pilot.click(unreviewed)
+            app._select_entity('Example/Unreviewed')
             await pilot.pause()
 
             review = app.query_one('#audit-attribute-review')
             assert review.display
             assert review.region.height > 1
-            assert app.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select).disabled is False
+            assert app.query_one(f'#{ATTR_SELECT_ID}', Select).disabled is False
 
-            confirmed = next(
-                item
-                for item in app.query(EntityAuditItem)
-                if item.summary.entity_name == 'Example/Heart'
-            )
-            await pilot.click(confirmed)
+            app._select_entity('Example/Heart')
             app.revoke_entity_kind()
 
             assert app.query_one('#audit-attribute-review').display
-            assert app.query_one(f'#{ATTRIBUTE_SELECT_ID}', Select).disabled is False
+            assert app.query_one(f'#{ATTR_SELECT_ID}', Select).disabled is False
             assert app.query_one(f'#{REVOKE_ENTITY_KIND_ID}', Button).disabled
 
     asyncio.run(check())
@@ -376,28 +451,30 @@ def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_pa
         {'moon': True, 'tempo': 2},
     ]
 
-    store.save_attribute_knowledge(
-        'Example/Berry', 'tempo', AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND
-    )
+    store.save_attr_knowledge('Example/Berry', 'tempo', AttrAuditStatus.LIKELY_NOT_AFFECT_KIND)
 
     groups = _classification_groups(store.entity_detail('Example/Berry', report_id))
     assert [group.attrs for group in groups] == [{'moon': True}]
     assert len(groups[0].variants) == 2
     assert {
         occurrence.source.map_file
-        for occurrence in occurrences_for_variants(detail.occurrences, groups[0].variants)
+        for occurrence in occurrences_for_variants(
+            store.occurrences('Example/Berry', report_id), groups[0].variants
+        )
     } == {'Maps/First.bin', 'Maps/Second.bin'}
 
     app = EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(EntityAuditItem))
+            app._select_entity('Example/Berry')
             variants = app.query_one(f'#{VARIANT_SELECT_ID}', Select)
             variants.value = '0'
             await pilot.pause()
             assert not app.query_one(f'#{VIEW_GROUP_OCCURRENCES_ID}', Button).disabled
             app.view_group_occurrences()
+            await asyncio.sleep(0.05)
+            await pilot.pause()
             assert isinstance(app.screen, OccurrenceScreen)
             assert {item.source.map_file for item in app.screen._maps} == {
                 'Maps/First.bin',
@@ -411,11 +488,12 @@ def test_double_clicking_an_occurrence_requests_a_map_preview() -> None:
     occurrence = RawEntityOccurrence(
         entity_name='Example/Berry',
         attrs={'x': 8, 'y': 16},
-        source=AuditSource(scope='mod', map_file='Maps/Test.bin', map_name='Test'),
+        source=AuditSource(scope=MapSource.MOD, map_file='Maps/Test.bin', map_name='Test'),
         room='a',
         entity_id=1,
     )
-    requested: list[MapOccurrences] = []
+    map_data = AuditMapOccurrences(occurrence.source, ((occurrence.room, 1),))
+    requested: list[AuditMapOccurrences] = []
     app = App()
 
     async def check() -> None:
@@ -423,7 +501,7 @@ def test_double_clicking_an_occurrence_requests_a_map_preview() -> None:
             app.push_screen(
                 OccurrenceScreen(
                     'Example/Berry',
-                    (occurrence,),
+                    (map_data,),
                     map_progress=lambda _: 0,
                     preview=requested.append,
                 )
@@ -587,16 +665,19 @@ def test_entity_list_groups_statuses_and_prioritizes_map_progress(tmp_path, monk
         'Maps/Candidate.bin': 3,
         'Maps/Ignored.bin': 3,
     }
-    monkeypatch.setattr(app, '_map_progress', progress.__getitem__)
+    calls: dict[str, int] = {}
 
-    items = app._entity_items()
+    def map_progress(map_file: str) -> int:
+        calls[map_file] = calls.get(map_file, 0) + 1
+        return progress[map_file]
 
-    assert [item.status for item in items if isinstance(item, EntityAuditGroupItem)] == [
-        EntityAuditStatus.UNKNOWN,
-        EntityAuditStatus.ENTITY_CANDIDATE,
-        EntityAuditStatus.IGNORED,
-    ]
-    assert [item.summary.entity_name for item in items if isinstance(item, EntityAuditItem)] == [
+    monkeypatch.setattr(app, '_map_progress', map_progress)
+
+    options = app._entity_options()
+    app._entity_options()
+
+    assert sum(option.disabled for option in options) == 3
+    assert [option.id for option in options if not option.disabled] == [
         'SingleRun',
         'Completed',
         'Entered',
@@ -604,6 +685,7 @@ def test_entity_list_groups_statuses_and_prioritizes_map_progress(tmp_path, monk
         'Candidate',
         'Ignored',
     ]
+    assert calls == {map_file: 1 for map_file in progress}
 
 
 def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(tmp_path) -> None:
@@ -644,10 +726,9 @@ def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(tm
     )
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
-    occurrences = store.entity_detail('Example/Berry', report_id).occurrences
-
-    maps = map_occurrences(occurrences, lambda _: 3)
+    maps = store.occurrence_maps('Example/Berry', report_id)
 
     assert len(maps) == 2
-    assert maps[0].source.mod_file == 'Example.zip'
-    assert occurrence_markers(maps[0].occurrences) == {'a': (MapMarker(8, 16, 'audit'),)}
+    example_map = next(data for data in maps if data.source.mod_file == 'Example.zip')
+    occurrences = store.map_occurrences('Example/Berry', example_map.source, report_id)
+    assert occurrence_preview_entities(occurrences) == {'a': (MapPreviewEntity(8, 16, 'audit'),)}

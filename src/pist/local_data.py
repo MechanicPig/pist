@@ -1,17 +1,23 @@
 """Persist user-maintained local data in one SQLite database."""
 
+import json
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import ValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from pist.game.routes import MapRoute
 from pist.records import MapRecord
 
 LOCAL_DATA_PATH = Path('.pist/local-data.sqlite3')
+type CollabJournalIconPaths = dict[str, str | None]
+COLLAB_JOURNAL_ICON_PATHS_ADAPTER = TypeAdapter(
+    CollabJournalIconPaths,
+    config=ConfigDict(strict=True),
+)
 
 
 class LocalDataStore:
@@ -36,18 +42,6 @@ class LocalDataStore:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
-            if (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'"
-                ).fetchone()
-                is not None
-                and conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'"
-                ).fetchone()
-                is None
-            ):
-                conn.execute('ALTER TABLE drafts RENAME TO records')
-                conn.execute('DROP INDEX IF EXISTS drafts_by_map_save')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS records (
@@ -62,6 +56,13 @@ class LocalDataStore:
                     map_file TEXT PRIMARY KEY,
                     updated_at TEXT NOT NULL,
                     payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS collab_journal_icons (
+                    mod_path TEXT NOT NULL,
+                    map_files TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    icons TEXT NOT NULL,
+                    PRIMARY KEY (mod_path, map_files)
                 );
                 CREATE INDEX IF NOT EXISTS records_by_map_save
                 ON records (mod_metadata_name, map_file, save_slot, id DESC);
@@ -167,3 +168,47 @@ class LocalDataStore:
         except (TypeError, ValidationError, ValueError) as error:
             raise ValueError(f'Invalid saved map route for {map_file!r}.') from error
         return route if route.map_file == map_file else None
+
+    def load_collab_journal_icons(
+        self, mod_path: str, map_files: tuple[str, ...], fingerprint: str
+    ) -> CollabJournalIconPaths | None:
+        """Return cached journal icon paths when they still match the Mod source."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT icons FROM collab_journal_icons
+                WHERE mod_path = ? AND map_files = ? AND fingerprint = ?
+                """,
+                (mod_path, json.dumps(map_files), fingerprint),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return COLLAB_JOURNAL_ICON_PATHS_ADAPTER.validate_json(row[0])
+        except TypeError, ValidationError:
+            return None
+
+    def save_collab_journal_icons(
+        self,
+        mod_path: str,
+        map_files: tuple[str, ...],
+        fingerprint: str,
+        icons: CollabJournalIconPaths,
+    ) -> None:
+        """Replace cached icon paths for one Collab map group."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO collab_journal_icons (mod_path, map_files, fingerprint, icons)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(mod_path, map_files) DO UPDATE SET
+                    fingerprint = excluded.fingerprint,
+                    icons = excluded.icons
+                """,
+                (
+                    mod_path,
+                    json.dumps(map_files),
+                    fingerprint,
+                    json.dumps(icons, sort_keys=True),
+                ),
+            )

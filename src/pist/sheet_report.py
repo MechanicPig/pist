@@ -1,9 +1,6 @@
 """Human-readable coverage reports and record-field metadata from Sheet inspections."""
 
 from dataclasses import dataclass
-from typing import cast
-
-from pydantic import TypeAdapter
 
 from pist.records import MANUAL_RECORD_FIELD_TITLES
 from pist.smartsheet import InspectionReport, SmartSheetField
@@ -45,8 +42,6 @@ FIELD_SOURCES = {
     '备注': ('人工填写', '自由文本'),
 }
 
-_field_adapter = TypeAdapter(list[SmartSheetField])
-
 MAIN_TABLE_TITLE = '主表'
 
 
@@ -61,13 +56,7 @@ class ManualRecordField:
 
 def inspection_fields(report: InspectionReport) -> list[SmartSheetField]:
     """Return validated field metadata from every inspected sub-sheet."""
-    return [
-        field
-        for inspection in report.sheets
-        for field in _field_adapter.validate_python(
-            cast(object, inspection.fields.get('fields', []))
-        )
-    ]
+    return [field for inspection in report.sheets for field in inspection.fields.fields]
 
 
 def manual_record_fields(report: InspectionReport) -> tuple[ManualRecordField, ...]:
@@ -75,23 +64,15 @@ def manual_record_fields(report: InspectionReport) -> tuple[ManualRecordField, .
     for inspection in report.sheets:
         if inspection.sheet.title != MAIN_TABLE_TITLE:
             continue
-        raw_fields = cast(list[object], inspection.fields.get('fields', []))
-        fields = _field_adapter.validate_python(raw_fields)
         result: list[ManualRecordField] = []
-        for raw_field, field in zip(raw_fields, fields, strict=True):
+        for field in inspection.fields.fields:
             if field.field_title not in MANUAL_RECORD_FIELD_TITLES:
                 continue
-            options: tuple[str, ...] = ()
-            if field.field_type == 17 and isinstance(raw_field, dict):
-                property_select = raw_field.get('propertySingleSelect')
-                if isinstance(property_select, dict):
-                    raw_options = property_select.get('options', [])
-                    if isinstance(raw_options, list):
-                        options = tuple(
-                            option['text']
-                            for option in raw_options
-                            if isinstance(option, dict) and isinstance(option.get('text'), str)
-                        )
+            options = (
+                ()
+                if field.property_single_select is None
+                else tuple(option.text for option in field.property_single_select.options)
+            )
             result.append(ManualRecordField(field.field_title, field.field_type, options))
         return tuple(result)
     return ()
@@ -107,7 +88,7 @@ def field_coverage_report(report: InspectionReport) -> str:
         '“当前记录”表示生成本地记录时已经可以稳定填入；“计划自动”尚未实现。',
     ]
     for inspection in report.sheets:
-        fields = _field_adapter.validate_python(cast(object, inspection.fields.get('fields', [])))
+        fields = inspection.fields.fields
         lines.extend(
             [
                 '',

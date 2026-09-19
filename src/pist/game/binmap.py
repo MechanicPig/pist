@@ -6,6 +6,7 @@ from struct import unpack_from
 
 BIN_HEADER = 'CELESTE MAP'
 MAX_FILE_SIZE = 64 * 1024 * 1024
+MAX_DECODED_TEXT_SIZE = 64 * 1024 * 1024
 MAX_LOOKUP_SIZE = 65_535
 MAX_ELEMENT_COUNT = 1_000_000
 MAX_RECURSION_DEPTH = 1_000
@@ -48,6 +49,7 @@ class _BinReader:
         self._data = data
         self._offset = 0
         self._element_count = 0
+        self._decoded_text_size = 0
 
     def read_map(self, *, allow_trailing: bool) -> BinMap:
         """Decode a complete BinaryPacker map file."""
@@ -153,17 +155,17 @@ class _BinReader:
         """Consume one BinaryPacker attribute value without constructing it."""
         match self.read_u8():
             case 0 | 1:
-                self.read_bytes(1)
+                self.skip_bytes(1)
             case 2:
-                self.read_bytes(2)
+                self.skip_bytes(2)
             case 3 | 4:
-                self.read_bytes(4)
+                self.skip_bytes(4)
             case 5:
-                self.read_bytes(2)
+                self.skip_bytes(2)
             case 6:
-                self.read_bytes(self.read_varlen())
+                self.skip_bytes(self.read_varlen())
             case 7:
-                self.read_bytes(self.read_u16())
+                self.skip_bytes(self.read_u16())
             case type_id:
                 raise BadMapBin(f'Unknown BinaryPacker value type: {type_id}.')
 
@@ -184,7 +186,8 @@ class _BinReader:
         for _ in range(length // 2):
             times = self.read_u8()
             char = self.read_u8()
-            decoded.extend([char] * times)
+            self._reserve_decoded_text(times)
+            decoded.extend(bytes((char,)) * times)
         try:
             return decoded.decode('utf-8')
         except UnicodeDecodeError as error:
@@ -193,6 +196,7 @@ class _BinReader:
     def read_string(self) -> str:
         """Read a UTF-8 string prefixed by BinaryPacker's variable-length integer."""
         length = self.read_varlen()
+        self._reserve_decoded_text(length)
         try:
             return self.read_bytes(length).decode('utf-8')
         except UnicodeDecodeError as error:
@@ -212,32 +216,47 @@ class _BinReader:
 
     def read_u8(self) -> int:
         """Read one unsigned byte."""
-        return self.read_bytes(1)[0]
+        return self._data[self._consume(1)]
 
     def read_u16(self) -> int:
         """Read one little-endian unsigned short."""
-        return unpack_from('<H', self.read_bytes(2))[0]
+        return unpack_from('<H', self._data, self._consume(2))[0]
 
     def read_i16(self) -> int:
         """Read one little-endian signed short."""
-        return unpack_from('<h', self.read_bytes(2))[0]
+        return unpack_from('<h', self._data, self._consume(2))[0]
 
     def read_i32(self) -> int:
         """Read one little-endian signed long."""
-        return unpack_from('<i', self.read_bytes(4))[0]
+        return unpack_from('<i', self._data, self._consume(4))[0]
 
     def read_f32(self) -> float:
         """Read one little-endian IEEE-754 single-precision float."""
-        return unpack_from('<f', self.read_bytes(4))[0]
+        return unpack_from('<f', self._data, self._consume(4))[0]
 
     def read_bytes(self, length: int) -> bytes:
         """Read an exact byte count, rejecting truncated input."""
+        offset = self._consume(length)
+        return self._data[offset : offset + length]
+
+    def skip_bytes(self, length: int) -> None:
+        """Consume an exact byte count without creating a temporary slice."""
+        self._consume(length)
+
+    def _consume(self, length: int) -> int:
+        """Advance by ``length`` bytes and return the former offset."""
         end = self._offset + length
         if end > len(self._data):
             raise BadMapBin('Unexpected end of map file.')
-        result = self._data[self._offset : end]
+        offset = self._offset
         self._offset = end
-        return result
+        return offset
+
+    def _reserve_decoded_text(self, size: int) -> None:
+        """Reject strings whose total decoded payload exceeds the map safety limit."""
+        self._decoded_text_size += size
+        if self._decoded_text_size > MAX_DECODED_TEXT_SIZE:
+            raise BadMapBin(f'Decoded text exceeds {MAX_DECODED_TEXT_SIZE} byte limit.')
 
 
 def parse_map_bin(data: bytes, *, allow_trailing: bool = False) -> BinMap:

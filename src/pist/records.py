@@ -2,14 +2,17 @@
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Literal
+from enum import StrEnum
+from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field, NonNegativeInt
 
+from pist.entities.classification import MapEntityStats
 from pist.game.dialog import DIALOG_LANGUAGES, localized_name
 from pist.game.mods import InstalledMod, LocalMap
-from pist.game.saves import SaveSlot, sid_for_map_file
+from pist.game.saves import MapStats, SaveSlot, sid_for_map_file
 from pist.gamebanana import GameBananaCredit, GameBananaSubmission
+from pist.models import FrozenModel
 from pist.types import CellValue, RecordValues
 
 MANUAL_RECORD_FIELD_TITLES = frozenset(
@@ -28,10 +31,60 @@ MANUAL_RECORD_FIELD_TITLES = frozenset(
 )
 
 
-class MapRecord(BaseModel):
-    """One locally maintained map record, optionally synchronized to Smart Sheet."""
+class MapRecordProgress(StrEnum):
+    """The player-facing completion state inferred for one record draft."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    COMPLETED_ALL_COLLECTIBLES = 'completed_all_collectibles'
+    COMPLETED_MISSING_COLLECTIBLES = 'completed_missing_collectibles'
+    PARTIALLY_COMPLETED = 'partially_completed'
+    IN_PROGRESS = 'in_progress'
+    RAN_BEFORE = 'ran_before'
+    NOT_STARTED = 'not_started'
+
+    @property
+    def label(self) -> str:
+        """Return the concise Chinese label used by the record editor."""
+        return MAP_RECORD_PROGRESS_LABELS[self]
+
+
+MAP_RECORD_PROGRESS_LABELS: Final[Mapping[MapRecordProgress, str]] = {
+    MapRecordProgress.COMPLETED_ALL_COLLECTIBLES: '通关（全收集或无收集品）',
+    MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES: '通关（未全收集）',
+    MapRecordProgress.PARTIALLY_COMPLETED: '部分通关',
+    MapRecordProgress.IN_PROGRESS: '进行中',
+    MapRecordProgress.RAN_BEFORE: '已跑比',
+    MapRecordProgress.NOT_STARTED: '未开始',
+}
+
+
+def map_record_progress(
+    stats: MapStats | None,
+    entity_stats: MapEntityStats,
+    *,
+    is_in_progress: bool,
+) -> MapRecordProgress:
+    """Infer a draft's completion state from native saves and configured entities."""
+    if stats is None or not stats.is_recorded:
+        return MapRecordProgress.NOT_STARTED
+    if stats.single_run_completed:
+        strawberries = entity_stats.count('strawberry') + entity_stats.count('moonberry')
+        all_collected = (
+            len(stats.collected_strawberries) >= strawberries
+            and (not entity_stats.has_stat_kind('cassette') or stats.cassette_collected)
+            and (not entity_stats.has_stat_kind('heart') or stats.heart_collected)
+        )
+        return (
+            MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+            if all_collected
+            else MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
+        )
+    if stats.completed:
+        return MapRecordProgress.PARTIALLY_COMPLETED
+    return MapRecordProgress.IN_PROGRESS if is_in_progress else MapRecordProgress.RAN_BEFORE
+
+
+class MapRecord(FrozenModel):
+    """One locally maintained map record, optionally synchronized to Smart Sheet."""
 
     created_at: datetime
     mod_metadata_name: str
@@ -46,9 +99,9 @@ class MapRecord(BaseModel):
     side: Literal['A', 'B', 'C']
     authors: tuple[str, ...] = ()
     difficulty: str | None = None
-    save_slot: int
+    save_slot: NonNegativeInt
     time_played: str | None = None
-    deaths: int | None = None
+    deaths: NonNegativeInt | None = None
     completed: bool | None = None
     record_values: RecordValues = Field(default_factory=dict)
 

@@ -1,56 +1,60 @@
 """Read map room layouts and Ender's Blender first-clear routes."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, PositiveInt, ValidationError, model_validator
 
-from pist.entities.analysis import (
-    ClassifiedEntity,
-    MapEntities,
-    MapEntityStats,
-    analyze_map_entities,
-)
-from pist.entities.rules import (
-    EntityRules,
-    EntityStat,
-    kind_select_value,
-    load_entity_rule_layers,
-    stat_owner,
-)
-from pist.game.binmap import BinElement, BinMap, NumericAttrValue, parse_map_bin
+from pist.entities import classification, rules
+from pist.entities.map_entity_id import MapEntityID
+from pist.game import binmap
+from pist.game.duration import Duration
 from pist.game.mod_path import BadModPath, ModPath
 from pist.game.mods import InstalledMod, LocalMap
 from pist.game.saves import SAVE_EXT, SAVES_DIRNAME, sid_for_map_file
-from pist.game.time import Time
 from pist.map_entrances import (
     DEFAULT_MAP_ENTRANCE_RULES,
     MapEntranceRules,
     MapEntranceSource,
 )
-from pist.types import RecordValues
+from pist.models import ExternalModel, FrozenModel
+from pist.types import NonNegativeDecimalInt
 
 ENDERS_BLENDER_MOD_NAME = 'EndersBlender'
 ENDERS_BLENDER_ROOM_ORDER_KEY = 'mapDict_roomStat_firstClear_roomOrder'
 ENDERS_BLENDER_ROOM_DEATH_KEY = 'mapDict_roomStat_firstClear_death'
 ENDERS_BLENDER_ROOM_TIMER_KEY = 'mapDict_roomStat_firstClear_timer'
+LAYER_ENTRANCE_SOURCES = MappingProxyType(
+    {
+        'entities': MapEntranceSource.ENTITY,
+        'triggers': MapEntranceSource.TRIGGER,
+    }
+)
+ENDERS_BLENDER_FIELD_LABELS = MappingProxyType(
+    {
+        ENDERS_BLENDER_ROOM_ORDER_KEY: 'room orders',
+        ENDERS_BLENDER_ROOM_DEATH_KEY: 'room deaths',
+        ENDERS_BLENDER_ROOM_TIMER_KEY: 'room timers',
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
-class MapMarker:
-    """One configured entity marker positioned within a map room."""
+class MapPreviewEntity:
+    """One classified entity projected into a map-preview room."""
 
-    x: NumericAttrValue
-    y: NumericAttrValue
+    x: binmap.NumericAttrValue
+    y: binmap.NumericAttrValue
     kind: str
     sprite: str | None = None
     key: str | None = None
     entity_name: str | None = None
-    attrs: Mapping[str, object] | None = None
+    attrs: Mapping[str, binmap.AttrValue] | None = None
     summary_kind: str | None = None
-    summary_stat: EntityStat | None = None
+    summary_stat: rules.EntityStat | None = None
     summary_label: str | None = None
     summary_value: str | None = None
 
@@ -64,15 +68,15 @@ class MapRespawn:
 
 
 @dataclass(frozen=True, slots=True)
-class MapLink:
+class MapEntrance:
     """One explicit in-game map transition from a room to another map SID."""
 
     room: str
     target_sid: str
-    x: NumericAttrValue | None = None
-    y: NumericAttrValue | None = None
-    width: NumericAttrValue | None = None
-    height: NumericAttrValue | None = None
+    x: binmap.NumericAttrValue | None = None
+    y: binmap.NumericAttrValue | None = None
+    width: binmap.NumericAttrValue | None = None
+    height: binmap.NumericAttrValue | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +90,7 @@ class MapRoom:
     height: int | None
     background: tuple[str, ...] = ()
     solids: tuple[str, ...] = ()
-    markers: tuple[MapMarker, ...] = ()
+    entities: tuple[MapPreviewEntity, ...] = ()
     respawns: tuple[MapRespawn, ...] = ()
 
     @property
@@ -100,7 +104,7 @@ class MapLayout:
     """The rooms belonging to one decoded map."""
 
     rooms: tuple[MapRoom, ...]
-    links: tuple[MapLink, ...] = ()
+    entrances: tuple[MapEntrance, ...] = ()
 
     @property
     def room_names(self) -> frozenset[str]:
@@ -108,15 +112,56 @@ class MapLayout:
         return frozenset(room.name for room in self.rooms)
 
 
-class MapRoute(BaseModel):
-    """The user-confirmed main rooms for one concrete map file."""
+@dataclass(frozen=True, slots=True)
+class MapEntityRecordReview:
+    """One decoded map's corrected summaries and saved-pickup rule issues."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    stats: classification.MapEntityStats
+    collected_issues: tuple[classification.CollectedEntityRuleIssue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MapEntityRecordSource:
+    """One decoded map and the stable inputs for repeated record-rule reviews."""
+
+    map_data: binmap.BinMap
+    collected: frozenset[MapEntityID]
+    excluded_entities: frozenset[str] = frozenset()
+
+    def review(
+        self,
+        *,
+        entity_rules: rules.EntityRules | None = None,
+        needs_variant_review: classification.VariantReview | None = None,
+        variant_review_loader: classification.VariantReviewLoader | None = None,
+    ) -> MapEntityRecordReview:
+        """Reclassify this map using the currently loaded entity rules."""
+        if needs_variant_review is not None and variant_review_loader is not None:
+            raise ValueError('Specify either a variant review checker or loader, not both.')
+        rule_set = rules.load_entity_rule_layers() if entity_rules is None else entity_rules
+        return MapEntityRecordReview(
+            stats=classification.map_entity_stats(
+                self.map_data,
+                excluded_entities=self.excluded_entities,
+                rule_set=rule_set,
+            ),
+            collected_issues=classification.collected_entity_rule_issues(
+                self.map_data,
+                self.collected,
+                rule_set=rule_set,
+                needs_variant_review=needs_variant_review,
+                variant_review_loader=variant_review_loader,
+            ),
+        )
+
+
+class MapRoute(FrozenModel):
+    """The user-confirmed main rooms for one concrete map file."""
 
     map_file: str
     rooms: tuple[str, ...]
-    room_counts: dict[str, int] = Field(default_factory=dict)
-    excluded_markers: frozenset[str] = Field(default_factory=frozenset)
+    room_counts: dict[str, PositiveInt] = Field(default_factory=dict)
+    excluded_entities: frozenset[str] = Field(default_factory=frozenset)
 
     @model_validator(mode='after')
     def validate_rooms(self) -> MapRoute:
@@ -124,8 +169,6 @@ class MapRoute(BaseModel):
             raise ValueError('Map route must not contain duplicate rooms.')
         if not self.room_counts.keys() <= set(self.rooms):
             raise ValueError('Map route room counts must refer to selected rooms.')
-        if any(count < 1 for count in self.room_counts.values()):
-            raise ValueError('Map route room counts must be positive.')
         return self
 
     @property
@@ -141,19 +184,40 @@ class EndersBlenderSave:
     number: int
     first_clear_room_orders: dict[str, tuple[str, ...]]
     first_clear_room_deaths: dict[str, dict[str, int]] = field(default_factory=dict)
-    first_clear_room_times: dict[str, dict[str, Time]] = field(default_factory=dict)
+    first_clear_room_times: dict[str, dict[str, Duration]] = field(default_factory=dict)
 
     def first_clear_room_order(self, map_info: LocalMap) -> tuple[str, ...]:
         """Return the recorded first-clear sequence for one map, if available."""
         return self.first_clear_room_orders.get(_map_save_key(map_info), ())
 
-    def first_clear_room_time(self, map_info: LocalMap, room: str) -> Time | None:
+    def first_clear_room_time(self, map_info: LocalMap, room: str) -> Duration | None:
         """Return one room's recorded first-clear time, if available."""
         return self.first_clear_room_times.get(_map_save_key(map_info), {}).get(room)
 
     def first_clear_room_death(self, map_info: LocalMap, room: str) -> int | None:
         """Return one room's recorded first-clear death count, if available."""
         return self.first_clear_room_deaths.get(_map_save_key(map_info), {}).get(room)
+
+
+class _EndersBlenderData(ExternalModel):
+    """The subset of Ender's Blender YAML that Pist consumes.
+
+    ``yaml.BaseLoader`` deliberately preserves scalar values as strings. The
+    nested field annotations validate their decimal encoding and convert them.
+    """
+
+    room_orders: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict,
+        validation_alias=ENDERS_BLENDER_ROOM_ORDER_KEY,
+    )
+    room_deaths: dict[str, dict[str, NonNegativeDecimalInt]] = Field(
+        default_factory=dict,
+        validation_alias=ENDERS_BLENDER_ROOM_DEATH_KEY,
+    )
+    room_timers: dict[str, dict[str, Duration]] = Field(
+        default_factory=dict,
+        validation_alias=ENDERS_BLENDER_ROOM_TIMER_KEY,
+    )
 
 
 class EndersBlenderReader:
@@ -183,32 +247,35 @@ class EndersBlenderReader:
         except (OSError, yaml.YAMLError) as error:
             raise ValueError(f'Invalid Ender’s Blender save file: {path!r}') from error
         try:
-            orders = _first_clear_room_orders(data, path)
-            deaths = _first_clear_room_deaths(data, path)
-            times = _first_clear_room_times(data, path)
-        except TypeError as error:
-            raise ValueError(str(error)) from error
-        return EndersBlenderSave(number, orders, deaths, times)
+            saved_data = _EndersBlenderData.model_validate(data)
+        except ValidationError as error:
+            raise _enders_blender_validation_error(path, error) from error
+        return EndersBlenderSave(
+            number,
+            saved_data.room_orders,
+            saved_data.room_deaths,
+            saved_data.room_timers,
+        )
 
     def _path(self, number: int) -> Path:
         return self._saves_dir / f'{number}-modsave-{ENDERS_BLENDER_MOD_NAME}{SAVE_EXT}'
 
 
 def map_layout(
-    map_data: BinMap,
+    map_data: binmap.BinMap,
     *,
     entrance_rules: MapEntranceRules = DEFAULT_MAP_ENTRANCE_RULES,
-    entity_rules: EntityRules | None = None,
+    entity_rules: rules.EntityRules | None = None,
 ) -> MapLayout:
     """Extract all map rooms and their editor-space bounds from a decoded map."""
     levels = next((child for child in map_data.root.children if child.name == 'levels'), None)
     if levels is None:
         return MapLayout(())
-    rules = load_entity_rule_layers() if entity_rules is None else entity_rules
-    entities = analyze_map_entities(map_data, rules=rules)
-    markers_by_room = _markers_by_room(entities, rules)
+    rule_set = rules.load_entity_rule_layers() if entity_rules is None else entity_rules
+    entities = classification.classify_map_entities(map_data, rule_set=rule_set)
+    preview_entities_by_room = _preview_entities_by_room(entities, rule_set)
     rooms = tuple(
-        _map_room(room, markers_by_room.get(_str_attr(room.attrs.get('name')), ()))
+        _map_room(room, preview_entities_by_room.get(_str_attr(room.attrs.get('name')), ()))
         for room in levels.children
         if room.name == 'level'
     )
@@ -225,166 +292,46 @@ def load_map_layout_from_path(path: Path, map_file: str) -> MapLayout:
     return map_layout(_load_map_bin(path, map_file))
 
 
-def load_map_entity_record_values_from_path(
+def load_map_entity_record_source_from_path(
     path: Path,
     map_file: str,
+    collected: frozenset[MapEntityID],
     *,
-    excluded_markers: frozenset[str] = frozenset(),
-    entity_rules: EntityRules | None = None,
-) -> RecordValues:
-    """Read one map and summarize only entities not excluded by its saved route."""
-    return map_entity_stats(
+    excluded_entities: frozenset[str] = frozenset(),
+) -> MapEntityRecordSource:
+    """Read one map once, retaining data needed for later rule refreshes."""
+    return MapEntityRecordSource(
         _load_map_bin(path, map_file),
-        excluded_markers=excluded_markers,
-        entity_rules=entity_rules,
-    ).record_values
-
-
-def load_map_entity_stats_from_path(
-    path: Path,
-    map_file: str,
-    *,
-    excluded_markers: frozenset[str] = frozenset(),
-    entity_rules: EntityRules | None = None,
-) -> MapEntityStats:
-    """Read one map and summarize only entities not excluded by its saved route."""
-    return map_entity_stats(
-        _load_map_bin(path, map_file),
-        excluded_markers=excluded_markers,
-        entity_rules=entity_rules,
+        collected,
+        excluded_entities,
     )
 
 
-def map_entity_record_values(
-    map_data: BinMap,
-    *,
-    excluded_markers: frozenset[str] = frozenset(),
-    entity_rules: EntityRules | None = None,
-) -> RecordValues:
-    """Return configured table values after applying per-entity route exclusions.
-
-    The preview stores exclusions using the stable marker key, rather than a rule
-    condition, because an inaccessible instance does not make every matching
-    entity inaccessible. Rebuilding the aggregate here keeps local record data aligned
-    with the correction summary shown in the preview.
-    """
-    return map_entity_stats(
-        map_data,
-        excluded_markers=excluded_markers,
-        entity_rules=entity_rules,
-    ).record_values
-
-
-def map_entity_stats(
-    map_data: BinMap,
-    *,
-    excluded_markers: frozenset[str] = frozenset(),
-    entity_rules: EntityRules | None = None,
-) -> MapEntityStats:
-    """Summarize configured entities after applying per-instance route exclusions."""
-    rules = load_entity_rule_layers() if entity_rules is None else entity_rules
-    entities = analyze_map_entities(map_data, rules=rules)
-    counted: dict[str, list[ClassifiedEntity]] = {}
-    existing: dict[str, list[ClassifiedEntity]] = {}
-    selected: dict[str, list[ClassifiedEntity]] = {}
-    select_values: dict[str, set[str]] = {}
-    for entity in entities.entities:
-        if _marker_key(entity) in excluded_markers:
-            continue
-        match stat_owner(entity.kind, rules=rules):
-            case stat_kind, EntityStat.COUNT, _:
-                counted.setdefault(stat_kind, []).append(entity)
-            case stat_kind, EntityStat.EXIST, _:
-                existing.setdefault(stat_kind, []).append(entity)
-            case stat_kind, EntityStat.SELECT, _:
-                selected.setdefault(stat_kind, []).append(entity)
-                if (value := kind_select_value(entity.kind, rules=rules)) is not None:
-                    select_values.setdefault(stat_kind, set()).add(value)
-    stats = MapEntityStats(
-        counted={kind: tuple(items) for kind, items in counted.items()},
-        existing={kind: tuple(items) for kind, items in existing.items()},
-        selected={kind: tuple(items) for kind, items in selected.items()},
-        table_fields=entities.stats.table_fields,
-        stat_types=entities.stats.stat_types,
-        select_values={kind: frozenset(values) for kind, values in select_values.items()},
-    )
-    return stats
-
-
-def _load_map_bin(path: Path, map_file: str) -> BinMap:
+def _load_map_bin(path: Path, map_file: str) -> binmap.BinMap:
     """Read one map BIN from an archive, directory, or the Game Content directory."""
     try:
         with ModPath(path) as mod_path:
             map_path = mod_path.joinpath(map_file)
             if not map_path.is_file():
                 raise ValueError(f'Map file does not exist in {path!r}: {map_file!r}')
-            map_data = parse_map_bin(map_path.read_bytes(), allow_trailing=True)
+            map_data = binmap.parse_map_bin(map_path.read_bytes(), allow_trailing=True)
     except BadModPath as error:
         raise ValueError(f'Invalid map package path: {path!r}') from error
     return map_data
 
 
-def _first_clear_room_orders(data: object, path: Path) -> dict[str, tuple[str, ...]]:
-    if not isinstance(data, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender save file: {path!r}')
-    orders = data.get(ENDERS_BLENDER_ROOM_ORDER_KEY, {})
-    if not isinstance(orders, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender room orders in: {path!r}')
-    result: dict[str, tuple[str, ...]] = {}
-    for sid, rooms in orders.items():
-        if not isinstance(sid, str) or not isinstance(rooms, list):
-            raise TypeError(f'Invalid Ender’s Blender room order in: {path!r}')
-        if not all(isinstance(room, str) for room in rooms):
-            raise TypeError(f'Invalid Ender’s Blender room order in: {path!r}')
-        result[sid] = tuple(rooms)
-    return result
-
-
-def _first_clear_room_times(data: object, path: Path) -> dict[str, dict[str, Time]]:
-    if not isinstance(data, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender save file: {path!r}')
-    timers = data.get(ENDERS_BLENDER_ROOM_TIMER_KEY, {})
-    if not isinstance(timers, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender room timers in: {path!r}')
-    result: dict[str, dict[str, Time]] = {}
-    for sid, room_timers in timers.items():
-        if not isinstance(sid, str) or not isinstance(room_timers, Mapping):
-            raise TypeError(f'Invalid Ender’s Blender room timer in: {path!r}')
-        times: dict[str, Time] = {}
-        for room, value in room_timers.items():
-            if not isinstance(room, str) or not isinstance(value, str):
-                raise TypeError(f'Invalid Ender’s Blender room timer in: {path!r}')
-            try:
-                times[room] = Time.from_filetime(int(value))
-            except ValueError as error:
-                raise TypeError(f'Invalid Ender’s Blender room timer in: {path!r}') from error
-        result[sid] = times
-    return result
-
-
-def _first_clear_room_deaths(data: object, path: Path) -> dict[str, dict[str, int]]:
-    if not isinstance(data, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender save file: {path!r}')
-    deaths = data.get(ENDERS_BLENDER_ROOM_DEATH_KEY, {})
-    if not isinstance(deaths, Mapping):
-        raise TypeError(f'Invalid Ender’s Blender room deaths in: {path!r}')
-    result: dict[str, dict[str, int]] = {}
-    for sid, room_deaths in deaths.items():
-        if not isinstance(sid, str) or not isinstance(room_deaths, Mapping):
-            raise TypeError(f'Invalid Ender’s Blender room death in: {path!r}')
-        values: dict[str, int] = {}
-        for room, value in room_deaths.items():
-            if not isinstance(room, str) or not isinstance(value, str):
-                raise TypeError(f'Invalid Ender’s Blender room death in: {path!r}')
-            try:
-                death = int(value)
-            except ValueError as error:
-                raise TypeError(f'Invalid Ender’s Blender room death in: {path!r}') from error
-            if death < 0:
-                raise TypeError(f'Invalid Ender’s Blender room death in: {path!r}')
-            values[room] = death
-        result[sid] = values
-    return result
+def _enders_blender_validation_error(path: Path, error: ValidationError) -> ValueError:
+    detail = error.errors(include_url=False)[0]
+    location = detail['loc']
+    field = location[0] if location else None
+    label = (
+        ENDERS_BLENDER_FIELD_LABELS.get(field, 'save data')
+        if isinstance(field, str)
+        else 'save data'
+    )
+    nested_path = ''.join(f'[{part!r}]' for part in location[1:])
+    suffix = f' at {nested_path}' if nested_path else ''
+    return ValueError(f'Invalid Ender’s Blender {label}{suffix}: {detail["msg"]} in {path!r}')
 
 
 def _map_save_key(map_info: LocalMap) -> str:
@@ -392,7 +339,7 @@ def _map_save_key(map_info: LocalMap) -> str:
     return f'{sid}_{map_info.side}' if map_info.side is not None else sid
 
 
-def _map_room(room: BinElement, markers: tuple[MapMarker, ...]) -> MapRoom:
+def _map_room(room: binmap.BinElement, entities: tuple[MapPreviewEntity, ...]) -> MapRoom:
     return MapRoom(
         name=_str_attr(room.attrs.get('name')),
         x=_int_attr(room.attrs.get('x')),
@@ -401,12 +348,12 @@ def _map_room(room: BinElement, markers: tuple[MapMarker, ...]) -> MapRoom:
         height=_int_attr(room.attrs.get('height')),
         background=_tile_rows(room, 'bg'),
         solids=_tile_rows(room, 'solids'),
-        markers=markers,
+        entities=entities,
         respawns=_room_respawns(room),
     )
 
 
-def _room_respawns(room: BinElement) -> tuple[MapRespawn, ...]:
+def _room_respawns(room: binmap.BinElement) -> tuple[MapRespawn, ...]:
     entities = next((child for child in room.children if child.name == 'entities'), None)
     if entities is None:
         return ()
@@ -421,9 +368,11 @@ def _room_respawns(room: BinElement) -> tuple[MapRespawn, ...]:
     return tuple(result)
 
 
-def _map_entrances(levels: BinElement, rules: MapEntranceRules) -> tuple[MapLink, ...]:
+def _map_entrances(
+    levels: binmap.BinElement, entrance_rules: MapEntranceRules
+) -> tuple[MapEntrance, ...]:
     """Extract configured static map entrances from room entities and triggers."""
-    result: list[MapLink] = []
+    result: list[MapEntrance] = []
     for room in levels.children:
         if room.name != 'level':
             continue
@@ -433,7 +382,7 @@ def _map_entrances(levels: BinElement, rules: MapEntranceRules) -> tuple[MapLink
             if source is None:
                 continue
             for item in layer.children:
-                rule = rules.match(source, item.name, item.attrs)
+                rule = entrance_rules.match(source, item.name, item.attrs)
                 if rule is None:
                     continue
                 target_sid = item.attrs.get(rule.target_attr)
@@ -449,42 +398,38 @@ def _map_entrances(levels: BinElement, rules: MapEntranceRules) -> tuple[MapLink
                     if rule.region.height is not None
                     else None
                 )
-                result.append(MapLink(room_name, target_sid, x, y, width, height))
+                result.append(MapEntrance(room_name, target_sid, x, y, width, height))
     return tuple(result)
 
 
 def _entrance_source(layer_name: str) -> MapEntranceSource | None:
-    match layer_name:
-        case 'entities':
-            return MapEntranceSource.ENTITY
-        case 'triggers':
-            return MapEntranceSource.TRIGGER
-        case _:
-            return None
+    return LAYER_ENTRANCE_SOURCES.get(layer_name)
 
 
-def _markers_by_room(entities: MapEntities, rules: EntityRules) -> dict[str, tuple[MapMarker, ...]]:
-    result: dict[str, list[MapMarker]] = {}
-    for entity in _classified_entities(entities):
+def _preview_entities_by_room(
+    entities: Iterable[classification.ClassifiedEntity], rule_set: rules.EntityRules
+) -> dict[str, tuple[MapPreviewEntity, ...]]:
+    result: dict[str, list[MapPreviewEntity]] = {}
+    for entity in entities:
         if entity.x is None or entity.y is None:
             continue
-        owner = stat_owner(entity.kind, rules=rules)
+        owner = rules.stat_owner(entity.kind, rules=rule_set)
         if owner is None:
             summary_kind = None
             summary_stat = None
             summary_label = None
             summary_value = None
         else:
-            summary_kind, summary_stat, _ = owner
-            summary_label = rules.kinds[summary_kind].label
-            summary_value = kind_select_value(entity.kind, rules=rules)
+            summary_kind, summary_stat = owner
+            summary_label = rule_set.kinds[summary_kind].label
+            summary_value = rules.kind_select_value(entity.kind, rules=rule_set)
         result.setdefault(entity.room, []).append(
-            MapMarker(
+            MapPreviewEntity(
                 x=entity.x,
                 y=entity.y,
                 kind=entity.kind,
                 sprite=entity.sprite,
-                key=_marker_key(entity),
+                key=classification.entity_key(entity),
                 entity_name=entity.name,
                 attrs=entity.attrs,
                 summary_kind=summary_kind,
@@ -493,20 +438,10 @@ def _markers_by_room(entities: MapEntities, rules: EntityRules) -> dict[str, tup
                 summary_value=summary_value,
             )
         )
-    return {room: tuple(markers) for room, markers in result.items()}
+    return {room: tuple(entities) for room, entities in result.items()}
 
 
-def _classified_entities(entities: MapEntities) -> tuple[ClassifiedEntity, ...]:
-    """Return every configured entity with a map position, not only statistics inputs."""
-    return entities.entities
-
-
-def _marker_key(entity: ClassifiedEntity) -> str:
-    """Return the persisted per-instance key shared by previews and record aggregation."""
-    return f'{entity.room}\x1f{entity.name}\x1f{entity.entity_id}\x1f{entity.x}\x1f{entity.y}'
-
-
-def _tile_rows(room: BinElement, name: str) -> tuple[str, ...]:
+def _tile_rows(room: binmap.BinElement, name: str) -> tuple[str, ...]:
     layer = next((child for child in room.children if child.name == name), None)
     if layer is None:
         return ()
@@ -522,7 +457,7 @@ def _int_attr(value: object) -> int | None:
     return value if type(value) is int else None
 
 
-def _number_attr(value: object) -> NumericAttrValue | None:
+def _number_attr(value: object) -> binmap.NumericAttrValue | None:
     if type(value) is int:
         return value
     if type(value) is float:

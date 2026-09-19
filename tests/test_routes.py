@@ -2,22 +2,24 @@ from pathlib import Path
 from struct import pack
 
 import pytest
+from pydantic import ValidationError
 
+from pist.entities.classification import map_entity_stats
 from pist.entities.rules import EntityRules, EntityStat, load_entity_rule_layers
 from pist.game.binmap import BinElement, BinMap
-from pist.game.mods import InstalledMod, LocalMap
+from pist.game.duration import Duration
+from pist.game.mods import LocalMap
 from pist.game.routes import (
     EndersBlenderReader,
-    MapLink,
-    MapMarker,
+    MapEntrance,
+    MapPreviewEntity,
     MapRoute,
     load_map_layout,
-    map_entity_record_values,
     map_layout,
 )
-from pist.game.time import Time
 from pist.local_data import LocalDataStore
 from pist.map_entrances import load_map_entrance_rule_layers
+from tests.mod_factory import make_installed_mod
 
 
 def _varlen(value: int) -> bytes:
@@ -109,13 +111,13 @@ def test_map_layout_extracts_tiles_and_configured_entity_markers() -> None:
 
     assert room.background == ('010', '111')
     assert room.solids == ('100', '001')
-    assert room.markers == (
-        MapMarker(
+    assert room.entities == (
+        MapPreviewEntity(
             8,
             8,
             'strawberry',
             'strawberry.png',
-            'start\x1fstrawberry\x1fNone\x1f8\x1f8',
+            None,
             'strawberry',
             {'x': 8, 'y': 8},
             summary_kind='strawberry',
@@ -157,11 +159,11 @@ def test_map_entity_record_values_apply_saved_marker_exclusions() -> None:
         ),
     )
 
-    values = map_entity_record_values(
+    values = map_entity_stats(
         map_data,
-        excluded_markers=frozenset({'room\x1fstrawberry\x1f1\x1f8\x1f8'}),
-        entity_rules=load_entity_rule_layers().with_rule('heartGem', 'end_level_heart', {}),
-    )
+        excluded_entities=frozenset({'room:1'}),
+        rule_set=load_entity_rule_layers().with_rule('heartGem', 'end_level_heart', {}),
+    ).record_values
 
     assert values == {'主表': {'红草莓数': 0, '月莓数': 0, '磁带': True, '水晶之心': '通关收集'}}
 
@@ -202,13 +204,13 @@ def test_map_layout_uses_rules_supplied_when_the_map_is_opened() -> None:
 
     room = map_layout(map_data, entity_rules=rules).rooms[0]
 
-    assert room.markers == (
-        MapMarker(
+    assert room.entities == (
+        MapPreviewEntity(
             4,
             4,
             'seed',
             'seed.png',
-            'start\x1fExample/Seed\x1fNone\x1f4\x1f4',
+            None,
             'Example/Seed',
             {'x': 4, 'y': 4},
         ),
@@ -267,9 +269,9 @@ def test_map_layout_extracts_collab_route_links() -> None:
         ),
     )
 
-    assert map_layout(map_data).links == (
-        MapLink('lobby', 'Author/Pack/SmallMap', 136, 8, 48, 32),
-        MapLink('lobby', 'Author/Pack/Target', 80, 40, 32, 24),
+    assert map_layout(map_data).entrances == (
+        MapEntrance('lobby', 'Author/Pack/SmallMap', 136, 8, 48, 32),
+        MapEntrance('lobby', 'Author/Pack/Target', 80, 40, 32, 24),
     )
 
 
@@ -350,7 +352,7 @@ mapDict_roomStat_firstClear_timer:
     ) == ('0', '1')
     map_info = LocalMap(file_path='Maps/Author/Pack/Map-B.bin', dialog_key='Map', side='B')
     assert save.first_clear_room_death(map_info, 'start') == 4
-    assert save.first_clear_room_time(map_info, 'start') == Time(2550)
+    assert save.first_clear_room_time(map_info, 'start') == Duration.from_milliseconds(2550)
 
 
 def test_enders_blender_reader_rejects_invalid_room_orders(tmp_path: Path) -> None:
@@ -362,6 +364,41 @@ def test_enders_blender_reader_rejects_invalid_room_orders(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match='room orders'):
         EndersBlenderReader(tmp_path / 'Celeste').load(0)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value', 'label', 'reason'),
+    (
+        ('mapDict_roomStat_firstClear_death', '1.0', 'room deaths', 'decimal integer'),
+        ('mapDict_roomStat_firstClear_timer', '1', 'room timers', 'whole milliseconds'),
+    ),
+)
+def test_enders_blender_reader_preserves_invalid_value_locations(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    label: str,
+    reason: str,
+) -> None:
+    saves_dir = tmp_path / 'Celeste' / 'Saves'
+    saves_dir.mkdir(parents=True)
+    (saves_dir / '0-modsave-EndersBlender.celeste').write_text(
+        f"""{field}:
+  Author/Pack/Map_B:
+    start: {value}
+""",
+        encoding='utf-8',
+    )
+
+    with pytest.raises(ValueError) as info:
+        EndersBlenderReader(tmp_path / 'Celeste').load(0)
+
+    message = str(info.value)
+    assert label in message
+    assert 'Author/Pack/Map_B' in message
+    assert 'start' in message
+    assert reason in message
+    assert isinstance(info.value.__cause__, ValidationError)
 
 
 def test_load_map_layout_reads_a_map_from_an_installed_mod_directory(tmp_path: Path) -> None:
@@ -386,7 +423,7 @@ def test_load_map_layout_reads_a_map_from_an_installed_mod_directory(tmp_path: P
     map_path = mod_dir / 'Maps' / 'Author' / 'Pack' / 'Map.bin'
     map_path.parent.mkdir(parents=True)
     map_path.write_bytes(data)
-    mod = InstalledMod(
+    mod = make_installed_mod(
         source='directory',
         filename='Mod',
         path=str(mod_dir),
@@ -419,3 +456,12 @@ def test_map_route_counts_editor_rooms_by_explicit_in_game_room_count() -> None:
     )
 
     assert route.room_count == 5
+
+
+def test_map_route_rejects_non_positive_explicit_room_count() -> None:
+    with pytest.raises(ValueError):
+        MapRoute(
+            map_file='Maps/Author/Pack/Map.bin',
+            rooms=('start',),
+            room_counts={'start': 0},
+        )

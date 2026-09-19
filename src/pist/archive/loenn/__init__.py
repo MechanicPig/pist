@@ -1,4 +1,4 @@
-"""Read static entity placement metadata shipped for the Loenn editor."""
+"""Archived static Loenn placement analysis kept for possible future reuse."""
 
 import re
 import tomllib

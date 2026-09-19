@@ -1,19 +1,140 @@
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from pist.game.mods import InstalledMod, LocalMap
+from pist.entities.classification import MapEntityStats
+from pist.entities.map_entity_id import MapEntityID
+from pist.game.duration import Duration
+from pist.game.mods import LocalMap
 from pist.game.saves import MapStats, SaveSlot
-from pist.game.time import Time
 from pist.gamebanana import GameBananaSubmission
 from pist.local_data import LocalDataStore
-from pist.records import create_map_record, merge_saved_record
+from pist.records import (
+    MapRecord,
+    MapRecordProgress,
+    create_map_record,
+    map_record_progress,
+    merge_saved_record,
+)
+from tests.mod_factory import make_installed_mod
+
+
+@pytest.mark.parametrize(
+    ('save_slot', 'deaths'),
+    ((-1, None), (0, -1)),
+)
+def test_map_record_rejects_negative_save_stats(save_slot: int, deaths: int | None) -> None:
+    with pytest.raises(ValueError):
+        MapRecord(
+            created_at=datetime(2026, 9, 19, tzinfo=UTC),
+            mod_metadata_name='Example Mod',
+            map_name='Example Map',
+            map_file='Maps/Example/Map.bin',
+            sid='Example/Map',
+            side='A',
+            save_slot=save_slot,
+            deaths=deaths,
+        )
+
+
+def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> None:
+    stats = MapEntityStats(
+        counts={'strawberry': 1},
+        existing_kinds=frozenset({'cassette'}),
+        selected_kinds=frozenset({'heart'}),
+    )
+
+    assert (
+        map_record_progress(
+            MapStats(
+                Duration.from_milliseconds(1),
+                1,
+                single_run_completed=True,
+                cassette_collected=True,
+                heart_collected=True,
+                collected_strawberries=frozenset(),
+            ),
+            stats,
+            is_in_progress=False,
+        )
+        is MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
+    )
+    assert (
+        map_record_progress(
+            MapStats(
+                Duration.from_milliseconds(1),
+                1,
+                single_run_completed=True,
+                cassette_collected=True,
+                heart_collected=True,
+                collected_strawberries=frozenset({MapEntityID('room', 1)}),
+            ),
+            stats,
+            is_in_progress=False,
+        )
+        is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+    )
+    assert (
+        map_record_progress(
+            MapStats(Duration.from_milliseconds(1), 1, completed=True), stats, is_in_progress=False
+        )
+        is MapRecordProgress.PARTIALLY_COMPLETED
+    )
+    assert (
+        map_record_progress(MapStats(Duration.from_milliseconds(1), 1), stats, is_in_progress=True)
+        is MapRecordProgress.IN_PROGRESS
+    )
+    assert (
+        map_record_progress(MapStats(Duration.from_milliseconds(1), 1), stats, is_in_progress=False)
+        is MapRecordProgress.RAN_BEFORE
+    )
+    assert map_record_progress(None, stats, is_in_progress=False) is MapRecordProgress.NOT_STARTED
+
+
+def test_map_record_progress_requires_each_existing_collectible() -> None:
+    completed = MapStats(Duration.from_milliseconds(1), 1, single_run_completed=True)
+
+    cassette = MapEntityStats(existing_kinds=frozenset({'cassette'}))
+    assert (
+        map_record_progress(completed, cassette, is_in_progress=False)
+        is MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
+    )
+    assert (
+        map_record_progress(
+            MapStats(
+                Duration.from_milliseconds(1), 1, single_run_completed=True, cassette_collected=True
+            ),
+            cassette,
+            is_in_progress=False,
+        )
+        is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+    )
+
+    heart = MapEntityStats(existing_kinds=frozenset({'heart'}))
+    assert (
+        map_record_progress(completed, heart, is_in_progress=False)
+        is MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
+    )
+    assert (
+        map_record_progress(
+            MapStats(
+                Duration.from_milliseconds(1), 1, single_run_completed=True, heart_collected=True
+            ),
+            heart,
+            is_in_progress=False,
+        )
+        is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+    )
+
+    assert (
+        map_record_progress(completed, MapEntityStats(), is_in_progress=False)
+        is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+    )
 
 
 def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -> None:
-    mod = InstalledMod(
+    mod = make_installed_mod(
         source='zip',
         filename='Example.zip',
         path='C:/Celeste/Mods/Example.zip',
@@ -26,7 +147,9 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
         side='B',
         names={'zh-cn': '示例地图 B', 'en': 'Example Map B'},
     )
-    save_slot = SaveSlot(0, {('Author/Pack/Map', 1): MapStats(Time(83_456), 12)})
+    save_slot = SaveSlot(
+        0, {('Author/Pack/Map', 1): MapStats(Duration.from_milliseconds(83_456), 12)}
+    )
 
     record = create_map_record(
         mod,
@@ -51,7 +174,7 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
 
 def test_create_map_record_preserves_configured_record_values() -> None:
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',
@@ -59,7 +182,7 @@ def test_create_map_record_preserves_configured_record_values() -> None:
             metadata_version='1.0.0',
         ),
         LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         record_values={'主表': {'红草莓数': 3, '磁带': True, '水晶之心': '通关收集'}},
     )
 
@@ -68,7 +191,7 @@ def test_create_map_record_preserves_configured_record_values() -> None:
 
 def test_create_map_record_marks_normal_map_as_a_side() -> None:
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',
@@ -76,7 +199,7 @@ def test_create_map_record_marks_normal_map_as_a_side() -> None:
             metadata_version='1.0.0',
         ),
         LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
     )
 
     assert record.side == 'A'
@@ -84,7 +207,7 @@ def test_create_map_record_marks_normal_map_as_a_side() -> None:
 
 def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',
@@ -92,7 +215,7 @@ def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
             metadata_version='1.0.0',
         ),
         LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         gamebanana=GameBananaSubmission.model_validate(
             {
                 'name': 'Example Mod',
@@ -119,7 +242,7 @@ def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
 def test_create_map_record_omits_zero_time_stats() -> None:
     map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',
@@ -127,7 +250,7 @@ def test_create_map_record_omits_zero_time_stats() -> None:
             metadata_version='1.0.0',
         ),
         map_info,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(), 12)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(), 12)}),
     )
 
     assert record.save_slot == 0
@@ -137,7 +260,7 @@ def test_create_map_record_omits_zero_time_stats() -> None:
 
 def test_local_data_store_round_trips_a_record(tmp_path: Path) -> None:
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',
@@ -145,7 +268,7 @@ def test_local_data_store_round_trips_a_record(tmp_path: Path) -> None:
             metadata_version='1.0.0',
         ),
         LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         now=datetime(2026, 9, 4, 12, tzinfo=UTC),
     )
 
@@ -156,66 +279,40 @@ def test_local_data_store_round_trips_a_record(tmp_path: Path) -> None:
     assert store.load_record(record_id) == record
 
 
-def test_local_data_store_renames_the_previous_records_table(tmp_path: Path) -> None:
-    record = create_map_record(
-        InstalledMod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 1)}),
+def test_local_data_store_caches_collab_journal_icons(tmp_path: Path) -> None:
+    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
+    map_files = ('Maps/Collab/1-Easy.bin', 'Maps/Collab/2-Medium.bin')
+    icons = {
+        map_files[0]: 'areas/Collab/meters/1-easy',
+        map_files[1]: None,
+    }
+
+    store.save_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'first', icons)
+
+    assert (
+        store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'first') == icons
     )
-    path = tmp_path / '.pist/local-data.sqlite3'
-    path.parent.mkdir()
-    with sqlite3.connect(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE drafts (
-                id INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                mod_metadata_name TEXT,
-                map_file TEXT,
-                save_slot INTEGER,
-                payload TEXT NOT NULL
-            );
-            CREATE INDEX drafts_by_map_save
-            ON drafts (mod_metadata_name, map_file, save_slot, id DESC);
-            """
-        )
+    assert (
+        store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'changed') is None
+    )
+
+
+def test_local_data_store_discards_invalid_cached_collab_journal_icons(tmp_path: Path) -> None:
+    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
+    with store._connect() as conn:
         conn.execute(
             """
-            INSERT INTO drafts (created_at, mod_metadata_name, map_file, save_slot, payload)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO collab_journal_icons (mod_path, map_files, fingerprint, icons)
+            VALUES (?, ?, ?, ?)
             """,
-            (
-                record.created_at.isoformat(),
-                record.mod_metadata_name,
-                record.map_file,
-                record.save_slot,
-                record.model_dump_json(),
-            ),
+            ('C:/Celeste/Mods/Collab.zip', '[]', 'first', '{"Maps/Collab.bin": 1}'),
         )
 
-    store = LocalDataStore(path)
-
-    assert store.load_record(1) == record
-    with sqlite3.connect(path) as conn:
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'"
-        ).fetchone()
-        assert (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'"
-            ).fetchone()
-            is None
-        )
+    assert store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', (), 'first') is None
 
 
 def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: Path) -> None:
-    mod = InstalledMod(
+    mod = make_installed_mod(
         source='zip',
         filename='Example.zip',
         path='C:/Celeste/Mods/Example.zip',
@@ -227,12 +324,12 @@ def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: 
     initial = create_map_record(
         mod,
         map_info,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 2)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
     )
     current = create_map_record(
         mod,
         map_info,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(2_000), 5)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
     )
 
     record_id = store.save_record(initial)
@@ -245,7 +342,7 @@ def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: 
 
 
 def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> None:
-    mod = InstalledMod(
+    mod = make_installed_mod(
         source='zip',
         filename='Example.zip',
         path='C:/Celeste/Mods/Example.zip',
@@ -256,14 +353,14 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
     saved = create_map_record(
         mod,
         map_info,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(1_000), 2)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
         authors=('Alice',),
         record_values={'主表': {'红草莓数': 2, '起始日期': '2026-09-01', '备注': '好图'}},
     )
     current = create_map_record(
         mod,
         map_info,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Time(2_000), 5)}),
+        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
         record_values={'主表': {'红草莓数': 4, '主房间数': 8}},
     )
 
@@ -279,7 +376,7 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
 
 def test_local_data_store_rejects_record_without_native_play_time(tmp_path: Path) -> None:
     record = create_map_record(
-        InstalledMod(
+        make_installed_mod(
             source='zip',
             filename='Example.zip',
             path='C:/Celeste/Mods/Example.zip',

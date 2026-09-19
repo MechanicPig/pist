@@ -2,7 +2,7 @@
 rules = [
     { kind = "moonberry", when = { moon = true } },
     { kind = "strawberry", when = { moon = false } },
-    { kind = "strawberry" },
+    { kind = "strawberry", missing = ["moon"] },
 ]
 
 [entities."CollabUtils2/MiniHeart"]
@@ -17,12 +17,14 @@ rules = [
 
 [entities."SorbetHelper/ReturnBerry"]
 rules = [
-    { kind = "strawberry" },
+    { kind = "strawberry", when = { moon = false } },
+    { kind = "strawberry", missing = ["moon"] },
 ]
 
 [entities."MaxHelpingHand/CustomizableBerry"]
 rules = [
-    { kind = "moonberry" },
+    { kind = "strawberry", when = { moon = false } },
+    { kind = "strawberry", missing = ["moon"] },
 ]
 
 [entities.goldenBerry]
@@ -37,9 +39,15 @@ rules = [
 
 [entities.blackGem]
 rules = [
-    { when = { fake = true } },
     { kind = "end_level_heart", when = { fake = false }, meta = { HeartIsEnd = true } },
+    { kind = "end_level_heart", meta = { HeartIsEnd = true }, missing = ["fake"] },
     { kind = "keep_going_heart", when = { fake = false }, meta = { HeartIsEnd = false } },
+    { kind = "keep_going_heart", when = { fake = false }, missing_meta = ["HeartIsEnd"] },
+    { kind = "keep_going_heart", meta = { HeartIsEnd = false }, missing = ["fake"] },
+    { kind = "keep_going_heart", missing = ["fake"], missing_meta = ["HeartIsEnd"] },
+    { when = { fake = true }, meta = { HeartIsEnd = false } },
+    { when = { fake = true }, meta = { HeartIsEnd = true } },
+    { when = { fake = true }, missing_meta = ["HeartIsEnd"] },
 ]
 
 [entities."CollabUtils2/SpeedBerry"]
@@ -79,18 +87,18 @@ rules = [
 
 [entities."AdventureHelper/CustomCrystalHeart"]
 rules = [
-    { kind = "end_level_heart" },
+    { kind = "end_level_heart", meta = { HeartIsEnd = true } },
 ]
 
 [entities."MaxHelpingHand/ReskinnableCrystalHeart"]
 rules = [
-    { kind = "end_level_heart", meta = { HeartIsEnd = true } },
-    { kind = "keep_going_heart", meta = { HeartIsEnd = false } },
+    { kind = "end_level_heart", when = { fake = false }, meta = { HeartIsEnd = true } },
+    { kind = "keep_going_heart", when = { fake = false }, meta = { HeartIsEnd = false } },
 ]
 
 [entities."MaxHelpingHand/NonPoppingStrawberry"]
 rules = [
-    { kind = "strawberry" },
+    { kind = "strawberry", when = { moon = false } },
 ]
 
 [entities."MaxHelpingHand/GoldenStrawberryCustomConditions"]
@@ -181,7 +189,7 @@ rules = [
 
 [entities."MemorialHelper/FlagCrystalHeart"]
 rules = [
-    { kind = "end_level_heart" },
+    { kind = "end_level_heart", when = { fake = false }, meta = { HeartIsEnd = true } },
 ]
 
 [entities."PlatinumStrawberry/PlatinumStrawberry"]
@@ -196,5 +204,5 @@ rules = [
 
 [entities."SpringCollab2020/MultiRoomStrawberry"]
 rules = [
-    { kind = "strawberry" },
+    { kind = "strawberry", when = { moon = false } },
 ]

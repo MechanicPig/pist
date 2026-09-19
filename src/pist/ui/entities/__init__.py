@@ -1,1 +1,1 @@
-"""Textual interfaces for auditing and configuring map entities."""
+"""Textual interfaces for map-entity workflows."""

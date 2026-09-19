@@ -11,7 +11,8 @@ Pist 用于扫描本地 Celeste 与已启用 Mod，辅助记录地图初见数�
 - 使用 Python 3.14 及以上版本；依赖、虚拟环境和锁文件统一由 `uv` 管理。
 - 源码位于 `src/pist/`，测试位于 `tests/`，打包的共享数据位于 `src/pist/data/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
 - 运行时本地数据、检查报告、临时脚本、参考仓库及构建产物均位于被忽略的 `.pist/`；其中 `.pist/local-data.sqlite3`、扫描报告和构建产物不得手工修改。
-- 仅面向内部开发的本地数据结构变更时，先确认没有进程占用 `.pist/local-data.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
+- 仅面向内部开发的本地数据结构变更时，先确认没有进程占用对应的 `.pist/*.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
+- 变更 SQLite 的表、字段或其语义前，先向用户列出 schema diff 与当前本地数据迁移方案供审查；获确认后再实施，并删除旧 schema，不保留运行时兼容层。
 - 新增依赖前先确认标准库或既有依赖无法合理解决问题；通过 `uv add` 或 `uv add --group dev` 更新 `pyproject.toml` 与 `uv.lock`，不要手改锁文件。
 - 项目使用 Ruff 作为代码格式化与静态检查工具，行宽为 100，使用单引号；使用 Pyright 作为类型检查工具。
 - 模块和包名按职责语义命名：集合、规则或记录用复数，单一模型、协议或过程用单数；不为形式上的单复数一致性重命名。
@@ -59,7 +60,7 @@ uv run pytest --basetemp .pist/pytest
 
 ## 架构原则
 
-- `game` 只承载游戏文件、存档、Mod 与地图的读取；`entities` 与 `map_entrances` 承载 Pist 的可配置地图解释规则，前者还包含实体统计分析与审计知识。它们及 Loenn 静态解析、数据模型均不依赖 Textual、浏览器页面或其他 UI；UI 只协调用户交互与领域服务。
+- `game` 只承载游戏文件、存档、Mod 与地图的读取；`entities` 与 `map_entrances` 承载 Pist 的可配置地图解释规则，前者还包含实体统计分析与审计知识。它们及数据模型均不依赖 Textual、浏览器页面或其他 UI；UI 只协调用户交互与领域服务。
 - `ui` 按用户可见工作流组织子包；仅跨工作流复用的 Textual 基类或控件保留在 `ui` 根部，避免将不同界面的实现平铺在一起。
 - 包的 `__init__.py` 只提供稳定的公共入口；具体实现放在职责明确的子模块中。内部调用优先导入实现所属模块，而不是依赖包入口的偶然重导出。
 - 实体规则以明确的实体 ID 和属性条件为准，不能仅根据名称、前缀或显示文本推断语义。保留“属性未写入”与“显式写入默认值”的差异。
@@ -67,6 +68,7 @@ uv run pytest --basetemp .pist/pytest
 - 网络访问、凭证、游戏文件读取与 SQLite 本地数据均属于边界能力；保持可替换、可诊断，且不泄露凭证。
 - 共享规则库可随包发布；用户本地数据和本地增补规则必须与包内数据分离，更新包时不得覆盖用户数据。
 - 地图预览是随进程启动、仅监听 loopback 的单功能 Web 界面；Python 服务端与静态资源保持在 `map_preview/` 内，不因其存在而引入独立前端工程。变更浏览器 JSON 状态或操作请求时，须同步更新前后两端并覆盖协议测试。
+- `archive` 保存已验证且有回归测试、但当前不参与产品工作流的休眠子系统；活动代码不得依赖它。若要恢复使用，先重新评估边界并迁回对应活动领域，而不是直接重新建立跨层依赖。
 
 ## 特殊注意事项
 
@@ -101,6 +103,7 @@ def ok(values: dict[str, Value], key: str) -> None:
     x = values[key]
     values[key] = x
 
+
 def error(values: dict[str, Value], key: str) -> None:
     x = {key: values[key]}
     values[key] = x[key]
@@ -120,4 +123,5 @@ def ok(values: dict[str, Value], key: str) -> None:
 
 ## Skill 使用说明
 
+- 新增或修改外部解析、数据或协议边界、跨模块重构，或进行代码 review 时，先阅读 `skills/pist-development/SKILL.md`。
 - 当需要判断未知 Celeste 地图实体是否是真正的草莓、月莓、特殊草莓、磁带或水晶之心，并考虑新增精确规则时，先阅读 `skills/celeste-collectible-entity-analysis/SKILL.md`。

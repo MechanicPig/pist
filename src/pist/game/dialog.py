@@ -116,11 +116,9 @@ def map_base_file_and_side(map_file: str) -> tuple[str, MapSide | None]:
 
 
 def default_map_name(map_file: str) -> str:
-    """Build fallback map name from a map's parent directory."""
+    """Build fallback map name from its complete ``Maps``-relative path."""
     path = _map_file_path(map_file)
-    if len(path.parts) == 2:
-        return _default_name((path.stem,))
-    return default_campaign_name(path.parent.as_posix())
+    return _default_name(path.with_suffix('').parts[1:])
 
 
 def default_campaign_name(campaign_dir: str) -> str:

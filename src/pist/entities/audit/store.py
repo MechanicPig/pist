@@ -4,169 +4,71 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Collection, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import StrEnum
-from itertools import combinations
 from pathlib import Path
+from types import MappingProxyType
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
-from typing_extensions import Sentinel as sentinel
+from pydantic import TypeAdapter, ValidationError
 
 from pist.game.binmap import AttrValue
+from pist.game.map_source import MapSource
 
-from .rules import EntityRule, EntityRuleLayer, EntityRulesForId
+from ..rules import EntityRule, EntityRuleLayer, EntityRulesForId
+from .inference import rule_candidates_for_detail
+from .models import (
+    CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS,
+    CLASSIFICATION_IRRELEVANT_STATUSES,
+    LOCATION_ATTR_NAMES,
+    META_ATTR_PREFIX,
+    UNKNOWN,
+    AttrAuditStatus,
+    AttrAuditSummary,
+    AuditMapOccurrences,
+    AuditReport,
+    AuditSource,
+    DefaultValue,
+    EntityAuditDetail,
+    EntityAuditStatus,
+    EntityAuditSummary,
+    EntityKindConfirmation,
+    EntityVariant,
+    EntityVariantSignature,
+    ObservationQuestion,
+    ObservationStatus,
+    RawEntityOccurrence,
+    RuleCandidate,
+    VariantObservation,
+)
+from .models import VariantKey as _VariantKey
 
 LOCAL_AUDIT_DB_PATH = Path('.pist/entity-audit.sqlite3')
-LOCATION_ATTR_NAMES = frozenset({'id', 'x', 'y', 'width', 'height', 'originX', 'originY'})
-META_ATTRIBUTE_PREFIX = '@meta.'
-UNKNOWN = sentinel('UNKNOWN')
-
-type DefaultValue = AttrValue | None | UNKNOWN
-
-
-class EntityAuditStatus(StrEnum):
-    """The human review state of one entity ID."""
-
-    UNKNOWN = 'unknown'
-    IGNORED = 'ignored'
-    ENTITY_CANDIDATE = 'entity_candidate'
-
-
-class AttributeAuditStatus(StrEnum):
-    """How one attribute of one entity ID relates to entity classification."""
-
-    UNKNOWN = 'unknown'
-    AFFECTS_KIND = 'affects_kind'
-    DOES_NOT_AFFECT_KIND = 'does_not_affect_kind'
-    LIKELY_NOT_AFFECT_KIND = 'likely_not_affect_kind'
-    UNSURE_DEFAULT = 'unsure_default'
-    AFFECTS_BEHAVIOR = 'affects_behavior'
-
-
-class ObservationQuestion(StrEnum):
-    """A game-behavior question that can establish an entity kind."""
-
-    ENTITY_CLASSIFICATION = 'entity_classification'
-    PAUSE_MENU_COUNT = 'pause_menu_count'
-    DEBUG_MAP_COLOR = 'debug_map_color'
-    TOTAL_STRAWBERRY_COUNT = 'total_strawberry_count'
-
-
-class ObservationStatus(StrEnum):
-    """The confidence state of one recorded game observation."""
-
-    UNKNOWN = 'unknown'
-    CONFIRMED = 'confirmed'
-    NOT_COLLECTIBLE = 'not_collectible'
-    CONFLICT = 'conflict'
-
-
-class AuditSource(BaseModel):
-    """The package source of one scanned entity occurrence."""
-
-    model_config = ConfigDict(extra='ignore')
-
-    scope: str
-    map_file: str
-    map_name: str
-    mod_name: str | None = None
-    mod_file: str | None = None
-    package: str | None = None
-    meta: dict[str, AttrValue] = Field(default_factory=dict)
-
-
-class AuditOccurrence(BaseModel):
-    """One raw entity occurrence emitted by the maintenance scan."""
-
-    model_config = ConfigDict(extra='ignore')
-
-    source: AuditSource
-    room: str
-    entity_id: int | None = None
-    attrs: dict[str, AttrValue]
-
-
-class AuditGroup(BaseModel):
-    """The scan's grouped occurrences for one entity ID."""
-
-    model_config = ConfigDict(extra='ignore')
-
-    entity_name: str
-    occurrences: tuple[AuditOccurrence, ...]
-
-
-class AuditReport(BaseModel):
-    """The only report fields that the knowledge importer needs."""
-
-    model_config = ConfigDict(extra='ignore')
-
-    entities: tuple[AuditGroup, ...] = Field(validation_alias=AliasChoices('entities', 'unmatched'))
+ATTRS_ADAPTER = TypeAdapter(dict[str, AttrValue])
+ATTR_VALUE_ADAPTER = TypeAdapter(AttrValue | None)
+SEMANTIC_ATTRS_SQL = (
+    "json_remove(attrs_json, '$.id', '$.x', '$.y', '$.width', '$.height', '$.originX', '$.originY')"
+)
 
 
 @dataclass(frozen=True, slots=True)
-class EntityAuditSummary:
-    """Compact entity-level data for the audit TUI's first level."""
+class _VariantReviewChecker:
+    """An immutable audit snapshot used while reviewing one decoded map."""
 
-    entity_name: str
-    occurrence_count: int
-    variant_count: int
-    status: EntityAuditStatus
-    map_files: tuple[str, ...]
+    ignored_names_by_entity: Mapping[str, frozenset[str]]
+    reviewed_signatures_by_entity: Mapping[str, frozenset[EntityVariantSignature]]
 
-
-@dataclass(frozen=True, slots=True)
-class AttributeAuditSummary:
-    """A per-entity attribute's present and missing raw values."""
-
-    name: str
-    value_counts: tuple[tuple[AttrValue | None, int], ...]
-    status: AttributeAuditStatus
-    reason: str
-    evidence: str | None
-    default_value: DefaultValue
-
-
-@dataclass(frozen=True, slots=True)
-class RawEntityOccurrence:
-    """One complete raw entity record, preserving every explicit attribute."""
-
-    entity_name: str
-    attrs: dict[str, AttrValue]
-    source: AuditSource
-    room: str
-    entity_id: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class VariantObservation:
-    """One behavior observation for an entity's raw semantic attribute combination."""
-
-    question: ObservationQuestion
-    status: ObservationStatus
-    kind: str | None
-    reason: str
-    evidence: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class EntityKindConfirmation:
-    """A deliberate classification that applies to every variant of one entity."""
-
-    kind: str
-    reason: str
-    evidence: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class EntityVariant:
-    """One raw semantic attribute variant and its saved behavior observations."""
-
-    attrs: dict[str, AttrValue]
-    meta: dict[str, AttrValue]
-    occurrence_count: int
-    observations: tuple[VariantObservation, ...]
+    def __call__(
+        self,
+        entity_name: str,
+        attrs: Mapping[str, AttrValue],
+        meta: Mapping[str, AttrValue],
+    ) -> bool:
+        ignored_names = self.ignored_names_by_entity.get(entity_name, frozenset())
+        signatures = self.reviewed_signatures_by_entity.get(entity_name, frozenset())
+        return bool(signatures) and (
+            _variant_signature(_semantic_attrs(dict(attrs)), meta, ignored_names) not in signatures
+        )
 
 
 def occurrences_for_variants(
@@ -179,37 +81,6 @@ def occurrences_for_variants(
         for occurrence in occurrences
         if _variant_key(_semantic_attrs(occurrence.attrs), occurrence.source.meta) in keys
     )
-
-
-@dataclass(frozen=True, slots=True)
-class EntityAuditDetail:
-    """The second-level review data for one entity ID."""
-
-    entity_name: str
-    status: EntityAuditStatus
-    reason: str
-    evidence: str | None
-    kind_confirmation: EntityKindConfirmation | None
-    attr_summaries: tuple[AttributeAuditSummary, ...]
-    variants: tuple[EntityVariant, ...]
-    occurrences: tuple[RawEntityOccurrence, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class RuleCandidate:
-    """One condition inferred from confirmed behavior observations."""
-
-    kind: str | None
-    when: dict[str, AttrValue]
-    meta: dict[str, AttrValue]
-    variant_count: int
-    fallback: bool = False
-    provisional: bool = False
-
-    @property
-    def exclude(self) -> bool:
-        """Return whether this candidate is a terminal non-collectible outcome."""
-        return self.kind is None
 
 
 class EntityAuditStore:
@@ -279,8 +150,7 @@ class EntityAuditStore:
                 return ()
             rows = conn.execute(
                 """
-                SELECT raw.entity_name, COUNT(*) AS occurrence_count,
-                    COUNT(DISTINCT raw.attrs_json) AS variant_count, knowledge.status
+                SELECT raw.entity_name, COUNT(*) AS occurrence_count, knowledge.status
                 FROM raw_entity_occurrences AS raw
                 JOIN entity_knowledge AS knowledge ON knowledge.entity_name = raw.entity_name
                 WHERE raw.report_id = ?
@@ -292,7 +162,7 @@ class EntityAuditStore:
             map_files: dict[str, set[str]] = defaultdict(set)
             for row in conn.execute(
                 """
-                SELECT entity_name, map_file FROM raw_entity_occurrences
+                SELECT DISTINCT entity_name, map_file FROM raw_entity_occurrences
                 WHERE report_id = ?
                 """,
                 (report_id,),
@@ -302,7 +172,7 @@ class EntityAuditStore:
                 EntityAuditSummary(
                     row['entity_name'],
                     int(row['occurrence_count']),
-                    int(row['variant_count']),
+                    None,
                     EntityAuditStatus(row['status']),
                     tuple(sorted(map_files[row['entity_name']], key=str.casefold)),
                 )
@@ -324,11 +194,8 @@ class EntityAuditStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f'Unknown audited entity: {entity_name!r}')
-            occurrences = (
-                () if report_id is None else self._occurrences(conn, report_id, entity_name)
-            )
-            attr_summaries = self._attr_summaries(conn, entity_name, occurrences)
-            variants = self._variants(conn, entity_name, occurrences)
+            variants = () if report_id is None else self._variants(conn, report_id, entity_name)
+            attr_summaries = self._attr_summaries(conn, entity_name, variants)
             confirmation = self._entity_kind_confirmation(conn, entity_name)
             return EntityAuditDetail(
                 entity_name,
@@ -338,8 +205,231 @@ class EntityAuditStore:
                 confirmation,
                 attr_summaries,
                 variants,
-                occurrences,
             )
+
+    def occurrences(
+        self, entity_name: str, report_id: int | None = None
+    ) -> tuple[RawEntityOccurrence, ...]:
+        """Load raw positions only for an explicit occurrence-inspection request."""
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            return () if report_id is None else self._occurrences(conn, report_id, entity_name)
+
+    def map_occurrences(
+        self, entity_name: str, source: AuditSource, report_id: int | None = None
+    ) -> tuple[RawEntityOccurrence, ...]:
+        """Load raw coordinates for one map preview only."""
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            if report_id is None:
+                return ()
+            return self._occurrences(conn, report_id, entity_name, source)
+
+    def occurrence_maps(
+        self,
+        entity_name: str,
+        report_id: int | None = None,
+        variants: Collection[EntityVariant] | None = None,
+    ) -> tuple[AuditMapOccurrences, ...]:
+        """Return map and room counts without materializing raw entity instances."""
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            if report_id is None:
+                return ()
+            rows = conn.execute(
+                f"""
+                SELECT {SEMANTIC_ATTRS_SQL} AS semantic_attrs_json, meta_json,
+                    scope, map_file, map_name, mod_name, mod_file, package, room, COUNT(*) AS count
+                FROM raw_entity_occurrences
+                WHERE report_id = ? AND entity_name = ?
+                GROUP BY {SEMANTIC_ATTRS_SQL}, meta_json, scope, map_file, map_name,
+                    mod_name, mod_file, package, room
+                """,
+                (report_id, entity_name),
+            )
+            requested = (
+                None
+                if variants is None
+                else {_variant_key(variant.attrs, variant.meta) for variant in variants}
+            )
+            maps: dict[
+                tuple[str, str, str | None, str | None], tuple[AuditSource, Counter[str]]
+            ] = {}
+            for row in rows:
+                if (
+                    requested is not None
+                    and _variant_key(_attrs(row['semantic_attrs_json']), _attrs(row['meta_json']))
+                    not in requested
+                ):
+                    continue
+                map_key = row['scope'], row['map_file'], row['mod_file'], row['package']
+                entry = maps.get(map_key)
+                if entry is None:
+                    source = AuditSource(
+                        scope=row['scope'],
+                        map_file=row['map_file'],
+                        map_name=row['map_name'],
+                        mod_name=row['mod_name'],
+                        mod_file=row['mod_file'],
+                        package=row['package'],
+                        meta={},
+                    )
+                    room_counts: Counter[str] = Counter()
+                    maps[map_key] = source, room_counts
+                else:
+                    _, room_counts = entry
+                room_counts[row['room']] += int(row['count'])
+        return tuple(
+            AuditMapOccurrences(
+                source,
+                tuple(
+                    sorted(
+                        room_counts.items(),
+                        key=lambda item: (-item[1], item[0].casefold()),
+                    )
+                ),
+            )
+            for source, room_counts in maps.values()
+        )
+
+    def needs_variant_review(
+        self,
+        entity_name: str,
+        attrs: Mapping[str, AttrValue],
+        meta: Mapping[str, AttrValue],
+    ) -> bool:
+        """Return whether one map entity differs from every reviewed classification variant.
+
+        Attributes explicitly or provisionally marked irrelevant are omitted from the
+        comparison.  A wholly unreviewed entity remains the ordinary audit workflow;
+        this method only identifies a new variant after at least one terminal
+        classification has been recorded for the entity.
+        """
+        return self.variant_review_checker({entity_name})(entity_name, attrs, meta)
+
+    def unreviewed_variant_count(self, entity_name: str, report_id: int | None = None) -> int:
+        """Count one report entity's variants not covered by terminal review.
+
+        Unlike navigation summaries, this only decodes rows for the selected
+        entity. Historical observations remain part of the comparison so a newly
+        imported report can recognize a variant confirmed in an older report.
+        """
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            if report_id is None:
+                return 0
+            ignored_names = {
+                row['name']
+                for row in conn.execute(
+                    f"""
+                    SELECT name FROM attr_knowledge
+                    WHERE entity_name = ?
+                        AND status IN ({CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS})
+                    """,
+                    (entity_name, *CLASSIFICATION_IRRELEVANT_STATUSES),
+                )
+            }
+            reviewed = {
+                _variant_signature(*_variant_key_parts(row['attrs_json']), ignored_names)
+                for row in conn.execute(
+                    """
+                    SELECT attrs_json FROM variant_observations
+                    WHERE entity_name = ? AND question = ? AND status IN (?, ?)
+                    """,
+                    (
+                        entity_name,
+                        ObservationQuestion.ENTITY_CLASSIFICATION,
+                        ObservationStatus.CONFIRMED,
+                        ObservationStatus.NOT_COLLECTIBLE,
+                    ),
+                )
+            }
+            if not reviewed:
+                return 0
+            current = {
+                _variant_signature(
+                    _attrs(row['semantic_attrs_json']),
+                    _attrs(row['meta_json']),
+                    ignored_names,
+                )
+                for row in conn.execute(
+                    f"""
+                    SELECT DISTINCT {SEMANTIC_ATTRS_SQL} AS semantic_attrs_json, meta_json
+                    FROM raw_entity_occurrences
+                    WHERE report_id = ? AND entity_name = ?
+                    """,
+                    (report_id, entity_name),
+                )
+            }
+        return len(current - reviewed)
+
+    def raw_variant_count(self, entity_name: str, report_id: int | None = None) -> int:
+        """Return one entity's count of distinct raw attribute records in a report."""
+        with self._connect() as conn:
+            report_id = self._report_id(conn, report_id)
+            if report_id is None:
+                return 0
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT attrs_json) AS variant_count
+                FROM raw_entity_occurrences
+                WHERE report_id = ? AND entity_name = ?
+                """,
+                (report_id, entity_name),
+            ).fetchone()
+        assert row is not None
+        return int(row['variant_count'])
+
+    def variant_review_checker(
+        self, entity_names: Collection[str] | None = None
+    ) -> _VariantReviewChecker:
+        """Return an immutable snapshot for checking the given map entity IDs.
+
+        With no IDs, retain the complete snapshot behavior used by the single-entity
+        ``needs_variant_review`` query.
+        """
+        names = None if entity_names is None else tuple(sorted(set(entity_names)))
+        if names == ():
+            return _VariantReviewChecker(MappingProxyType({}), MappingProxyType({}))
+        entity_clause = (
+            '' if names is None else f' AND entity_name IN ({", ".join("?" for _ in names)})'
+        )
+        with self._connect() as conn:
+            ignored_by_entity: dict[str, set[str]] = defaultdict(set)
+            for row in conn.execute(
+                f"""
+                SELECT entity_name, name FROM attr_knowledge
+                WHERE status IN ({CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS}){entity_clause}
+                """,
+                (*CLASSIFICATION_IRRELEVANT_STATUSES, *(names or ())),
+            ):
+                ignored_by_entity[row['entity_name']].add(row['name'])
+            known_by_entity: dict[str, set[EntityVariantSignature]] = defaultdict(set)
+            for row in conn.execute(
+                f"""
+                SELECT entity_name, attrs_json FROM variant_observations
+                WHERE question = ? AND status IN (?, ?){entity_clause}
+                """,
+                (
+                    ObservationQuestion.ENTITY_CLASSIFICATION,
+                    ObservationStatus.CONFIRMED,
+                    ObservationStatus.NOT_COLLECTIBLE,
+                    *(names or ()),
+                ),
+            ):
+                entity_name = row['entity_name']
+                attrs, meta = _variant_key_parts(row['attrs_json'])
+                known_by_entity[entity_name].add(
+                    _variant_signature(attrs, meta, ignored_by_entity[entity_name])
+                )
+        return _VariantReviewChecker(
+            MappingProxyType(
+                {name: frozenset(values) for name, values in ignored_by_entity.items()}
+            ),
+            MappingProxyType(
+                {name: frozenset(signatures) for name, signatures in known_by_entity.items()}
+            ),
+        )
 
     def save_entity_knowledge(
         self,
@@ -361,11 +451,11 @@ class EntityAuditStore:
                 (entity_name, status, reason, evidence),
             )
 
-    def save_attribute_knowledge(
+    def save_attr_knowledge(
         self,
         entity_name: str,
         name: str,
-        status: AttributeAuditStatus,
+        status: AttrAuditStatus,
         *,
         reason: str = '',
         evidence: str | None = None,
@@ -375,7 +465,7 @@ class EntityAuditStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO attribute_knowledge(
+                INSERT INTO attr_knowledge(
                     entity_name, name, status, reason, evidence, default_json
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(entity_name, name) DO UPDATE SET
@@ -573,78 +663,7 @@ class EntityAuditStore:
         self, entity_name: str, report_id: int | None = None
     ) -> tuple[RuleCandidate, ...]:
         """Suggest only conditions that distinguish confirmed kinds in known raw variants."""
-        return self.rule_candidates_for_detail(self.entity_detail(entity_name, report_id))
-
-    @staticmethod
-    def rule_candidates_for_detail(detail: EntityAuditDetail) -> tuple[RuleCandidate, ...]:
-        """Suggest candidates from a detail payload already read for the audit UI."""
-        if detail.kind_confirmation is not None:
-            return (
-                RuleCandidate(
-                    detail.kind_confirmation.kind,
-                    {},
-                    {},
-                    len(detail.variants),
-                ),
-            )
-        provisional = any(
-            attr.status is AttributeAuditStatus.LIKELY_NOT_AFFECT_KIND
-            for attr in detail.attr_summaries
-        )
-        affecting_names = {
-            attr.name
-            for attr in detail.attr_summaries
-            if attr.status is AttributeAuditStatus.AFFECTS_KIND
-        }
-        classifications: list[tuple[dict[str, AttrValue], dict[str, AttrValue], str | None]] = []
-        for variant in detail.variants:
-            if any(
-                observation.status is ObservationStatus.CONFLICT
-                for observation in variant.observations
-            ):
-                continue
-            outcomes = {
-                observation.kind if observation.status is ObservationStatus.CONFIRMED else None
-                for observation in variant.observations
-                if observation.status
-                in {ObservationStatus.CONFIRMED, ObservationStatus.NOT_COLLECTIBLE}
-            }
-            if len(outcomes) == 1:
-                classifications.append((variant.attrs, variant.meta, outcomes.pop()))
-        if len(classifications) != len(detail.variants):
-            return ()
-        candidates: dict[
-            tuple[str | None, str, str], tuple[dict[str, AttrValue], dict[str, AttrValue], int]
-        ] = {}
-        for attrs, meta, kind in classifications:
-            conditions = _minimal_condition(attrs, meta, kind, classifications, affecting_names)
-            if conditions is None:
-                continue
-            when, meta_when = conditions
-            key = kind, _json(when), _json(meta_when)
-            previous = candidates.get(key)
-            candidates[key] = (
-                when,
-                meta_when,
-                1 if previous is None else previous[2] + 1,
-            )
-        rule_candidates = tuple(
-            RuleCandidate(kind, when, meta_when, variant_count, provisional=provisional)
-            for (kind, _, _), (when, meta_when, variant_count) in sorted(
-                candidates.items(),
-                key=lambda item: (
-                    len(item[1][0]) + len(item[1][1]),
-                    item[0][0] is None,
-                    item[0],
-                ),
-            )
-        )
-        return (
-            *rule_candidates,
-            *_default_fallback_candidates(
-                detail, classifications, rule_candidates, provisional=provisional
-            ),
-        )
+        return rule_candidates_for_detail(self.entity_detail(entity_name, report_id))
 
     def generated_rule_layer(self, report_id: int | None = None) -> EntityRuleLayer:
         """Build the reproducible rule layer supported by current audit knowledge.
@@ -659,7 +678,13 @@ class EntityAuditStore:
             if not candidates:
                 continue
             rules = tuple(
-                EntityRule(kind=candidate.kind, when=candidate.when, meta=candidate.meta)
+                EntityRule(
+                    kind=candidate.kind,
+                    when=candidate.when,
+                    meta=candidate.meta,
+                    missing=candidate.missing,
+                    missing_meta=candidate.missing_meta,
+                )
                 for candidate in candidates
             )
             entities[entity_name] = EntityRulesForId(rules=rules)
@@ -714,7 +739,7 @@ class EntityAuditStore:
                     reason TEXT NOT NULL DEFAULT '',
                     evidence TEXT
                 );
-                CREATE TABLE IF NOT EXISTS attribute_knowledge (
+                CREATE TABLE IF NOT EXISTS attr_knowledge (
                     entity_name TEXT NOT NULL REFERENCES entity_knowledge(entity_name),
                     name TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'unknown',
@@ -763,26 +788,6 @@ class EntityAuditStore:
                 );
                 """
             )
-            columns = {
-                row['name'] for row in conn.execute('PRAGMA table_info(raw_entity_occurrences)')
-            }
-            if 'meta_json' not in columns:
-                conn.execute(
-                    "ALTER TABLE raw_entity_occurrences ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'"
-                )
-            attr_columns = {
-                row['name'] for row in conn.execute('PRAGMA table_info(attribute_knowledge)')
-            }
-            if 'default_json' not in attr_columns:
-                conn.execute('ALTER TABLE attribute_knowledge ADD COLUMN default_json TEXT')
-            conn.execute(
-                "UPDATE entity_knowledge SET status = 'entity_candidate' "
-                "WHERE status = 'collectible_candidate'"
-            )
-            conn.execute(
-                "UPDATE entity_knowledge SET status = 'entity_candidate' "
-                "WHERE status = 'rule_complete'"
-            )
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection]:
@@ -807,17 +812,25 @@ class EntityAuditStore:
 
     @staticmethod
     def _occurrences(
-        conn: sqlite3.Connection, report_id: int, entity_name: str
+        conn: sqlite3.Connection,
+        report_id: int,
+        entity_name: str,
+        source: AuditSource | None = None,
     ) -> tuple[RawEntityOccurrence, ...]:
+        source_conditions = ''
+        source_values: tuple[MapSource | str | None, ...] = ()
+        if source is not None:
+            source_conditions = ' AND scope = ? AND map_file = ? AND mod_file IS ? AND package IS ?'
+            source_values = (source.scope, source.map_file, source.mod_file, source.package)
         rows = conn.execute(
-            """
+            f"""
             SELECT attrs_json, scope, map_file, map_name, mod_name, mod_file, package, meta_json,
                 room, entity_id
             FROM raw_entity_occurrences
-            WHERE report_id = ? AND entity_name = ?
+            WHERE report_id = ? AND entity_name = ?{source_conditions}
             ORDER BY map_name COLLATE NOCASE, map_file COLLATE NOCASE, room COLLATE NOCASE
             """,
-            (report_id, entity_name),
+            (report_id, entity_name, *source_values),
         )
         return tuple(
             RawEntityOccurrence(
@@ -842,42 +855,42 @@ class EntityAuditStore:
     def _attr_summaries(
         conn: sqlite3.Connection,
         entity_name: str,
-        occurrences: Iterable[RawEntityOccurrence],
-    ) -> tuple[AttributeAuditSummary, ...]:
+        variants: Iterable[EntityVariant],
+    ) -> tuple[AttrAuditSummary, ...]:
         counts: dict[str, Counter[AttrValue | None]] = defaultdict(Counter)
         total_occurrence_count = 0
-        for total_occurrence_count, occurrence in enumerate(occurrences, start=1):
+        for variant in variants:
             attrs: dict[str, AttrValue] = {
                 name: value
-                for name, value in occurrence.attrs.items()
+                for name, value in variant.attrs.items()
                 if name not in LOCATION_ATTR_NAMES
             }
             attrs.update(
-                (f'{META_ATTRIBUTE_PREFIX}{name}', value)
-                for name, value in occurrence.source.meta.items()
+                (f'{META_ATTR_PREFIX}{name}', value) for name, value in variant.meta.items()
             )
             for name, values in counts.items():
                 if name not in attrs:
-                    values[None] += 1
+                    values[None] += variant.occurrence_count
             for name, value in attrs.items():
-                if name not in counts and total_occurrence_count > 1:
-                    counts[name][None] = total_occurrence_count - 1
-                counts[name][value] += 1
+                if name not in counts and total_occurrence_count:
+                    counts[name][None] = total_occurrence_count
+                counts[name][value] += variant.occurrence_count
+            total_occurrence_count += variant.occurrence_count
         knowledge_rows = {
             row['name']: row
             for row in conn.execute(
                 """
                 SELECT name, status, reason, evidence, default_json
-                FROM attribute_knowledge WHERE entity_name = ?
+                FROM attr_knowledge WHERE entity_name = ?
                 """,
                 (entity_name,),
             )
         }
         return tuple(
-            AttributeAuditSummary(
+            AttrAuditSummary(
                 name,
                 tuple(sorted(values.items(), key=_attr_value_sort_key)),
-                AttributeAuditStatus(
+                AttrAuditStatus(
                     knowledge_rows[name]['status'] if name in knowledge_rows else 'unknown'
                 ),
                 knowledge_rows[name]['reason'] if name in knowledge_rows else '',
@@ -892,17 +905,9 @@ class EntityAuditStore:
     @staticmethod
     def _variants(
         conn: sqlite3.Connection,
+        report_id: int,
         entity_name: str,
-        occurrences: Iterable[RawEntityOccurrence],
     ) -> tuple[EntityVariant, ...]:
-        counts: Counter[str] = Counter()
-        attrs_by_key: dict[str, tuple[dict[str, AttrValue], dict[str, AttrValue]]] = {}
-        for occurrence in occurrences:
-            attrs = _semantic_attrs(occurrence.attrs)
-            meta = occurrence.source.meta
-            key = _variant_key(attrs, meta)
-            attrs_by_key[key] = attrs, meta
-            counts[key] += 1
         observations_by_attrs: dict[str, list[VariantObservation]] = defaultdict(list)
         for row in conn.execute(
             """
@@ -920,17 +925,27 @@ class EntityAuditStore:
                     row['evidence'],
                 )
             )
+        rows = conn.execute(
+            f"""
+            SELECT {SEMANTIC_ATTRS_SQL} AS semantic_attrs_json, meta_json, COUNT(*) AS occurrence_count
+            FROM raw_entity_occurrences
+            WHERE report_id = ? AND entity_name = ?
+            GROUP BY {SEMANTIC_ATTRS_SQL}, meta_json
+            ORDER BY occurrence_count DESC, semantic_attrs_json
+            """,
+            (report_id, entity_name),
+        )
         return tuple(
             EntityVariant(
-                attrs_by_key[attrs_json][0],
-                attrs_by_key[attrs_json][1],
-                count,
+                attrs := _attrs(row['semantic_attrs_json']),
+                meta := _attrs(row['meta_json']),
+                int(row['occurrence_count']),
                 tuple(
-                    observations_by_attrs[attrs_json]
-                    or observations_by_attrs[_variant_key(attrs_by_key[attrs_json][0])]
+                    observations_by_attrs[_variant_key(attrs, meta)]
+                    or observations_by_attrs[_variant_key(attrs)]
                 ),
             )
-            for attrs_json, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+            for row in rows
         )
 
     @staticmethod
@@ -962,26 +977,27 @@ def _value_json(value: AttrValue | None) -> str:
 
 def _value(value: str) -> AttrValue | None:
     """Read one confirmed JSON default without treating ``null`` as unknown."""
-    parsed = json.loads(value)
-    if parsed is not None and type(parsed) not in {bool, int, float, str}:
-        raise TypeError('Expected a serialized collectible attribute value.')
-    return parsed
+    try:
+        return ATTR_VALUE_ADAPTER.validate_json(value)
+    except ValidationError as error:
+        raise TypeError('Expected a serialized collectible attribute value.') from error
 
 
 def _variant_key(attrs: dict[str, AttrValue], meta: dict[str, AttrValue] | None = None) -> str:
-    """Return a stable observation key without rewriting legacy empty-meta keys."""
-    if not meta:
-        return _json(attrs)
+    """Return a stable observation key for explicit entity and map attributes."""
     return json.dumps(
-        {'attrs': attrs, 'meta': meta}, ensure_ascii=False, sort_keys=True, separators=(',', ':')
+        {'attrs': attrs, 'meta': meta or {}},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
     )
 
 
 def _attrs(value: str) -> dict[str, AttrValue]:
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
-        raise TypeError('Expected serialized entity attributes to be a JSON object.')
-    return parsed
+    try:
+        return ATTRS_ADAPTER.validate_json(value)
+    except ValidationError as error:
+        raise TypeError('Expected serialized entity attributes to be a JSON object.') from error
 
 
 def _semantic_attrs(attrs: dict[str, AttrValue]) -> dict[str, AttrValue]:
@@ -989,125 +1005,36 @@ def _semantic_attrs(attrs: dict[str, AttrValue]) -> dict[str, AttrValue]:
     return {name: value for name, value in attrs.items() if name not in LOCATION_ATTR_NAMES}
 
 
+def _variant_key_parts(key: str) -> tuple[dict[str, AttrValue], dict[str, AttrValue]]:
+    """Decode one stored variant key."""
+    try:
+        parsed = _VariantKey.model_validate_json(key)
+    except ValidationError as error:
+        raise TypeError('Expected serialized entity variant attributes and metadata.') from error
+    return parsed.attrs, parsed.meta
+
+
+def _variant_signature(
+    attrs: Mapping[str, AttrValue],
+    meta: Mapping[str, AttrValue],
+    ignored_names: Collection[str],
+) -> EntityVariantSignature:
+    """Return the raw presence/value signature still relevant to classification review."""
+    return EntityVariantSignature(
+        tuple(sorted((name, value) for name, value in attrs.items() if name not in ignored_names)),
+        tuple(
+            sorted(
+                (name, value)
+                for name, value in meta.items()
+                if f'{META_ATTR_PREFIX}{name}' not in ignored_names
+            )
+        ),
+    )
+
+
 def _attr_value_sort_key(item: tuple[AttrValue | None, int]) -> tuple[bool, str]:
     value, _ = item
     return value is not None, repr(value)
-
-
-def _minimal_condition(
-    attrs: dict[str, AttrValue],
-    meta: dict[str, AttrValue],
-    kind: str | None,
-    classifications: Iterable[tuple[dict[str, AttrValue], dict[str, AttrValue], str | None]],
-    affecting_names: set[str],
-) -> tuple[dict[str, AttrValue], dict[str, AttrValue]] | None:
-    """Find the smallest positive TOML condition that excludes known other kinds."""
-    pairs = tuple(
-        (name, value) for name, value in attrs.items() if name in affecting_names
-    ) + tuple(
-        (f'{META_ATTRIBUTE_PREFIX}{name}', value)
-        for name, value in meta.items()
-        if f'{META_ATTRIBUTE_PREFIX}{name}' in affecting_names
-    )
-    for size in range(len(pairs) + 1):
-        for subset in combinations(pairs, size):
-            when = {
-                name: value for name, value in subset if not name.startswith(META_ATTRIBUTE_PREFIX)
-            }
-            meta_when = {
-                name.removeprefix(META_ATTRIBUTE_PREFIX): value
-                for name, value in subset
-                if name.startswith(META_ATTRIBUTE_PREFIX)
-            }
-            if all(
-                other_kind == kind
-                or not (_attrs_match(other_attrs, when) and _attrs_match(other_meta, meta_when))
-                for other_attrs, other_meta, other_kind in classifications
-            ):
-                return when, meta_when
-    return None
-
-
-def _default_fallback_candidates(
-    detail: EntityAuditDetail,
-    classifications: list[tuple[dict[str, AttrValue], dict[str, AttrValue], str | None]],
-    candidates: tuple[RuleCandidate, ...],
-    *,
-    provisional: bool,
-) -> tuple[RuleCandidate, ...]:
-    """Offer safe fallbacks only for explicitly confirmed runtime defaults."""
-    defaults = {
-        attr.name: default
-        for attr in detail.attr_summaries
-        if (default := attr.default_value) is not UNKNOWN and default is not None
-    }
-    fallbacks: dict[tuple[str | None, str, str], RuleCandidate] = {}
-    for candidate in candidates:
-        when, meta = _drop_default_conditions(candidate.when, candidate.meta, defaults)
-        if (when, meta) == (candidate.when, candidate.meta):
-            continue
-        if not _fallback_is_safe(candidate, when, meta, classifications, candidates):
-            continue
-        key = candidate.kind, _json(when), _json(meta)
-        fallbacks[key] = RuleCandidate(
-            candidate.kind,
-            when,
-            meta,
-            candidate.variant_count,
-            fallback=True,
-            provisional=provisional,
-        )
-    return tuple(
-        fallbacks[key]
-        for key in sorted(
-            fallbacks,
-            key=lambda item: (len(item[1]) + len(item[2]), item[0] is None, item),
-        )
-    )
-
-
-def _drop_default_conditions(
-    when: dict[str, AttrValue],
-    meta: dict[str, AttrValue],
-    defaults: Mapping[str, AttrValue | None],
-) -> tuple[dict[str, AttrValue], dict[str, AttrValue]]:
-    return (
-        {name: value for name, value in when.items() if defaults.get(name) != value},
-        {
-            name: value
-            for name, value in meta.items()
-            if defaults.get(f'{META_ATTRIBUTE_PREFIX}{name}') != value
-        },
-    )
-
-
-def _fallback_is_safe(
-    candidate: RuleCandidate,
-    when: dict[str, AttrValue],
-    meta: dict[str, AttrValue],
-    classifications: Iterable[tuple[dict[str, AttrValue], dict[str, AttrValue], str | None]],
-    candidates: Iterable[RuleCandidate],
-) -> bool:
-    """Ensure every competing variant matching a fallback has a stricter rule."""
-    specificity = len(when) + len(meta)
-    for attrs, other_meta, kind in classifications:
-        if kind == candidate.kind or not (
-            _attrs_match(attrs, when) and _attrs_match(other_meta, meta)
-        ):
-            continue
-        if not any(
-            other.kind == kind
-            and len(other.when) + len(other.meta) > specificity
-            and _attrs_match(attrs, other.when)
-            and _attrs_match(other_meta, other.meta)
-            for other in candidates
-        ):
-            return False
-    return True
-
-
-def _attrs_match(actual: dict[str, AttrValue], expected: dict[str, AttrValue]) -> bool:
-    return all(actual.get(name) == value for name, value in expected.items())
 
 
 def _validate_observation_kind(status: ObservationStatus, kind: str | None) -> None:

@@ -3,52 +3,44 @@
 from datetime import datetime
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, Field
+
+from pist.models import FrozenExternalModel
 
 WEGFAN_API_URL = 'https://celeste.weg.fan/api/v2/'
 SEARCH_SIZE = 100
 REQUEST_TIMEOUT = ClientTimeout(total=20)
 
 
-class GameBananaAuthor(BaseModel):
+class GameBananaAuthor(FrozenExternalModel):
     """One author listed in a GameBanana credit group."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     name: str
     role: str = ''
     url: str = ''
 
 
-class GameBananaCredit(BaseModel):
+class GameBananaCredit(FrozenExternalModel):
     """One GameBanana credit group mirrored by WEGFan."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     group_name: str = Field(validation_alias=AliasChoices('groupName', 'group_name'))
     authors: tuple[GameBananaAuthor, ...] = ()
 
 
-class GameBananaFileMod(BaseModel):
+class GameBananaFileMod(FrozenExternalModel):
     """One Everest Mod packed in a GameBanana submission file."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     name: str
 
 
-class GameBananaFile(BaseModel):
+class GameBananaFile(FrozenExternalModel):
     """One downloadable file attached to a GameBanana submission."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     mods: tuple[GameBananaFileMod, ...] = ()
 
 
-class GameBananaSubmission(BaseModel):
+class GameBananaSubmission(FrozenExternalModel):
     """GameBanana submission metadata obtained through the WEGFan mirror."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     name: str
     submitter: str
@@ -80,18 +72,14 @@ class GameBananaSubmission(BaseModel):
         return any(mod.name == metadata_name for file in self.files for mod in file.mods)
 
 
-class GameBananaSearchData(BaseModel):
+class GameBananaSearchData(FrozenExternalModel):
     """The paginated data envelope returned by WEGFan submission search."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     content: tuple[GameBananaSubmission, ...] = ()
 
 
-class GameBananaSearchResp(BaseModel):
+class GameBananaSearchResp(FrozenExternalModel):
     """Top-level WEGFan submission-search response."""
-
-    model_config = ConfigDict(extra='ignore', frozen=True)
 
     data: GameBananaSearchData
 

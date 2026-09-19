@@ -1,4 +1,4 @@
-from pist.loenn.eval import UNKNOWN, LuaTable, evaluate
+from pist.archive.loenn.eval import UNKNOWN, LuaTable, evaluate
 
 
 def test_evaluator_keeps_known_fields_when_a_table_has_dynamic_values() -> None:

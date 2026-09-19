@@ -6,6 +6,11 @@ from pist.__main__ import default_game_dir, default_sheet_source, set_default_se
 from pist.settings import PistSettings, SettingsStore
 
 
+def test_settings_reject_empty_dialog_language_order() -> None:
+    with pytest.raises(ValueError):
+        PistSettings(dialog_languages=())
+
+
 def test_settings_store_uses_dark_theme_until_saved(tmp_path: Path) -> None:
     path = tmp_path / 'settings.json'
     store = SettingsStore(path)

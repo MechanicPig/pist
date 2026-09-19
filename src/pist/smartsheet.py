@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+from enum import StrEnum
 from urllib.parse import urlparse
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
@@ -11,10 +12,9 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
-    ValidationError,
 )
 
+from pist.models import ExternalModel, FrozenModel
 from pist.records import MANUAL_RECORD_FIELD_TITLES, MapRecord
 from pist.secrets import CredentialStore
 from pist.types import CellValue
@@ -30,31 +30,52 @@ type SmartSheetSourceValue = CellValue | tuple[str, ...] | datetime
 type JsonObject = dict[str, JsonValue]
 
 
-_json_object_adapter = TypeAdapter(JsonObject)
-
-
-def parse_json_object(value: object, *, context: str) -> JsonObject:
-    """Validate a dynamically named API operation result as a JSON object."""
-    try:
-        return _json_object_adapter.validate_python(value)
-    except ValidationError as error:
-        raise TypeError(f'Tencent Docs returned an invalid {context} object.') from error
-
-
-class TencentApiResp(BaseModel):
+class TencentApiResp(ExternalModel):
     """Common OpenAPI response envelope."""
-
-    model_config = ConfigDict(extra='ignore')
 
     ret: int
     msg: str | None = None
     data: JsonObject = Field(default_factory=dict)
 
 
-class FileIdConversion(BaseModel):
-    """Possible fields returned by the file-ID conversion endpoint."""
+class SmartSheetOperation(StrEnum):
+    """One Smart Sheet API operation supported by this client."""
 
-    model_config = ConfigDict(extra='ignore')
+    GET_FIELDS = 'getFields'
+    GET_RECORDS = 'getRecords'
+    GET_VIEWS = 'getViews'
+    ADD_RECORDS = 'addRecords'
+    UPDATE_RECORDS = 'updateRecords'
+
+
+class SmartSheetOperationOptions(FrozenModel):
+    """Validated parameters serializable beneath one dynamic API operation key."""
+
+
+class PageOptions(SmartSheetOperationOptions):
+    """Pagination parameters for a list operation."""
+
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+
+
+class RecordWrite(FrozenModel):
+    """One record create or update payload."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    values: JsonObject
+    record_id: str | None = Field(default=None, serialization_alias='recordID')
+
+
+class RecordWriteOptions(SmartSheetOperationOptions):
+    """Parameters for a record create or update operation."""
+
+    records: tuple[RecordWrite, ...]
+
+
+class FileIdConversion(ExternalModel):
+    """Possible fields returned by the file-ID conversion endpoint."""
 
     file_id: str | None = Field(
         default=None,
@@ -62,7 +83,7 @@ class FileIdConversion(BaseModel):
     )
 
 
-class SmartSheet(BaseModel):
+class SmartSheet(ExternalModel):
     """A Smart Sheet sub-sheet."""
 
     model_config = ConfigDict(extra='allow', populate_by_name=True)
@@ -73,32 +94,71 @@ class SmartSheet(BaseModel):
     type: str | None = None
 
 
-class SmartSheetField(BaseModel):
-    """One Smart Sheet field, as returned by the metadata operation."""
+class SmartSheetSelectOption(ExternalModel):
+    """One visible option declared by a Smart Sheet select field."""
 
-    model_config = ConfigDict(extra='ignore')
+    text: str
+
+
+class SmartSheetSingleSelect(ExternalModel):
+    """Options declared for one Smart Sheet single-select field."""
+
+    options: list[SmartSheetSelectOption] = Field(default_factory=list)
+
+
+class SmartSheetField(ExternalModel):
+    """One Smart Sheet field, as returned by the metadata operation."""
 
     field_id: str = Field(validation_alias='fieldID')
     field_title: str = Field(validation_alias='fieldTitle')
     field_type: int = Field(validation_alias='fieldType')
     property_formula: object | None = Field(default=None, validation_alias='propertyFormula')
+    property_single_select: SmartSheetSingleSelect | None = Field(
+        default=None,
+        validation_alias='propertySingleSelect',
+    )
 
 
-class GetSheetsData(BaseModel):
+class FieldsResult(ExternalModel):
+    """Validated result of the ``getFields`` operation."""
+
+    fields: list[SmartSheetField]
+    total: int | None = None
+
+
+class ViewsResult(ExternalModel):
+    """Validated result of the ``getViews`` operation."""
+
+    total: int | None = None
+
+
+class SmartSheetRecord(ExternalModel):
+    """One Smart Sheet record returned by a read or write operation."""
+
+    record_id: str | None = Field(default=None, validation_alias='recordID')
+    values: JsonObject = Field(default_factory=dict)
+
+
+class RecordsResult(ExternalModel):
+    """Validated result of a record read or write operation."""
+
+    records: list[SmartSheetRecord]
+    total: int | None = None
+
+
+class GetSheetsData(ExternalModel):
     """Data payload for the Smart Sheet metadata operation."""
-
-    model_config = ConfigDict(extra='ignore')
 
     sheets: list[SmartSheet] = Field(default_factory=list, validation_alias='getSheet')
 
 
 class SubSheetInspection(BaseModel):
-    """Raw metadata returned for one sub-sheet."""
+    """Validated metadata returned for one sub-sheet."""
 
     sheet: SmartSheet
-    views: JsonObject
-    fields: JsonObject
-    records: JsonObject
+    views: ViewsResult
+    fields: FieldsResult
+    records: RecordsResult
 
 
 class InspectionReport(BaseModel):
@@ -166,12 +226,20 @@ class TencentSmartSheetClient:
                 )
             endpoint = f'files/{resolved_id}/sheets/{sheet.sheet_id}'
             fields = await self._post_operation(
-                session, endpoint, 'getFields', {'offset': 0, 'limit': 100}
+                session,
+                endpoint,
+                SmartSheetOperation.GET_FIELDS,
+                PageOptions(offset=0, limit=100),
+                FieldsResult,
             )
             values = _record_values(record, fields)
             if not update:
-                result = await self._post_write_operation(
-                    session, endpoint, 'addRecords', {'records': [{'values': values}]}
+                result = await self._post_operation(
+                    session,
+                    endpoint,
+                    SmartSheetOperation.ADD_RECORDS,
+                    RecordWriteOptions(records=(RecordWrite(values=values),)),
+                    RecordsResult,
                 )
                 return _submitted_record_id(result)
             records = await self._all_records(session, endpoint)
@@ -180,30 +248,31 @@ class TencentSmartSheetClient:
                 raise ValueError('未找到同 Mod 元数据名和地图名的既有记录，不能更新。')
             if len(matches) != 1:
                 raise ValueError(f'找到 {len(matches)} 条同名记录，不能确定应更新哪一条。')
-            result = await self._post_write_operation(
+            result = await self._post_operation(
                 session,
                 endpoint,
-                'updateRecords',
-                {'records': [{'recordID': matches[0], 'values': values}]},
+                SmartSheetOperation.UPDATE_RECORDS,
+                RecordWriteOptions(records=(RecordWrite(record_id=matches[0], values=values),)),
+                RecordsResult,
             )
             return _submitted_record_id(result, fallback=matches[0])
 
-    async def _all_records(self, session: ClientSession, endpoint: str) -> JsonObject:
+    async def _all_records(self, session: ClientSession, endpoint: str) -> RecordsResult:
         """Read every main-table record so updates are not limited to the first page."""
-        records: list[JsonValue] = []
+        records: list[SmartSheetRecord] = []
         offset = 0
         while True:
             page = await self._post_operation(
-                session, endpoint, 'getRecords', {'offset': offset, 'limit': RECORD_PAGE_SIZE}
+                session,
+                endpoint,
+                SmartSheetOperation.GET_RECORDS,
+                PageOptions(offset=offset, limit=RECORD_PAGE_SIZE),
+                RecordsResult,
             )
-            page_records = page.get('records')
-            if not isinstance(page_records, list):
-                raise TypeError('Tencent Docs returned invalid record data.')
-            records.extend(page_records)
-            if len(page_records) < RECORD_PAGE_SIZE:
-                result: JsonObject = {'records': records}
-                return result
-            offset += len(page_records)
+            records.extend(page.records)
+            if len(page.records) < RECORD_PAGE_SIZE:
+                return RecordsResult(records=records)
+            offset += len(page.records)
 
     async def _resolve_file_id(self, session: ClientSession, value: str) -> str:
         """Convert the encoded ID embedded in a docs.qq.com URL to an API file ID."""
@@ -231,39 +300,43 @@ class TencentSmartSheetClient:
     ) -> SubSheetInspection:
         endpoint = f'files/{file_id}/sheets/{sheet.sheet_id}'
         views, fields, records = await asyncio.gather(
-            self._post_operation(session, endpoint, 'getViews', {'offset': 0, 'limit': 100}),
-            self._post_operation(session, endpoint, 'getFields', {'offset': 0, 'limit': 100}),
             self._post_operation(
-                session, endpoint, 'getRecords', {'offset': 0, 'limit': record_limit}
+                session,
+                endpoint,
+                SmartSheetOperation.GET_VIEWS,
+                PageOptions(offset=0, limit=100),
+                ViewsResult,
+            ),
+            self._post_operation(
+                session,
+                endpoint,
+                SmartSheetOperation.GET_FIELDS,
+                PageOptions(offset=0, limit=100),
+                FieldsResult,
+            ),
+            self._post_operation(
+                session,
+                endpoint,
+                SmartSheetOperation.GET_RECORDS,
+                PageOptions(offset=0, limit=record_limit),
+                RecordsResult,
             ),
         )
         return SubSheetInspection(sheet=sheet, views=views, fields=fields, records=records)
 
-    async def _post_operation(
+    async def _post_operation[T: BaseModel](
         self,
         session: ClientSession,
         endpoint: str,
-        operation: str,
-        options: dict[str, int],
-    ) -> JsonObject:
-        async with session.post(endpoint, json={operation: options}) as resp:
-            return parse_json_object(
-                (await self._response_data(resp)).data.get(operation),
-                context=f'{operation} operation result',
-            )
-
-    async def _post_write_operation(
-        self,
-        session: ClientSession,
-        endpoint: str,
-        operation: str,
-        options: JsonObject,
-    ) -> JsonObject:
-        async with session.post(endpoint, json={operation: options}) as resp:
-            return parse_json_object(
-                (await self._response_data(resp)).data.get(operation),
-                context=f'{operation} operation result',
-            )
+        operation: SmartSheetOperation,
+        options: SmartSheetOperationOptions,
+        result_type: type[T],
+    ) -> T:
+        async with session.post(
+            endpoint,
+            json={operation: options.model_dump(by_alias=True, exclude_none=True)},
+        ) as resp:
+            return result_type.model_validate((await self._response_data(resp)).data.get(operation))
 
     @staticmethod
     async def _response_data(resp: ClientResponse) -> TencentApiResp:
@@ -274,18 +347,9 @@ class TencentSmartSheetClient:
         return payload
 
 
-def _record_values(record: MapRecord, fields: JsonObject) -> JsonObject:
+def _record_values(record: MapRecord, fields: FieldsResult) -> JsonObject:
     """Encode present local record values according to the live main-table schema."""
-    raw_fields = fields.get('fields', [])
-    if not isinstance(raw_fields, list):
-        raise TypeError('Tencent Docs returned invalid field metadata.')
-    types: dict[str, int] = {
-        title: field_type
-        for field in raw_fields
-        if isinstance(field, dict)
-        and isinstance(title := field.get('fieldTitle'), str)
-        and isinstance(field_type := field.get('fieldType'), int)
-    }
+    types = {field.field_title: field.field_type for field in fields.fields}
     source_values: dict[str, SmartSheetSourceValue] = {
         'Mod元数据名': record.mod_metadata_name,
         '地图名': record.map_name,
@@ -322,42 +386,41 @@ def _encode_field_value(value: SmartSheetSourceValue, field_type: int) -> JsonVa
     """Encode one native value in Tencent Smart Sheet's field-value shape."""
     if field_type == 1 and isinstance(value, str):
         return [{'type': 'text', 'text': value}]
-    if field_type == 2 and isinstance(value, int):
+    if field_type == 2 and type(value) is int:
         return value
     if field_type == 3 and isinstance(value, bool):
         return value
     if field_type == 4:
         if isinstance(value, str):
             value = datetime.fromisoformat(value).replace(tzinfo=UTC)
-        assert isinstance(value, datetime)
-        return str(int(value.timestamp() * 1000))
-    if field_type == 8 and isinstance(value, tuple) and len(value) == 2:
+        if isinstance(value, datetime):
+            return str(int(value.timestamp() * 1000))
+    if (
+        field_type == 8
+        and isinstance(value, tuple)
+        and len(value) == 2
+        and all(isinstance(item, str) for item in value)
+    ):
         return [{'type': 'url', 'text': value[0], 'link': value[1]}]
     if field_type in {9, 17}:
         items = (value,) if isinstance(value, str) else value
-        assert isinstance(items, tuple)
-        return [{'text': item} for item in items]
+        if isinstance(items, tuple) and all(isinstance(item, str) for item in items):
+            return [{'text': item} for item in items]
     raise ValueError(f'Unsupported value {value!r} for Smart Sheet field type {field_type}.')
 
 
-def _matching_record_ids(records: JsonObject, record: MapRecord) -> list[str]:
+def _matching_record_ids(records: RecordsResult, record: MapRecord) -> list[str]:
     """Return existing main-table record IDs matching the stable local-record identity."""
-    raw_records = records.get('records', [])
-    if not isinstance(raw_records, list):
-        raise TypeError('Tencent Docs returned invalid record data.')
     matches: list[str] = []
-    for remote_record in raw_records:
-        if not isinstance(remote_record, dict):
+    for remote_record in records.records:
+        if remote_record.record_id is None:
             continue
-        values = remote_record.get('values')
-        record_id = remote_record.get('recordID')
-        if not isinstance(values, dict) or not isinstance(record_id, str):
-            continue
+        values = remote_record.values
         if (
             _field_text(values.get('Mod元数据名')) == record.mod_metadata_name
             and _field_text(values.get('地图名')) == record.map_name
         ):
-            matches.append(record_id)
+            matches.append(remote_record.record_id)
     return matches
 
 
@@ -368,10 +431,7 @@ def _field_text(value: object) -> str | None:
     return None
 
 
-def _submitted_record_id(result: JsonObject, *, fallback: str | None = None) -> str:
-    records = result.get('records')
-    if isinstance(records, list) and records and isinstance(records[0], dict):
-        record_id = records[0].get('recordID')
-        if isinstance(record_id, str):
-            return record_id
+def _submitted_record_id(result: RecordsResult, *, fallback: str | None = None) -> str:
+    if result.records and (record_id := result.records[0].record_id) is not None:
+        return record_id
     return fallback or '已提交（未返回记录 ID）'

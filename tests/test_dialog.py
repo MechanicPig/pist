@@ -33,8 +33,9 @@ def test_map_path_becomes_dialog_key() -> None:
         'Maps/Author/Pack/Map.bin',
         None,
     )
-    assert default_map_name('Maps/Author/Pack Name/Map.bin') == 'Author_Pack_Name'
-    assert default_map_name('Maps/Ferret/MicroMountain/map.bin') == 'Ferret_Micro Mountain'
+    assert default_map_name('Maps/Author/Pack Name/Map.bin') == 'Author_Pack_Name_Map'
+    assert default_map_name('Maps/Ferret/MicroMountain/map.bin') == 'Ferret_Micro Mountain_map'
+    assert default_map_name('Maps/Ezel/7CC.bin') == 'Ezel_7CC'
     assert default_map_name('Maps/RootMap.bin') == 'Root Map'
     assert campaign_dir_for_map_file('Maps/Author/Pack/Map.bin') == 'Maps/Author/Pack'
     assert dialog_key_for_campaign_dir('Maps/Author/Pack Name') == 'Author_Pack_Name'

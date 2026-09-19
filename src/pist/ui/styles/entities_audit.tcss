@@ -29,11 +29,6 @@ KindPickerScreen, KindEditorScreen, KindContextScreen, AuditRulesRefreshScreen, 
     border: round $accent;
 }
 
-#audit-entity-list > EntityAuditGroupItem {
-    margin-top: 1;
-    background: $surface;
-}
-
 #audit-right {
     width: 1fr;
     height: 1fr;

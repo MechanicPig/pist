@@ -2,6 +2,7 @@ from struct import pack
 
 import pytest
 
+from pist.game import binmap
 from pist.game.binmap import BadMapBin, parse_map_bin, parse_map_meta
 
 
@@ -117,3 +118,24 @@ def test_parse_map_bin_can_explicitly_allow_trailing_payload_data() -> None:
     with pytest.raises(BadMapBin, match='Unexpected trailing data'):
         parse_map_bin(data)
     assert parse_map_bin(data, allow_trailing=True).package == 'Example/Map'
+
+
+def test_parse_map_bin_limits_total_decoded_rle_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = ('Map', 'text')
+    root = b''.join(
+        (
+            pack('<H', 0),
+            pack('<B', 1),
+            pack('<H', 1),
+            b'\x07',
+            pack('<H', 2),
+            b'\x0aA',
+            pack('<H', 0),
+        )
+    )
+    data = b''.join((_string('CELESTE MAP'), _string('Example/Map'), pack('<H', len(lookup))))
+    data += b''.join(map(_string, lookup)) + root
+    monkeypatch.setattr(binmap, 'MAX_DECODED_TEXT_SIZE', 30)
+
+    with pytest.raises(BadMapBin, match='Decoded text exceeds'):
+        parse_map_bin(data)
