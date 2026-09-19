@@ -56,7 +56,7 @@ pist mods browse [--game-dir <game-dir>] [--save-slot <save-slot>] [--whitelist 
 
 `--whitelist`、`--blacklist` 与 `--whitelist-full-override` 分别对应 Everest 的同名启动选项和 `WhitelistFullOverride` 设置；相对路径在游戏的 `Mods` 目录下解析。
 
-## 后续方向
+## TODO
 
 - [ ] 补充 `FlushelineCollab/LevelEntrance` 的静态地图入口规则；需要先核对真实交互区域和目标属性。
 - [ ] 复现 Everest 的全局 Dialog 合并规则，让 MapModifier 等无 Dialog 的地图复用已加载 Mod 的同 key 名称；实现前先明确加载顺序和重复 key 覆盖语义。
