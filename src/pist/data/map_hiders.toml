@@ -1,0 +1,42 @@
+[[rules]]
+id = "helper-test-maps"
+hider = "HelperTestMapHider"
+reader = "static"
+target = "source"
+match = "exact"
+values = [
+    "AltSidesHelper",
+    "bitsbolts",
+    "BounceHelper",
+    "CustomPoints",
+    "HonlyHelper",
+    "JackalHelper",
+    "SusanHelper",
+    "minecirehelper",
+    "Dax's Resources",
+    "AuraHelper",
+]
+
+[[rules]]
+id = "chronia-helper-maps"
+hider = "ChroniaHelper"
+reader = "chronia_map_hider"
+target = "source"
+match = "casefold"
+builtin_targets = [
+    "AltSidesHelper",
+    "bitsbolts",
+    "BounceHelper",
+    "CustomPoints",
+    "HonlyHelper",
+    "JackalHelper",
+    "SusanHelper",
+]
+
+[[rules]]
+id = "scug-showcase"
+hider = "ScugHelper"
+reader = "scug_showcase"
+target = "campaign"
+match = "exact"
+values = ["Maps/ScugHelper/ScugHelperTest"]

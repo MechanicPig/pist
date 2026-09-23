@@ -5,18 +5,34 @@ from zipfile import ZipFile
 import pytest
 from pydantic import ValidationError
 
-from pist.game.mod_path import BadModPath, ModPath
+from pist.game.content import BadContentEntry, ContentEntry, ContentPath
+from pist.game.everest import EverestModMetadata, Version
+from pist.game.maps import MapInfo
 from pist.game.mods import (
-    EverestModMetadata,
-    InstalledMod,
-    LocalMap,
+    DirMod,
     ModScanner,
+    ModScanReport,
+    ZipMod,
     collab_journal_icon_fingerprint,
     collab_journal_map_order,
+    collab_journal_map_order_from_icons,
     is_collab_submission_map,
     is_mod_dependency,
 )
 from tests.mod_factory import make_installed_mod
+
+
+def _paths(*values: str) -> list[ContentPath]:
+    return [ContentPath(value) for value in values]
+
+
+def test_map_info_requires_a_maps_bin_content_path() -> None:
+    map_info = MapInfo(file_path=r'Maps\Test\Map.bin')
+
+    assert map_info.file_path == ContentPath('Maps/Test/Map.bin')
+    assert isinstance(map_info.file_path, ContentPath)
+    with pytest.raises(ValidationError):
+        MapInfo(file_path='Dialog/Test.txt')
 
 
 def write_zip_mod(
@@ -95,24 +111,52 @@ def test_scanner_reads_enabled_zip_and_directory_mods(tmp_path: Path) -> None:
     )
 
     assert [mod.metadata_name for mod in report.mods] == ['EnabledZip', 'DirectoryMod']
+    assert isinstance(report.mods[0], ZipMod)
+    assert isinstance(report.mods[1], DirMod)
     assert report.disabled_filenames == ['disabled.zip']
     assert report.disabled_mod_names == ['DisabledZip']
-    assert report.mods[0].map_files == ['Maps/Test/0_Map.bin']
-    assert report.mods[1].map_files == ['Maps/Directory/0-Map.bin']
+    assert report.mods[0].map_files == _paths('Maps/Test/0_Map.bin')
+    assert report.mods[1].map_files == _paths('Maps/Directory/0-Map.bin')
     assert report.mods[0].collab_id == 'TestCollab'
-    assert report.mods[0].maps[0].names == {'zh-cn': '中文地图', 'en': 'English Map'}
-    assert report.mods[0].maps[0].author_texts == {'en': 'by Alice'}
-    assert report.mods[0].maps[0].collab_credit_tags == {'en': 'Beginner'}
-    assert report.mods[0].campaigns[0].names == {}
-    assert report.mods[0].campaigns[0].fallback_name == 'Test'
-    assert report.mods[0].campaigns[0].maps == report.mods[0].maps
+    assert report.mods[0].dialogs == {
+        'en': {
+            'test_0_map': 'English Map',
+            'test_0_map_author': 'by Alice',
+            'test_0_map_collabcreditstags': 'Beginner',
+        },
+        'zh-cn': {'test_0_map': '中文地图'},
+    }
     assert next(report.mods[0].iter_dependencies()).name == 'RequiredDependency'
-    assert next(report.mods[0].iter_optional_dependencies()).version == '2.0'
+    assert next(report.mods[0].iter_optional_dependencies()).version == Version.parse('2.0')
     assert [candidate.name for candidate in preparation.candidates] == [
         'enabled.zip',
         'DirectoryMod',
     ]
     assert [candidate.name for candidate in preparation.disabled_candidates] == ['disabled.zip']
+
+    restored = ModScanReport.model_validate_json(report.model_dump_json())
+    assert isinstance(restored.mods[0], ZipMod)
+    assert isinstance(restored.mods[1], DirMod)
+
+
+def test_scanner_warns_and_ignores_invalid_zip_member_paths(tmp_path: Path) -> None:
+    mods_dir = tmp_path / 'Celeste' / 'Mods'
+    mods_dir.mkdir(parents=True)
+    write_zip_mod(mods_dir, 'valid.zip', 'Valid')
+    with ZipFile(mods_dir / 'valid.zip', 'a') as archive:
+        archive.writestr('../unrelated.txt', 'ignored')
+
+    report = ModScanner(tmp_path / 'Celeste').scan()
+
+    assert [mod.metadata_name for mod in report.mods] == ['Valid']
+    assert report.mods[0].map_files == _paths('Maps/Test/0_Map.bin')
+    assert [warning.model_dump() for warning in report.warnings] == [
+        {
+            'mod_filename': 'valid.zip',
+            'file_path': '../unrelated.txt',
+            'message': 'Mod 包含无效成员路径，已忽略。',
+        }
+    ]
 
 
 def test_scanner_preserves_all_metadata_entries_for_one_package(tmp_path: Path) -> None:
@@ -198,17 +242,29 @@ def test_scanner_matches_everest_platform_and_archive_case_rules(tmp_path: Path)
     directory.mkdir()
     (directory / 'EVEREST.YAML').write_text('- Name: Directory\n', encoding='utf-8')
 
-    with ModPath(mods_dir / 'archive.zip') as mod_path:
+    with ContentEntry(mods_dir / 'archive.zip') as mod_path:
         assert (mod_path / 'EVEREST.YAML').is_file()
         assert not (mod_path / 'everest.yaml').exists()
     assert [mod.metadata_name for mod in ModScanner(tmp_path / 'Celeste').scan().mods] == (
         ['Directory'] if (directory / 'everest.yaml').is_file() else []
     )
-    with pytest.raises(BadModPath):
-        ModPath(uppercase_zip)
+    with pytest.raises(BadContentEntry):
+        ContentEntry(uppercase_zip)
 
 
-def test_scanner_lists_disabled_root_map_mods_without_campaign_localization(tmp_path: Path) -> None:
+def test_scanner_requires_everests_exact_virtual_bin_extension(tmp_path: Path) -> None:
+    mods_dir = tmp_path / 'Celeste' / 'Mods'
+    mods_dir.mkdir(parents=True)
+    write_zip_mod(mods_dir, 'extension.zip', 'Extension')
+    with ZipFile(mods_dir / 'extension.zip', 'a') as archive:
+        archive.writestr('Maps/Test/Ignored.BIN', b'map data')
+
+    report = ModScanner(tmp_path / 'Celeste').scan()
+
+    assert report.mods[0].map_files == _paths('Maps/Test/0_Map.bin')
+
+
+def test_scanner_lists_disabled_root_map_mods_without_reading_dialog(tmp_path: Path) -> None:
     mods_dir = tmp_path / 'Celeste' / 'Mods'
     mods_dir.mkdir(parents=True)
     with ZipFile(mods_dir / 'root-map.zip', 'w') as archive:
@@ -218,8 +274,8 @@ def test_scanner_lists_disabled_root_map_mods_without_campaign_localization(tmp_
 
     mods = ModScanner(tmp_path / 'Celeste').scan_all()
 
-    assert [(mod.metadata_name, mod.map_files, mod.maps, mod.campaigns) for mod in mods] == [
-        ('RootMap', ['Maps/RootMap.bin'], [], [])
+    assert [(mod.metadata_name, mod.map_files, mod.dialogs) for mod in mods] == [
+        ('RootMap', _paths('Maps/RootMap.bin'), {})
     ]
 
 
@@ -232,8 +288,7 @@ def test_scanner_keeps_enabled_root_maps_outside_campaigns(tmp_path: Path) -> No
 
     mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
 
-    assert mod.campaigns == []
-    assert mod.maps[0].fallback_name == 'Root Map'
+    assert mod.map_files == _paths('Maps/RootMap.bin')
 
 
 def test_scanner_preserves_yaml_name_and_version_as_text(tmp_path: Path) -> None:
@@ -282,6 +337,49 @@ def test_scanner_warns_and_skips_an_undecodable_manifest(tmp_path: Path) -> None
     ]
 
 
+def test_scanner_warns_but_keeps_a_disabled_mod_with_invalid_metadata(tmp_path: Path) -> None:
+    mods_dir = tmp_path / 'Celeste' / 'Mods'
+    mods_dir.mkdir(parents=True)
+    with ZipFile(mods_dir / 'broken.zip', 'w') as archive:
+        archive.writestr('everest.yaml', '- Name: Broken\n  Version: 1\n')
+    with ZipFile(mods_dir / 'working.zip', 'w') as archive:
+        archive.writestr('everest.yaml', '- Name: Working\n')
+    (mods_dir / 'blacklist.txt').write_text('broken.zip\n', encoding='utf-8')
+
+    report = ModScanner(tmp_path / 'Celeste').scan()
+
+    assert [mod.metadata_name for mod in report.mods] == ['Working']
+    assert report.disabled_filenames == ['broken.zip']
+    assert report.disabled_mod_names == []
+    assert len(report.warnings) == 1
+    assert report.warnings[0].mod_filename == 'broken.zip'
+    assert report.warnings[0].file_path == 'everest.yaml'
+    assert report.warnings[0].message.startswith('禁用 Mod 元数据无效：')
+
+
+def test_scanner_warns_and_crawls_an_enabled_mod_with_invalid_metadata(tmp_path: Path) -> None:
+    mods_dir = tmp_path / 'Celeste' / 'Mods'
+    mods_dir.mkdir(parents=True)
+    with ZipFile(mods_dir / 'broken.zip', 'w') as archive:
+        archive.writestr(
+            'everest.yaml',
+            '- Name: Broken\n  Version: v1.1\n  Author: Ignored by Pist\n',
+        )
+        archive.writestr('Maps/Broken/Map.bin', b'map data')
+    with ZipFile(mods_dir / 'working.zip', 'w') as archive:
+        archive.writestr('everest.yaml', '- Name: Working\n')
+
+    report = ModScanner(tmp_path / 'Celeste').scan()
+
+    assert [mod.metadata_name for mod in report.mods] == ['_zip_broken', 'Working']
+    assert report.mods[0].metadata_version == '0.0.0-dummy'
+    assert report.mods[0].map_files == _paths('Maps/Broken/Map.bin')
+    assert len(report.warnings) == 1
+    assert report.warnings[0].mod_filename == 'broken.zip'
+    assert report.warnings[0].file_path == 'everest.yaml'
+    assert report.warnings[0].message.startswith('Mod 元数据无效：')
+
+
 def test_scanner_warns_and_ignores_an_undecodable_dialog(tmp_path: Path) -> None:
     mods_dir = tmp_path / 'Celeste' / 'Mods'
     mods_dir.mkdir(parents=True)
@@ -292,7 +390,7 @@ def test_scanner_warns_and_ignores_an_undecodable_dialog(tmp_path: Path) -> None
 
     report = ModScanner(tmp_path / 'Celeste').scan()
 
-    assert report.mods[0].maps[0].names == {}
+    assert report.mods[0].dialogs == {}
     assert report.warnings[0].mod_filename == 'dialog.zip'
     assert report.warnings[0].file_path == 'Dialog/English.txt'
 
@@ -302,36 +400,65 @@ def test_manifest_rejects_non_string_version() -> None:
         EverestModMetadata.model_validate({'Name': 'Example', 'Version': 1})
 
 
+def test_manifest_ignores_unmatched_metadata_fields_like_everest() -> None:
+    metadata = EverestModMetadata.model_validate(
+        {'Name': 'Example', 'Version': '1.0', 'Author': 'Ignored'}
+    )
+
+    assert metadata.name == 'Example'
+
+
+@pytest.mark.parametrize('value', ('1', '1.2.3.4.5', '1.a', '1.0+build', '2147483648.0'))
+def test_manifest_rejects_invalid_everest_version(value: str) -> None:
+    with pytest.raises(ValidationError):
+        EverestModMetadata.model_validate({'Name': 'Example', 'Version': value})
+
+
+def test_version_keeps_display_text_and_compares_numeric_prefixes() -> None:
+    installed = Version.parse('1.20.0-preview')
+
+    assert str(installed) == '1.20.0-preview'
+    assert installed.is_compatible_with(Version.parse('1.2'))
+
+
+def test_version_preserves_missing_system_version_components_for_dependencies() -> None:
+    assert not Version.parse('1.2').is_compatible_with(Version.parse('1.2.0'))
+    assert not Version.parse('1.2.0').is_compatible_with(Version.parse('1.2.0.0'))
+    assert Version.parse('1.2.0.0').is_compatible_with(Version.parse('1.2.0'))
+    assert Version.parse('1.3').is_compatible_with(Version.parse('1.2.999.999'))
+
+
+def test_manifest_serializes_a_version_as_its_original_text() -> None:
+    metadata = EverestModMetadata.model_validate({'Name': 'Example', 'Version': '1.20.0-preview'})
+
+    assert metadata.model_dump(mode='json')['version'] == '1.20.0-preview'
+
+
 def test_installed_mod_requires_a_manifest_entry() -> None:
     with pytest.raises(ValidationError):
-        InstalledMod(source='zip', filename='Example.zip', path='Example.zip', manifest=())
+        ZipMod(filename='Example.zip', path=Path('Example.zip'), manifest=())
 
 
 def test_mod_dependency_excludes_loader_entries() -> None:
     assert not is_mod_dependency('Celeste')
     assert not is_mod_dependency('Everest')
     assert not is_mod_dependency('EverestCore')
+    assert is_mod_dependency('EVEREST')
 
 
 def test_collab_submission_map_excludes_lobbies_and_gyms() -> None:
-    assert is_collab_submission_map(
-        LocalMap(file_path='Maps/Expert/Example.bin', dialog_key='Expert_Example')
-    )
-    assert not is_collab_submission_map(
-        LocalMap(file_path='Maps/0-Lobbies/Prologue.bin', dialog_key='0_Lobbies_Prologue')
-    )
-    assert not is_collab_submission_map(
-        LocalMap(file_path='Maps/Beginner Gym/Example.bin', dialog_key='Beginner_Gym_Example')
-    )
+    assert is_collab_submission_map(MapInfo(file_path='Maps/Expert/Example.bin'))
+    assert not is_collab_submission_map(MapInfo(file_path='Maps/0-Lobbies/Prologue.bin'))
+    assert not is_collab_submission_map(MapInfo(file_path='Maps/Beginner Gym/Example.bin'))
     assert is_mod_dependency('FrostHelper')
 
 
 def test_collab_journal_map_order_uses_numbered_map_icons(tmp_path: Path) -> None:
     mod_dir = tmp_path / 'Collab'
     maps = [
-        LocalMap(file_path='Maps/Collab/Hard.bin', dialog_key='Collab_Hard'),
-        LocalMap(file_path='Maps/Collab/Medium.bin', dialog_key='Collab_Medium'),
-        LocalMap(file_path='Maps/Collab/ZZ-HeartSide.bin', dialog_key='Collab_ZZ_HeartSide'),
+        MapInfo(file_path='Maps/Collab/Hard.bin'),
+        MapInfo(file_path='Maps/Collab/Medium.bin'),
+        MapInfo(file_path='Maps/Collab/ZZ-HeartSide.bin'),
     ]
     for map_info, icon in zip(
         maps,
@@ -354,10 +481,27 @@ def test_collab_journal_map_order_uses_numbered_map_icons(tmp_path: Path) -> Non
     assert collab_journal_map_order(mod, maps) == [maps[1], maps[0], maps[2]]
 
 
+def test_collab_journal_order_requires_exact_heartside_name() -> None:
+    heartside_named_in_lowercase = MapInfo(
+        file_path='Maps/Collab/zz-heartside.bin',
+    )
+    ordinary_map = MapInfo(file_path='Maps/Collab/Map.bin')
+
+    ordered = collab_journal_map_order_from_icons(
+        (heartside_named_in_lowercase, ordinary_map),
+        {
+            heartside_named_in_lowercase.file_path: 'Maps/Collab/1-HeartSide',
+            ordinary_map.file_path: 'Maps/Collab/2-Map',
+        },
+    )
+
+    assert ordered == [heartside_named_in_lowercase, ordinary_map]
+
+
 def test_collab_journal_icon_fingerprint_changes_when_a_directory_map_changes(
     tmp_path: Path,
 ) -> None:
-    map_info = LocalMap(file_path='Maps/Collab/Map.bin', dialog_key='Collab_Map')
+    map_info = MapInfo(file_path='Maps/Collab/Map.bin')
     map_path = tmp_path / map_info.file_path
     map_path.parent.mkdir(parents=True)
     map_path.write_bytes(b'first')
@@ -376,10 +520,10 @@ def test_collab_journal_icon_fingerprint_changes_when_a_directory_map_changes(
 
 
 def test_collab_journal_icon_fingerprint_uses_zip_entry_metadata(tmp_path: Path) -> None:
-    map_info = LocalMap(file_path='Maps/Collab/Map.bin', dialog_key='Collab_Map')
+    map_info = MapInfo(file_path='Maps/Collab/Map.bin')
     archive_path = tmp_path / 'Collab.zip'
     with ZipFile(archive_path, 'w') as archive:
-        archive.writestr(map_info.file_path, b'first')
+        archive.writestr(map_info.file_path.as_posix(), b'first')
     mod = make_installed_mod(
         source='zip',
         filename='Collab.zip',
@@ -390,12 +534,12 @@ def test_collab_journal_icon_fingerprint_uses_zip_entry_metadata(tmp_path: Path)
 
     first = collab_journal_icon_fingerprint(mod, [map_info])
     with ZipFile(archive_path, 'w') as archive:
-        archive.writestr(map_info.file_path, b'second')
+        archive.writestr(map_info.file_path.as_posix(), b'second')
 
     assert collab_journal_icon_fingerprint(mod, [map_info]) != first
 
 
-def test_scanner_uses_base_dialog_name_for_b_and_c_sides(tmp_path: Path) -> None:
+def test_scanner_keeps_side_assets_and_dialog_data_separate(tmp_path: Path) -> None:
     mods_dir = tmp_path / 'Celeste' / 'Mods'
     mods_dir.mkdir(parents=True)
     with ZipFile(mods_dir / 'sides.zip', 'w') as archive:
@@ -407,20 +551,12 @@ def test_scanner_uses_base_dialog_name_for_b_and_c_sides(tmp_path: Path) -> None
 
     mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
     maps = mod.maps
-    maps_by_file = {map_info.file_path: map_info for map_info in maps}
-
-    assert [map_info.file_path for map_info in maps] == [
+    assert [map_info.file_path for map_info in maps] == _paths(
         'Maps/Test/Map.bin',
         'Maps/Test/Map-B.bin',
         'Maps/Test/Map-C.bin',
-    ]
-    assert maps_by_file['Maps/Test/Map-B.bin'].dialog_key == 'Test_Map'
-    assert maps_by_file['Maps/Test/Map-B.bin'].side == 'B'
-    assert maps_by_file['Maps/Test/Map-B.bin'].names == {'en': 'Map Name B'}
-    assert maps_by_file['Maps/Test/Map-C.bin'].names == {'en': 'Map Name C'}
-    assert mod.campaigns[0].dialog_key == 'Test'
-    assert mod.campaigns[0].names == {}
-    assert mod.campaigns[0].fallback_name == 'Test'
+    )
+    assert mod.dialogs['en']['test_map'] == 'Map Name'
 
 
 def test_scanner_sorts_map_paths_naturally_and_keeps_heart_side_last(tmp_path: Path) -> None:
@@ -440,14 +576,14 @@ def test_scanner_sorts_map_paths_naturally_and_keeps_heart_side_last(tmp_path: P
 
     map_files = ModScanner(tmp_path / 'Celeste').scan().mods[0].map_files
 
-    assert map_files == [
+    assert map_files == _paths(
         'Maps/Test/1-Beginner/Map.bin',
         'Maps/Test/1-Beginner/Map-B.bin',
         'Maps/Test/1-Beginner/Map-C.bin',
         'Maps/Test/2-Intermediate/Map.bin',
         'Maps/Test/10-Advanced/Map.bin',
         'Maps/Test/1-Beginner/ZZ-HeartSide.bin',
-    ]
+    )
 
 
 def test_scanner_reads_all_supported_dialog_languages(tmp_path: Path) -> None:
@@ -459,9 +595,10 @@ def test_scanner_reads_all_supported_dialog_languages(tmp_path: Path) -> None:
         archive.writestr('Dialog/English.txt', 'Test_Map=English Map\n')
         archive.writestr('Dialog/Japanese.txt', 'Test_Map=日本語マップ\n')
 
-    map_info = ModScanner(tmp_path / 'Celeste').scan().mods[0].maps[0]
+    mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
 
-    assert map_info.names == {'en': 'English Map', 'ja': '日本語マップ'}
+    assert mod.dialogs['en']['test_map'] == 'English Map'
+    assert mod.dialogs['ja']['test_map'] == '日本語マップ'
 
 
 def test_scanner_uses_game_fallback_name_without_dialog(tmp_path: Path) -> None:
@@ -473,18 +610,10 @@ def test_scanner_uses_game_fallback_name_without_dialog(tmp_path: Path) -> None:
         archive.writestr('Maps/Author/MicroMountain/Map-B.bin', b'map data')
 
     maps = ModScanner(tmp_path / 'Celeste').scan().mods[0].maps
-    maps_by_file = {map_info.file_path: map_info for map_info in maps}
 
-    assert maps_by_file['Maps/Author/MicroMountain/Map.bin'].names == {}
-    assert maps_by_file['Maps/Author/MicroMountain/Map.bin'].base_file == (
-        'Maps/Author/MicroMountain/Map.bin'
-    )
-    assert maps_by_file['Maps/Author/MicroMountain/Map.bin'].fallback_name == (
-        'Author_Micro Mountain_Map'
-    )
-    assert maps_by_file['Maps/Author/MicroMountain/Map-B.bin'].names == {}
-    assert maps_by_file['Maps/Author/MicroMountain/Map-B.bin'].fallback_name == (
-        'Author_Micro Mountain_Map B'
+    assert [map_info.file_path for map_info in maps] == _paths(
+        'Maps/Author/MicroMountain/Map.bin',
+        'Maps/Author/MicroMountain/Map-B.bin',
     )
 
 
@@ -500,6 +629,7 @@ def test_scanner_groups_collab_maps_under_their_lobbies(tmp_path: Path) -> None:
         archive.writestr('Maps/TestCollab/1-Beginner/Map.bin', b'map data')
         archive.writestr(
             'Dialog/English.txt',
+            'TestCollab_0_Lobbies=Test Collab\n'
             'TestCollab_0_Lobbies_0_Prologue=Prologue\n'
             'TestCollab_0_Lobbies_1_Beginner=Beginner Lobby\n'
             'TestCollab_1_Beginner_Map=Playable Map\n',
@@ -507,17 +637,35 @@ def test_scanner_groups_collab_maps_under_their_lobbies(tmp_path: Path) -> None:
 
     mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
 
-    assert [map_info.file_path for map_info in mod.maps] == [
+    assert [map_info.file_path for map_info in mod.maps] == _paths(
         'Maps/TestCollab/0-Gyms/1-Beginner.bin',
         'Maps/TestCollab/0-Lobbies/0-Prologue.bin',
         'Maps/TestCollab/0-Lobbies/1-Beginner.bin',
         'Maps/TestCollab/1-Beginner/Map.bin',
-    ]
-    assert [(campaign.kind, campaign.names['en']) for campaign in mod.campaigns] == [
-        ('collab_prologue', 'Prologue'),
-        ('collab_lobby', 'Beginner Lobby'),
-    ]
-    assert mod.campaigns[1].maps[0].names['en'] == 'Playable Map'
+    )
+
+
+def test_scanner_retains_collab_lobby_levelset_dialog_entries(tmp_path: Path) -> None:
+    mods_dir = tmp_path / 'Celeste' / 'Mods'
+    mods_dir.mkdir(parents=True)
+    with ZipFile(mods_dir / 'collab.zip', 'w') as archive:
+        archive.writestr('everest.yaml', '- Name: TestCollab\n')
+        archive.writestr('CollabUtils2CollabID.txt', 'TestCollab\n')
+        archive.writestr('Maps/TestCollab/0-Lobbies/1-Maps.bin', b'map data')
+        archive.writestr(
+            'Dialog/English.txt',
+            'modname_TestCollab=Updater Name\n'
+            'levelset_TestCollab_0_Lobbies=LevelSet Name\n'
+            'TestCollab_0_Lobbies=Fallback Name\n',
+        )
+
+    mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
+
+    assert mod.dialogs['en'] == {
+        'modname_testcollab': 'Updater Name',
+        'levelset_testcollab_0_lobbies': 'LevelSet Name',
+        'testcollab_0_lobbies': 'Fallback Name',
+    }
 
 
 def test_scanner_groups_multiple_collab_levelsets_without_reading_lobby_bins(
@@ -534,10 +682,8 @@ def test_scanner_groups_multiple_collab_levelsets_without_reading_lobby_bins(
 
     mod = ModScanner(tmp_path / 'Celeste').scan().mods[0]
 
-    assert [
-        (campaign.directory, [map_info.file_path for map_info in campaign.maps])
-        for campaign in mod.campaigns
-    ] == [
-        ('Maps/TestCollab/1-Maps', ['Maps/TestCollab/1-Maps/Map.bin']),
-        ('Maps/TestCollab/1-Submissions', ['Maps/TestCollab/1-Submissions/Submission.bin']),
-    ]
+    assert mod.map_files == _paths(
+        'Maps/TestCollab/0-Lobbies/1-Maps.bin',
+        'Maps/TestCollab/1-Maps/Map.bin',
+        'Maps/TestCollab/1-Submissions/Submission.bin',
+    )

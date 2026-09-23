@@ -1,12 +1,14 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from pist.entities.classification import MapEntityStats
 from pist.entities.map_entity_id import MapEntityID
+from pist.game.collab import JournalReferences
 from pist.game.duration import Duration
-from pist.game.mods import LocalMap
+from pist.game.levels import Level, LevelSide
 from pist.game.saves import MapStats, SaveSlot
 from pist.gamebanana import GameBananaSubmission
 from pist.local_data import LocalDataStore
@@ -17,7 +19,28 @@ from pist.records import (
     map_record_progress,
     merge_saved_record,
 )
+from tests.map_factory import make_level_side
 from tests.mod_factory import make_installed_mod
+
+
+def _example_map(
+    file_path: str,
+    *,
+    dialog_key: str | None = None,
+    side: Literal['B', 'C'] | None = None,
+) -> tuple[Level, LevelSide]:
+    return make_level_side(
+        file_path=file_path,
+        dialog_key=dialog_key,
+        side=side,
+        mod=make_installed_mod(
+            source='zip',
+            filename='Example.zip',
+            path='C:/Celeste/Mods/Example.zip',
+            metadata_name='ExampleMetadata',
+            metadata_version='1.0.0',
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -134,27 +157,22 @@ def test_map_record_progress_requires_each_existing_collectible() -> None:
 
 
 def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -> None:
-    mod = make_installed_mod(
-        source='zip',
-        filename='Example.zip',
-        path='C:/Celeste/Mods/Example.zip',
-        metadata_name='ExampleMetadata',
-        metadata_version='1.0.0',
-    )
-    map_info = LocalMap(
+    map_info = _example_map(
         file_path='Maps/Author/Pack/Map-B.bin',
         dialog_key='Author_Pack_Map',
         side='B',
-        names={'zh-cn': '示例地图 B', 'en': 'Example Map B'},
     )
     save_slot = SaveSlot(
         0, {('Author/Pack/Map', 1): MapStats(Duration.from_milliseconds(83_456), 12)}
     )
 
     record = create_map_record(
-        mod,
-        map_info,
+        *map_info,
         save_slot=save_slot,
+        dialogs={
+            'zh-cn': {'Author_Pack_Map': '示例地图'},
+            'en': {'Author_Pack_Map': 'Example Map'},
+        },
         now=datetime(2026, 9, 4, 12, tzinfo=UTC),
     )
 
@@ -174,14 +192,7 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
 
 def test_create_map_record_preserves_configured_record_values() -> None:
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         record_values={'主表': {'红草莓数': 3, '磁带': True, '水晶之心': '通关收集'}},
     )
@@ -191,30 +202,24 @@ def test_create_map_record_preserves_configured_record_values() -> None:
 
 def test_create_map_record_marks_normal_map_as_a_side() -> None:
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
     )
 
     assert record.side == 'A'
 
 
+def test_create_map_record_rejects_vanilla_map() -> None:
+    with pytest.raises(TypeError, match='vanilla map'):
+        create_map_record(
+            *make_level_side(file_path='Maps/0-Intro.bin', dialog_key='AREA_0'),
+            save_slot=SaveSlot(0, {}),
+        )
+
+
 def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         gamebanana=GameBananaSubmission.model_validate(
             {
@@ -240,16 +245,9 @@ def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
 
 
 def test_create_map_record_omits_zero_time_stats() -> None:
-    map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
+    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        map_info,
+        *map_info,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(), 12)}),
     )
 
@@ -260,14 +258,7 @@ def test_create_map_record_omits_zero_time_stats() -> None:
 
 def test_local_data_store_round_trips_a_record(tmp_path: Path) -> None:
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         now=datetime(2026, 9, 4, 12, tzinfo=UTC),
     )
@@ -311,24 +302,44 @@ def test_local_data_store_discards_invalid_cached_collab_journal_icons(tmp_path:
     assert store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', (), 'first') is None
 
 
-def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: Path) -> None:
-    mod = make_installed_mod(
-        source='zip',
-        filename='Example.zip',
-        path='C:/Celeste/Mods/Example.zip',
-        metadata_name='ExampleMetadata',
-        metadata_version='1.0.0',
+def test_local_data_store_caches_collab_journal_refs(tmp_path: Path) -> None:
+    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
+    references = JournalReferences(('Collab/1-Easy', 'Addon/Maps'), 2)
+
+    store.save_collab_journal_refs(
+        'C:/Celeste/Mods/Collab.zip',
+        'Maps/Collab/0-Lobbies/1-Easy.bin',
+        'first',
+        references,
     )
-    map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
+
+    assert (
+        store.load_collab_journal_refs(
+            'C:/Celeste/Mods/Collab.zip',
+            'Maps/Collab/0-Lobbies/1-Easy.bin',
+            'first',
+        )
+        == references
+    )
+    assert (
+        store.load_collab_journal_refs(
+            'C:/Celeste/Mods/Collab.zip',
+            'Maps/Collab/0-Lobbies/1-Easy.bin',
+            'changed',
+        )
+        is None
+    )
+
+
+def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: Path) -> None:
+    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
     store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
     initial = create_map_record(
-        mod,
-        map_info,
+        *map_info,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
     )
     current = create_map_record(
-        mod,
-        map_info,
+        *map_info,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
     )
 
@@ -342,24 +353,15 @@ def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: 
 
 
 def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> None:
-    mod = make_installed_mod(
-        source='zip',
-        filename='Example.zip',
-        path='C:/Celeste/Mods/Example.zip',
-        metadata_name='ExampleMetadata',
-        metadata_version='1.0.0',
-    )
-    map_info = LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map')
+    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
     saved = create_map_record(
-        mod,
-        map_info,
+        *map_info,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
         authors=('Alice',),
         record_values={'主表': {'红草莓数': 2, '起始日期': '2026-09-01', '备注': '好图'}},
     )
     current = create_map_record(
-        mod,
-        map_info,
+        *map_info,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
         record_values={'主表': {'红草莓数': 4, '主房间数': 8}},
     )
@@ -376,14 +378,7 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
 
 def test_local_data_store_rejects_record_without_native_play_time(tmp_path: Path) -> None:
     record = create_map_record(
-        make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
-        LocalMap(file_path='Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
         save_slot=SaveSlot(0, {}),
     )
 

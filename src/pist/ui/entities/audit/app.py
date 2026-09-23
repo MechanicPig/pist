@@ -25,6 +25,7 @@ from pist.entities.rules import (
     EntityStat,
 )
 from pist.game.binmap import AttrValue
+from pist.game.content import ContentPath
 from pist.game.saves import MapProgress, SaveReader
 from pist.map_preview import MapPreview
 
@@ -494,7 +495,13 @@ class EntityAuditApp(RefreshableCssApp[None]):
         if variants is not None:
             raw_occurrences = backend.occurrences_for_variants(raw_occurrences, variants)
         entities = occurrence_preview_entities(raw_occurrences)
-        await MapPreview(map_info, layout, audit_entities=entities, read_only=True).preview()
+        await MapPreview(
+            map_info,
+            layout,
+            audit_entities=entities,
+            read_only=True,
+            title=occurrences.source.map_name,
+        ).preview()
 
     @on(Button.Pressed, f'#{CONFIRM_ENTITY_KIND_ID}')
     def confirm_entity_kind(self) -> None:
@@ -691,7 +698,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         if self._save_reader is None:
             return MapProgress.UNRECORDED
         try:
-            return self._save_reader.map_progress(map_file)
+            return self._save_reader.map_progress(ContentPath(map_file))
         except ValueError:
             return MapProgress.ENTERED
 

@@ -1,4 +1,4 @@
-"""Local non-secret settings persisted under the ignored ``.pist`` directory."""
+"""Local non-secret settings persisted in Pist's writable ``.pist`` directory."""
 
 from pathlib import Path
 from typing import Annotated, Literal
@@ -8,8 +8,9 @@ from pydantic import ValidationError
 
 from pist.game.dialog import DIALOG_LANGUAGES
 from pist.models import FrozenModel
+from pist.paths import PIST_DIR
 
-SETTINGS_PATH = Path('.pist/settings.json')
+SETTINGS_PATH = PIST_DIR / 'settings.json'
 
 
 class PistSettings(FrozenModel):

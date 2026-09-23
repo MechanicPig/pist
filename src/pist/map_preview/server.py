@@ -3,32 +3,55 @@
 import asyncio
 import secrets
 import webbrowser
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from importlib.resources import files
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import cast
 
 from aiohttp import web
 from pydantic import Field, PositiveInt
 
-from pist.game import routes
+from pist.game import dialog, routes
 from pist.game.binmap import AttrValue
-from pist.game.dialog import localized_name
-from pist.game.mods import InstalledMod, LocalMap
-from pist.game.saves import sid_for_map_file
+from pist.game.levels import Level, LevelSide, LoadedMap, map_display_name
+from pist.game.maps import MapInfo
 from pist.local_data import LocalDataStore
 from pist.models import FrozenModel, StrictModel
+from pist.paths import PIST_DIR
 
 STATIC_DIR = 'static'
 GAME_ASSETS_DIR = 'game_assets'
 MAP_PREVIEW_HTML_FILE = 'index.html'
 MAP_PREVIEW_ASSETS = frozenset({'map_preview.css', 'map_preview.js'})
-LOCAL_SPRITES_DIR = Path('.pist/sprites')
+LOCAL_SPRITES_DIR = PIST_DIR / 'sprites'
+
+
+def _map_title(map_info: MapInfo, dialogs: Mapping[str, Mapping[str, str]]) -> str:
+    """Resolve a raw map asset title for preview links without freezing Dialog text."""
+    base_file, side = dialog.split_map_side_suffix(map_info.file_path)
+    key = dialog.dialog_key_for_map_file(base_file)
+    names = {
+        language: f'{name} {side}' if side is not None else name
+        for language, entries in dialogs.items()
+        if (name := entries.get(key)) is not None
+    }
+    fallback = dialog.default_map_name(base_file)
+    return dialog.localized_name(names, ('zh-cn', 'en')) or (
+        f'{fallback} {side}' if side is not None else fallback
+    )
 
 
 class MapPreviewError(RuntimeError):
     """The local browser map-preview session could not be started."""
+
+
+class MapPreviewMode(StrEnum):
+    """One interaction mode exposed by the browser map preview."""
+
+    REVIEW = 'review'
+    PREVIEW = 'preview'
 
 
 class _OpenMapReq(StrictModel):
@@ -104,6 +127,9 @@ class _PreviewEntranceResp(FrozenModel):
     height: int | float | None
     target_title: str = Field(serialization_alias='targetTitle')
     available: bool
+    source: str | None = None
+    entity_id: str | None = Field(default=None, serialization_alias='entityId')
+    attrs: dict[str, AttrValue] | None = None
 
 
 class _MapPreviewStateResp(FrozenModel):
@@ -118,13 +144,15 @@ class _MapPreviewStateResp(FrozenModel):
     can_forward: bool = Field(serialization_alias='canForward')
     can_home: bool = Field(serialization_alias='canHome')
     read_only: bool = Field(serialization_alias='readOnly')
+    initial_mode: MapPreviewMode = Field(serialization_alias='initialMode')
 
 
 @dataclass(slots=True)
 class _MapPreviewPage:
     """One map opened during a browser map-preview session."""
 
-    map_info: LocalMap
+    map_info: MapInfo
+    title: str
     layout: routes.MapLayout
     selected: frozenset[str]
     room_counts: dict[str, int]
@@ -139,17 +167,22 @@ class MapPreview:
 
     def __init__(
         self,
-        map_info: LocalMap,
+        map_source: MapInfo | LoadedMap,
         layout: routes.MapLayout,
         *,
         first_clear_rooms: Iterable[str] = (),
         saved_route: routes.MapRoute | None = None,
         local_data: LocalDataStore | None = None,
-        mod: InstalledMod | None = None,
         enders_blender_save: routes.EndersBlenderSave | None = None,
         audit_entities: dict[str, tuple[routes.MapPreviewEntity, ...]] | None = None,
         read_only: bool = False,
+        initial_mode: MapPreviewMode = MapPreviewMode.REVIEW,
+        title: str | None = None,
+        dialogs: Mapping[str, Mapping[str, str]] | None = None,
+        level_side: tuple[Level, LevelSide] | None = None,
+        routable_maps: Mapping[str, tuple[Level, LevelSide]] | None = None,
     ) -> None:
+        map_info = map_source.info if isinstance(map_source, LoadedMap) else map_source
         self._enders_blender_save = enders_blender_save
         room_names = layout.room_names
         first_clear = tuple(first_clear_rooms)
@@ -157,6 +190,7 @@ class MapPreview:
         self._pages = [
             _MapPreviewPage(
                 map_info,
+                title or _map_title(map_info, dialogs or {}),
                 layout,
                 frozenset(room for room in defaults if room in room_names),
                 (
@@ -170,22 +204,21 @@ class MapPreview:
                 ),
                 frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear,
-                self._first_clear_room_deaths(map_info, layout),
-                self._first_clear_room_times(map_info, layout),
+                self._first_clear_room_deaths(map_info, layout, level_side),
+                self._first_clear_room_times(map_info, layout, level_side),
             )
         ]
         self._page_index = 0
         self._local_data = local_data
-        self._mod = mod
         self._audit_entities = audit_entities or {}
         self._read_only = read_only
-        self._maps_by_sid = (
-            {sid_for_map_file(item.file_path): item for item in mod.maps} if mod is not None else {}
-        )
+        self._initial_mode = MapPreviewMode.PREVIEW if read_only else initial_mode
+        self._dialogs = dialogs or {}
+        self._maps_by_sid = {} if routable_maps is None else dict(routable_maps)
         self._token = secrets.token_urlsafe(24)
-        self._result: asyncio.Future[routes.MapRoute | None] | None = None
+        self._result: asyncio.Future[None] | None = None
 
-    async def preview(self) -> routes.MapRoute | None:
+    async def preview(self) -> None:
         """Open the browser GUI and wait until it is closed or navigated back past its start."""
         self._result = asyncio.get_running_loop().create_future()
         app = web.Application()
@@ -247,10 +280,14 @@ class MapPreview:
 
     def _state_data(self) -> _MapPreviewStateResp:
         page = self._pages[self._page_index]
-        title = localized_name(page.map_info.names, ('zh-cn', 'en')) or page.map_info.fallback_name
         entrances: list[_PreviewEntranceResp] = []
         for entrance in () if self._read_only else page.layout.entrances:
-            target = self._maps_by_sid.get(entrance.target_sid)
+            target_level_side = self._maps_by_sid.get(entrance.target_sid)
+            target = (
+                target_level_side[0].maps_by_side[target_level_side[1]]
+                if target_level_side is not None
+                else None
+            )
             entrances.append(
                 _PreviewEntranceResp(
                     room=entrance.room,
@@ -260,15 +297,23 @@ class MapPreview:
                     width=entrance.width,
                     height=entrance.height,
                     target_title=(
-                        localized_name(target.names, ('zh-cn', 'en')) or target.fallback_name
-                        if target is not None
+                        map_display_name(
+                            target_level_side[0],
+                            target_level_side[1],
+                            self._dialogs,
+                            ('zh-cn', 'en'),
+                        )
+                        if target_level_side is not None
                         else entrance.target_sid
                     ),
                     available=target is not None,
+                    source=None if entrance.source is None else str(entrance.source),
+                    entity_id=entrance.element_name,
+                    attrs=None if entrance.attrs is None else dict(entrance.attrs),
                 )
             )
         return _MapPreviewStateResp(
-            title=title,
+            title=page.title,
             rooms=tuple(self._room_resp(room, page) for room in page.layout.rooms),
             selected=tuple(sorted(page.selected)),
             first_clear_rooms=page.first_clear_rooms,
@@ -277,6 +322,7 @@ class MapPreview:
             can_forward=self._page_index < len(self._pages) - 1,
             can_home=self._page_index > 0,
             read_only=self._read_only,
+            initial_mode=self._initial_mode,
         )
 
     def _room_resp(self, room: routes.MapRoom, page: _MapPreviewPage) -> _PreviewRoomResp:
@@ -338,11 +384,13 @@ class MapPreview:
         source_index = self._page_index
         source_map_file = page.map_info.file_path
         allowed = {entrance.target_sid for entrance in page.layout.entrances}
-        target = self._maps_by_sid.get(target_sid)
-        if target is None or target_sid not in allowed or self._mod is None:
+        target_level_side = self._maps_by_sid.get(target_sid)
+        if target_level_side is None or target_sid not in allowed:
             return web.json_response({'error': '此路由目标无法打开。'}, status=400)
+        target_level, target_side = target_level_side
+        target = target_level.maps_by_side[target_side]
         try:
-            layout = await asyncio.to_thread(routes.load_map_layout, self._mod, target)
+            layout = await asyncio.to_thread(routes.load_loaded_map_layout, target)
         except ValueError as error:
             return web.json_response({'error': str(error)}, status=400)
         if (
@@ -352,14 +400,14 @@ class MapPreview:
             return self._state_response()
         del self._pages[self._page_index + 1 :]
         first_clear_rooms = (
-            self._enders_blender_save.first_clear_room_order(target)
+            self._enders_blender_save.first_clear_room_order(target_level, target_side)
             if self._enders_blender_save is not None
             else ()
         )
         room_names = layout.room_names
         try:
             saved_route = (
-                self._local_data.load_route(target.file_path)
+                self._local_data.load_route(target.info.file_path.as_posix())
                 if self._local_data is not None
                 else None
             )
@@ -368,7 +416,8 @@ class MapPreview:
         defaults = saved_route.rooms if saved_route is not None else first_clear_rooms
         self._pages.append(
             _MapPreviewPage(
-                target,
+                target.info,
+                map_display_name(target_level, target_side, self._dialogs, ('zh-cn', 'en')),
                 layout,
                 frozenset(room for room in defaults if room in room_names),
                 (
@@ -382,8 +431,8 @@ class MapPreview:
                 ),
                 frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear_rooms,
-                self._first_clear_room_deaths(target, layout),
-                self._first_clear_room_times(target, layout),
+                self._first_clear_room_deaths(target.info, layout, target_level_side),
+                self._first_clear_room_times(target.info, layout, target_level_side),
             )
         )
         self._page_index += 1
@@ -419,7 +468,7 @@ class MapPreview:
         page.room_counts = room_counts
         page.excluded_entities = excluded_entities
         route = routes.MapRoute(
-            map_file=page.map_info.file_path,
+            map_file=page.map_info.file_path.as_posix(),
             rooms=tuple(room.name for room in page.layout.rooms if room.name in selected),
             room_counts=room_counts,
             excluded_entities=excluded_entities,
@@ -467,26 +516,50 @@ class MapPreview:
         )
 
     def _first_clear_room_deaths(
-        self, map_info: LocalMap, layout: routes.MapLayout
+        self,
+        map_info: MapInfo,
+        layout: routes.MapLayout,
+        level_side: tuple[Level, LevelSide] | None = None,
     ) -> dict[str, int]:
         if self._enders_blender_save is None:
             return {}
+        level, side = level_side or (None, None)
         return {
             room.name: death
             for room in layout.rooms
-            if (death := self._enders_blender_save.first_clear_room_death(map_info, room.name))
+            if (
+                death := (
+                    self._enders_blender_save.first_clear_room_death(level, side, room.name)
+                    if level is not None and side is not None
+                    else self._enders_blender_save.first_clear_room_death_for_file(
+                        map_info, room.name
+                    )
+                )
+            )
             is not None
         }
 
     def _first_clear_room_times(
-        self, map_info: LocalMap, layout: routes.MapLayout
+        self,
+        map_info: MapInfo,
+        layout: routes.MapLayout,
+        level_side: tuple[Level, LevelSide] | None = None,
     ) -> dict[str, int]:
         if self._enders_blender_save is None:
             return {}
+        level, side = level_side or (None, None)
         return {
             room.name: time.total_milliseconds
             for room in layout.rooms
-            if (time := self._enders_blender_save.first_clear_room_time(map_info, room.name))
+            if (
+                time := (
+                    self._enders_blender_save.first_clear_room_time(level, side, room.name)
+                    if level is not None and side is not None
+                    else self._enders_blender_save.first_clear_room_time_for_file(
+                        map_info, room.name
+                    )
+                )
+            )
             is not None
         }
 

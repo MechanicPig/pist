@@ -10,11 +10,8 @@ from pydantic import Field, PositiveInt, ValidationError, model_validator
 
 from pist.entities import classification, rules
 from pist.entities.map_entity_id import MapEntityID
-from pist.game import binmap
+from pist.game import binmap, content, dialog, levels, maps, saves
 from pist.game.duration import Duration
-from pist.game.mod_path import BadModPath, ModPath
-from pist.game.mods import InstalledMod, LocalMap
-from pist.game.saves import SAVE_EXT, SAVES_DIRNAME, sid_for_map_file
 from pist.map_entrances import (
     DEFAULT_MAP_ENTRANCE_RULES,
     MapEntranceRules,
@@ -77,6 +74,9 @@ class MapEntrance:
     y: binmap.NumericAttrValue | None = None
     width: binmap.NumericAttrValue | None = None
     height: binmap.NumericAttrValue | None = None
+    source: MapEntranceSource | None = None
+    element_name: str | None = None
+    attrs: Mapping[str, binmap.AttrValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,17 +186,35 @@ class EndersBlenderSave:
     first_clear_room_deaths: dict[str, dict[str, int]] = field(default_factory=dict)
     first_clear_room_times: dict[str, dict[str, Duration]] = field(default_factory=dict)
 
-    def first_clear_room_order(self, map_info: LocalMap) -> tuple[str, ...]:
+    def first_clear_room_order(
+        self, level: levels.Level, side: levels.LevelSide
+    ) -> tuple[str, ...]:
         """Return the recorded first-clear sequence for one map, if available."""
-        return self.first_clear_room_orders.get(_map_save_key(map_info), ())
+        return self.first_clear_room_orders.get(_map_save_key(level, side), ())
 
-    def first_clear_room_time(self, map_info: LocalMap, room: str) -> Duration | None:
+    def first_clear_room_time(
+        self, level: levels.Level, side: levels.LevelSide, room: str
+    ) -> Duration | None:
         """Return one room's recorded first-clear time, if available."""
-        return self.first_clear_room_times.get(_map_save_key(map_info), {}).get(room)
+        return self.first_clear_room_times.get(_map_save_key(level, side), {}).get(room)
 
-    def first_clear_room_death(self, map_info: LocalMap, room: str) -> int | None:
+    def first_clear_room_death(
+        self, level: levels.Level, side: levels.LevelSide, room: str
+    ) -> int | None:
         """Return one room's recorded first-clear death count, if available."""
-        return self.first_clear_room_deaths.get(_map_save_key(map_info), {}).get(room)
+        return self.first_clear_room_deaths.get(_map_save_key(level, side), {}).get(room)
+
+    def first_clear_room_time_for_file(self, map_info: maps.MapInfo, room: str) -> Duration | None:
+        """Return time for a raw preview map whose Level context is unavailable."""
+        return self.first_clear_room_times.get(_map_file_save_key(map_info), {}).get(room)
+
+    def first_clear_room_order_for_file(self, map_info: maps.MapInfo) -> tuple[str, ...]:
+        """Return room order for a raw preview map whose Level context is unavailable."""
+        return self.first_clear_room_orders.get(_map_file_save_key(map_info), ())
+
+    def first_clear_room_death_for_file(self, map_info: maps.MapInfo, room: str) -> int | None:
+        """Return deaths for a raw preview map whose Level context is unavailable."""
+        return self.first_clear_room_deaths.get(_map_file_save_key(map_info), {}).get(room)
 
 
 class _EndersBlenderData(ExternalModel):
@@ -224,7 +242,7 @@ class EndersBlenderReader:
     """Read Ender's Blender YAML saves without modifying the game files."""
 
     def __init__(self, game_dir: Path) -> None:
-        self._saves_dir = game_dir / SAVES_DIRNAME
+        self._saves_dir = saves.settings_dir(game_dir)
 
     def available_numbers(self) -> list[int]:
         """Return save slots that have an Ender's Blender persistent save."""
@@ -233,8 +251,8 @@ class EndersBlenderReader:
         prefix = '-modsave-EndersBlender'
         return sorted(
             int(number)
-            for path in self._saves_dir.glob(f'*{prefix}{SAVE_EXT}')
-            if (number := path.name.removesuffix(f'{prefix}{SAVE_EXT}')).isdigit()
+            for path in self._saves_dir.glob(f'*{prefix}{saves.SAVE_EXT}')
+            if (number := path.name.removesuffix(f'{prefix}{saves.SAVE_EXT}')).isdigit()
         )
 
     def load(self, number: int) -> EndersBlenderSave:
@@ -258,7 +276,7 @@ class EndersBlenderReader:
         )
 
     def _path(self, number: int) -> Path:
-        return self._saves_dir / f'{number}-modsave-{ENDERS_BLENDER_MOD_NAME}{SAVE_EXT}'
+        return self._saves_dir / f'{number}-modsave-{ENDERS_BLENDER_MOD_NAME}{saves.SAVE_EXT}'
 
 
 def map_layout(
@@ -282,19 +300,19 @@ def map_layout(
     return MapLayout(rooms, _map_entrances(levels, entrance_rules))
 
 
-def load_map_layout(mod: InstalledMod, map_info: LocalMap) -> MapLayout:
-    """Read one installed Mod map's room layout, including known trailing payloads."""
-    return load_map_layout_from_path(Path(mod.path), map_info.file_path)
+def load_loaded_map_layout(loaded_map: levels.LoadedMap) -> MapLayout:
+    """Read one active Game or Mod map through its typed content source."""
+    return map_layout(_load_loaded_map_bin(loaded_map))
 
 
-def load_map_layout_from_path(path: Path, map_file: str) -> MapLayout:
+def load_map_layout_from_path(path: Path, map_file: content.StrPath) -> MapLayout:
     """Read one map layout from a Mod archive, Mod directory, or Game Content directory."""
     return map_layout(_load_map_bin(path, map_file))
 
 
 def load_map_entity_record_source_from_path(
     path: Path,
-    map_file: str,
+    map_file: content.StrPath,
     collected: frozenset[MapEntityID],
     *,
     excluded_entities: frozenset[str] = frozenset(),
@@ -307,17 +325,45 @@ def load_map_entity_record_source_from_path(
     )
 
 
-def _load_map_bin(path: Path, map_file: str) -> binmap.BinMap:
+def load_loaded_map_entity_record_source(
+    loaded_map: levels.LoadedMap,
+    collected: frozenset[MapEntityID],
+    *,
+    excluded_entities: frozenset[str] = frozenset(),
+) -> MapEntityRecordSource:
+    """Read one active map once, retaining data needed for later rule refreshes."""
+    return MapEntityRecordSource(
+        _load_loaded_map_bin(loaded_map),
+        collected,
+        excluded_entities,
+    )
+
+
+def _load_loaded_map_bin(loaded_map: levels.LoadedMap) -> binmap.BinMap:
+    try:
+        with loaded_map.open_content() as root:
+            return _load_map_bin_entry(root, loaded_map.info.file_path)
+    except content.BadContentEntry as error:
+        raise ValueError(
+            f'Invalid content source for map: {loaded_map.info.file_path!r}'
+        ) from error
+
+
+def _load_map_bin(path: Path, map_file: content.StrPath) -> binmap.BinMap:
     """Read one map BIN from an archive, directory, or the Game Content directory."""
     try:
-        with ModPath(path) as mod_path:
-            map_path = mod_path.joinpath(map_file)
-            if not map_path.is_file():
-                raise ValueError(f'Map file does not exist in {path!r}: {map_file!r}')
-            map_data = binmap.parse_map_bin(map_path.read_bytes(), allow_trailing=True)
-    except BadModPath as error:
+        with content.ContentEntry(path) as mod_path:
+            map_data = _load_map_bin_entry(mod_path, map_file)
+    except content.BadContentEntry as error:
         raise ValueError(f'Invalid map package path: {path!r}') from error
     return map_data
+
+
+def _load_map_bin_entry(root: content.ContentEntry, map_file: content.StrPath) -> binmap.BinMap:
+    map_path = root.joinpath(map_file)
+    if not map_path.is_file():
+        raise ValueError(f'Map file does not exist in {root.root!r}: {map_file!r}')
+    return binmap.parse_map_bin(map_path.read_bytes(), allow_trailing=True)
 
 
 def _enders_blender_validation_error(path: Path, error: ValidationError) -> ValueError:
@@ -334,9 +380,15 @@ def _enders_blender_validation_error(path: Path, error: ValidationError) -> Valu
     return ValueError(f'Invalid Ender’s Blender {label}{suffix}: {detail["msg"]} in {path!r}')
 
 
-def _map_save_key(map_info: LocalMap) -> str:
-    sid = sid_for_map_file(map_info.file_path)
-    return f'{sid}_{map_info.side}' if map_info.side is not None else sid
+def _map_save_key(level: levels.Level, side: levels.LevelSide) -> str:
+    sid = saves.sid_for_level(level)
+    return f'{sid}_{side.value}' if side is not levels.LevelSide.A else sid
+
+
+def _map_file_save_key(map_info: maps.MapInfo) -> str:
+    base_file, side = dialog.split_map_side_suffix(map_info.file_path)
+    sid = saves.sid_for_map_file(base_file)
+    return f'{sid}_{side}' if side is not None else sid
 
 
 def _map_room(room: binmap.BinElement, entities: tuple[MapPreviewEntity, ...]) -> MapRoom:
@@ -398,7 +450,19 @@ def _map_entrances(
                     if rule.region.height is not None
                     else None
                 )
-                result.append(MapEntrance(room_name, target_sid, x, y, width, height))
+                result.append(
+                    MapEntrance(
+                        room_name,
+                        target_sid,
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        source=source,
+                        element_name=item.name,
+                        attrs=item.attrs,
+                    )
+                )
     return tuple(result)
 
 

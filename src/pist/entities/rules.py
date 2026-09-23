@@ -18,6 +18,7 @@ from tomlkit.items import Array, InlineTable
 
 from pist.game.binmap import AttrValue
 from pist.models import FrozenModel
+from pist.paths import PIST_DIR
 from pist.types import NonEmptyStr, StrippedNonEmptyStr
 
 
@@ -39,7 +40,7 @@ class EntityTableField(FrozenModel):
 
 SHARED_ENTITIES_PATH = Path(__file__).parent.parent / 'data' / 'entities.toml'
 SHARED_KINDS_PATH = Path(__file__).parent.parent / 'data' / 'kinds.toml'
-LOCAL_ENTITIES_PATH = Path('.pist/entities.toml')
+LOCAL_ENTITIES_PATH = PIST_DIR / 'entities.toml'
 
 
 class EntityKind(FrozenModel):

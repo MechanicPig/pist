@@ -1,0 +1,4 @@
+[[lobbies]]
+lobby = "CrossoverCollab/0-Lobbies/0-Lobby"
+side = "A"
+campaigns = ["CrossoverCollab/1-Submissions", "CrossoverCollab/2-Extras"]

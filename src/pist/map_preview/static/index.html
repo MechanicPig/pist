@@ -12,9 +12,8 @@
   <span id="count"></span>
   <span id="collectible-summary"></span>
   <fieldset id="mode">
-    <label><input type="radio" name="mode" value="review" checked>编辑路线</label>
-    <label><input type="radio" name="mode" value="navigate">地图路由</label>
-    <label><input type="radio" name="mode" value="collectibles">收集品校正</label>
+    <label><input type="radio" name="mode" value="review">编辑路线</label>
+    <label><input type="radio" name="mode" value="preview" checked>预览地图</label>
   </fieldset>
   <fieldset id="overlays">
     <label><input id="show-first-clear-route" type="checkbox" checked>初见路线</label>
@@ -35,11 +34,14 @@
   </aside>
 </main>
 <div id="status" hidden></div>
-<section id="entity-info" hidden>
-  <button id="entity-info-close" class="secondary">关闭</button>
-  <strong id="entity-info-id"></strong>
-  <span id="entity-info-source"></span>
-  <pre id="entity-info-attrs"></pre>
+<section id="map-object-info" hidden>
+  <div id="map-object-info-header">
+    <strong id="map-object-info-id"></strong>
+    <button id="map-object-info-close" class="secondary">关闭</button>
+  </div>
+  <span id="map-object-info-source"></span>
+  <pre id="map-object-info-attrs"></pre>
+  <div id="map-object-info-actions"></div>
 </section>
 <script src="assets/map_preview.js"></script>
 </body>

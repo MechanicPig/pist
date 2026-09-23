@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text
@@ -14,9 +14,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, ListItem, ListView, Static
 
 from pist.entities.audit import AuditMapOccurrences, AuditSource, RawEntityOccurrence
-from pist.game.dialog import dialog_key_for_map_file
 from pist.game.map_source import MapSource
-from pist.game.mods import LocalMap
+from pist.game.maps import MapInfo
 from pist.game.routes import MapLayout, MapPreviewEntity, load_map_layout_from_path
 
 OCCURRENCE_MAP_LIST_ID = 'occurrence-map-list'
@@ -110,7 +109,7 @@ class OccurrenceScreen(ModalScreen[None]):
         self.dismiss()
 
 
-def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[LocalMap, MapLayout]:
+def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[MapInfo, MapLayout]:
     """Locate one immutable audit source without rescanning or decoding other maps."""
     map_file = source.map_file
     match source.scope:
@@ -124,11 +123,7 @@ def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[LocalMap, 
             raise ValueError(f'不支持预览此审计来源：{source.scope}')
     if not root.exists():
         raise ValueError(f'地图包已不存在：{root}')
-    try:
-        dialog_key = dialog_key_for_map_file(map_file)
-    except ValueError:
-        dialog_key = PurePosixPath(map_file).stem
-    map_info = LocalMap(file_path=map_file, dialog_key=dialog_key, names={'en': source.map_name})
+    map_info = MapInfo(file_path=map_file)
     return map_info, load_map_layout_from_path(root, map_file)
 
 

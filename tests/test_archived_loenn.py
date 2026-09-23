@@ -2,7 +2,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from pist.archive.loenn import LoennMod, load_loenn_registry
-from pist.game.mod_path import ModPath
+from pist.game.content import ContentEntry
 
 
 def test_registry_reads_localized_entity_placement_from_zip_mod(tmp_path: Path) -> None:
@@ -24,7 +24,7 @@ return strawberry
             'Golden Strawberry (Grabless)\n',
         )
 
-    with ModPath(mod_path) as mod:
+    with ContentEntry(mod_path) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Jungle Helper')])
 
     placements = registry.placements_for('JungleHelper/TreeDepthController')
@@ -52,7 +52,7 @@ return entity
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.display_names_for('TestHelper/Entity') == ('test',)
@@ -80,7 +80,7 @@ return entity
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.placements_for('TestHelper/Single')[0].attrs == {'moon': True}
@@ -101,7 +101,7 @@ return entity
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.placements_for('TestHelper/Entity')[0].attrs == {'moon': True}
@@ -121,7 +121,7 @@ return {
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.placements_for('TestHelper/Entity')[0].attrs == {'moon': True}
@@ -143,7 +143,7 @@ return {create_handler('TestHelper/First'), create_handler('TestHelper/Second')}
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.display_names_for('TestHelper/First') == ('normal',)
@@ -168,7 +168,7 @@ return entity
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     placements = registry.placements_for('TestHelper/Cassette')
@@ -203,7 +203,7 @@ return gate
     lunatic_dir = tmp_path / 'LunaticHelper'
     lunatic_dir.mkdir()
 
-    with ModPath(helping_hand_dir) as helping_hand, ModPath(lunatic_dir) as lunatic:
+    with ContentEntry(helping_hand_dir) as helping_hand, ContentEntry(lunatic_dir) as lunatic:
         registry = load_loenn_registry(
             [
                 LoennMod(helping_hand, 'MaxHelpingHand'),
@@ -231,7 +231,7 @@ return strawberry
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     placements = registry.placements_for('TestHelper/TrollStrawberry')
@@ -284,7 +284,7 @@ return entity
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.placements_for('TestHelper/DynamicEntity') == ()
@@ -300,7 +300,7 @@ def test_registry_reads_a_legacy_encoded_lua_file(tmp_path: Path) -> None:
             b"entity.placements = {{name = 'default'}}\nreturn entity\n",
         )
 
-    with ModPath(mod_path) as mod:
+    with ContentEntry(mod_path) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.display_names_for('TestHelper/LegacyEntity') == ('default',)
@@ -319,7 +319,7 @@ def test_registry_skips_lua_that_loenn_cannot_parse(tmp_path: Path) -> None:
         encoding='utf-8',
     )
 
-    with ModPath(mod_dir) as mod:
+    with ContentEntry(mod_dir) as mod:
         registry = load_loenn_registry([LoennMod(mod, 'Test Helper')])
 
     assert registry.placements_for('TestHelper/Broken') == ()

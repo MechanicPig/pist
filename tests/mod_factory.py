@@ -1,8 +1,11 @@
 """Factories for physical Mod packages in tests."""
 
+from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, Unpack
 
-from pist.game.mods import Dependency, EverestModMetadata, InstalledMod, LocalCampaign, LocalMap
+from pist.game.everest import Dependency, EverestModMetadata, Version
+from pist.game.maps import MapInfo
+from pist.game.mods import DirMod, ScannedMod, ZipMod
 
 
 class InstalledModArgs(TypedDict):
@@ -10,11 +13,10 @@ class InstalledModArgs(TypedDict):
 
     source: Literal['zip', 'directory']
     filename: str
-    path: str
+    path: str | Path
     collab_id: NotRequired[str | None]
-    map_files: NotRequired[list[str]]
-    maps: NotRequired[list[LocalMap]]
-    campaigns: NotRequired[list[LocalCampaign]]
+    dialogs: NotRequired[dict[str, dict[str, str]]]
+    maps: NotRequired[list[MapInfo]]
 
 
 def make_installed_mod(
@@ -24,18 +26,19 @@ def make_installed_mod(
     dependencies: list[Dependency] | None = None,
     optional_dependencies: list[Dependency] | None = None,
     **kwargs: Unpack[InstalledModArgs],
-) -> InstalledMod:
+) -> ScannedMod:
     """Build a one-entry manifest for tests unrelated to manifest parsing."""
-    return InstalledMod(
-        **kwargs,
-        manifest=(
-            EverestModMetadata(
-                name=metadata_name,
-                version=metadata_version,
-                dependencies=[] if dependencies is None else dependencies,
-                optional_dependencies=[]
-                if optional_dependencies is None
-                else optional_dependencies,
-            ),
+    source = kwargs.pop('source')
+    kwargs['path'] = Path(kwargs['path'])
+    fields = dict(kwargs)
+    fields['manifest'] = (
+        EverestModMetadata(
+            name=metadata_name,
+            version=None if metadata_version is None else Version.parse(metadata_version),
+            dependencies=[] if dependencies is None else dependencies,
+            optional_dependencies=[] if optional_dependencies is None else optional_dependencies,
         ),
     )
+    if source == 'zip':
+        return ZipMod.model_validate(fields)
+    return DirMod.model_validate(fields)

@@ -10,10 +10,11 @@ from pydantic import Field, ValidationError, model_validator
 
 from pist.game.binmap import AttrValue, NumericAttrValue
 from pist.models import FrozenModel
+from pist.paths import PIST_DIR
 from pist.types import NonEmptyStr
 
 SHARED_MAP_ENTRANCES_PATH = Path(__file__).parent / 'data' / 'map_entrances.toml'
-LOCAL_MAP_ENTRANCES_PATH = Path('.pist/map_entrances.toml')
+LOCAL_MAP_ENTRANCES_PATH = PIST_DIR / 'map_entrances.toml'
 
 
 class MapEntranceSource(StrEnum):

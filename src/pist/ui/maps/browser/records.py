@@ -1,4 +1,4 @@
-"""Record editing and record-specific dialogs for the Mod browser."""
+"""Record editing and record-specific dialogs for the map browser."""
 
 from calendar import monthrange
 from collections.abc import Callable, Mapping
@@ -539,8 +539,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             self.notify('日期请使用 YYYY-MM-DD 格式。', severity='warning')
             return
         event.stop()
-        self.call_after_refresh(
-            self.app.push_screen,
+        self.app.push_screen(
             DatePickerScreen(selected),
             lambda value: self._set_date_value(field_id, value),
         )

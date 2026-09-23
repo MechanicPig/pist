@@ -11,10 +11,13 @@ def test_package_loads() -> None:
     assert __doc__
 
 
-def test_mod_browse_defaults_to_save_slot_zero() -> None:
-    args = build_parser().parse_args(['mods', 'browse'])
+def test_map_browse_defaults_to_save_slot_zero() -> None:
+    parser = build_parser()
+    args = parser.parse_args(['maps', 'browse'])
 
     assert args.save_slot == 0
+    with pytest.raises(SystemExit):
+        parser.parse_args(['mods', 'browse'])
 
 
 def test_saved_record_sync_requires_an_explicit_write_mode() -> None:

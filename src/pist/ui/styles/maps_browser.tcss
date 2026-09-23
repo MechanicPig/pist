@@ -2,10 +2,54 @@ Horizontal {
     height: 1fr;
 }
 
-#mod-tree {
+#campaign-panel {
     width: 40%;
     border: round $primary;
     background: transparent;
+}
+
+#campaign-list {
+    height: 1fr;
+}
+
+#campaign-list-header {
+    height: auto;
+    padding: 1 1;
+}
+
+#campaign-list-title {
+    width: 1fr;
+    color: #58d1eb;
+    text-style: bold;
+}
+
+#campaign-list-title:light {
+    color: #0083b2;
+}
+
+.campaign-list-controls {
+    width: 4;
+    height: 1;
+}
+
+.campaign-list-toggle {
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    color: #58d1eb;
+    pointer: pointer;
+}
+
+.campaign-list-toggle:light {
+    color: #0083b2;
+}
+
+.campaign-list-toggle.-hidden {
+    visibility: hidden;
+}
+
+#campaign-list > ListItem {
+    padding: 1 1;
 }
 
 #detail-scroll {
@@ -25,21 +69,92 @@ Horizontal {
     height: auto;
 }
 
-.campaign-section > Contents {
-    padding-left: 3;
-}
-
-.campaign-detail {
-    height: auto;
-}
-
-.campaign-header {
-    height: auto;
-}
-
 .map-list {
     height: auto;
     background: transparent;
+}
+
+.side-map-item {
+    position: relative;
+}
+
+.map-side-controls {
+    dock: right;
+    width: 4;
+    height: 1;
+}
+
+.map-side-button {
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    pointer: pointer;
+}
+
+.map-side-button.-hidden {
+    visibility: hidden;
+}
+
+.lobby-map-item {
+    position: relative;
+    layers: content toggle;
+    height: auto;
+}
+
+.lobby-map-toggle {
+    position: absolute;
+    layer: toggle;
+    offset: 0 0;
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    pointer: pointer;
+}
+
+.map-item-title,
+.lobby-map-toggle {
+    color: #58d1eb;
+}
+
+.map-item-title:light,
+.lobby-map-toggle:light {
+    color: #0083b2;
+}
+
+.lobby-map-item > .map-item-title,
+.lobby-map-item > .map-item-content,
+.lobby-map-item > .lobby-maps {
+    layer: content;
+}
+
+.lobby-map-item.-collapsed > .lobby-maps {
+    display: none;
+}
+
+.lobby-map-item > .lobby-maps {
+    height: auto;
+    padding-left: 3;
+}
+
+.lobby-map-item.-highlight > .lobby-maps {
+    background: $surface;
+    color: $foreground;
+    text-style: not bold;
+}
+
+.lobby-map-item.-highlight > .lobby-maps .map-list {
+    color: $foreground;
+    text-style: not bold;
+}
+
+.lobby-map-item > .lobby-maps .map-item-title,
+.lobby-map-item > .lobby-maps .map-item-content {
+    text-style: not bold;
+}
+
+.lobby-map-item > .lobby-maps .map-list:focus > ListItem.-highlight .map-item-title,
+.lobby-map-item > .lobby-maps .map-list:focus > ListItem.-highlight .map-item-content {
+    text-style: bold;
 }
 
 .collab-map-list {
@@ -58,8 +173,62 @@ Horizontal {
     margin-right: 1;
 }
 
-DatePickerScreen, RecordReferenceScreen, RecordEditorScreen, AuthorSelectionScreen {
+DatePickerScreen, RecordReferenceScreen, RecordEditorScreen, AuthorSelectionScreen,
+LobbyCampaignEditorScreen {
     align: center middle;
+}
+
+MapActionScreen {
+    align: left top;
+    background: transparent;
+}
+
+#map-action-dialog {
+    width: 28;
+    height: auto;
+    border: none;
+    outline: solid $primary;
+    padding: 0;
+    background: $surface;
+}
+
+#map-action-dialog > Button {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+    text-align: left;
+    content-align: left middle;
+}
+
+#lobby-campaign-editor-dialog {
+    width: 75%;
+    height: 75%;
+    border: tall $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#lobby-campaign-editor-dialog > .dialog-title {
+    text-style: bold;
+}
+
+#lobby-campaign-selection {
+    height: 1fr;
+    margin-top: 1;
+    border: round $accent;
+}
+
+#lobby-campaign-editor-actions {
+    height: auto;
+    align: right middle;
+    padding-top: 1;
+}
+
+#lobby-campaign-editor-actions > Button {
+    margin-left: 1;
 }
 
 #date-picker {

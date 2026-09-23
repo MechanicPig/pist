@@ -7,7 +7,8 @@ from aiohttp import ClientSession, web
 
 from pist.entities.rules import EntityStat
 from pist.game.duration import Duration
-from pist.game.mods import LocalMap
+from pist.game.levels import Level, LevelSide, LoadedModMap
+from pist.game.maps import MapInfo
 from pist.game.routes import (
     EndersBlenderSave,
     MapEntrance,
@@ -17,7 +18,8 @@ from pist.game.routes import (
     MapRoute,
 )
 from pist.local_data import LocalDataStore
-from pist.map_preview import MapPreview
+from pist.map_entrances import MapEntranceSource
+from pist.map_preview import MapPreview, MapPreviewMode
 from pist.map_preview import server as map_preview_server
 from tests.mod_factory import make_installed_mod
 
@@ -33,7 +35,7 @@ class _Request:
 
 def test_map_preview_rejects_invalid_browser_requests() -> None:
     preview = MapPreview(
-        LocalMap(file_path='Maps/Test.bin', dialog_key='Test'),
+        MapInfo(file_path='Maps/Test.bin'),
         MapLayout((MapRoom('room', 0, 0, 8, 8),)),
     )
 
@@ -52,11 +54,7 @@ def test_map_preview_rejects_invalid_browser_requests() -> None:
 
 
 def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> None:
-    map_info = LocalMap(
-        file_path='Maps/Author/Pack/Map.bin',
-        dialog_key='Author_Pack_Map',
-        names={'en': 'Map'},
-    )
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     preview = MapPreview(
         map_info,
         MapLayout(
@@ -76,13 +74,14 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
             (MapEntrance('start', 'Author/Pack/Target', 16, 24, 32, 24),),
         ),
         first_clear_rooms=('start',),
-        saved_route=MapRoute(map_file=map_info.file_path, rooms=('start',)),
+        saved_route=MapRoute(map_file=map_info.file_path.as_posix(), rooms=('start',)),
         enders_blender_save=EndersBlenderSave(
             0,
             {},
             {'Author/Pack/Map': {'start': 2}},
             {'Author/Pack/Map': {'start': Duration.from_milliseconds(2_550)}},
         ),
+        title='Map',
     )
 
     response = asyncio.run(preview._state(cast(web.Request, _Request({}))))
@@ -90,6 +89,7 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
     state = json.loads(response.text)
 
     assert state['title'] == 'Map'
+    assert state['initialMode'] == 'review'
     assert state['selected'] == ['start']
     assert state['firstClearRooms'] == ['start']
     assert state['rooms'][0]['firstClearDeath'] == 2
@@ -106,7 +106,7 @@ def test_map_preview_state_includes_tiles_markers_and_initial_selection() -> Non
 
 
 def test_map_preview_state_exposes_configured_marker_sprite() -> None:
-    map_info = LocalMap(file_path='Maps/Test.bin', dialog_key='Test', names={'en': 'Test'})
+    map_info = MapInfo(file_path='Maps/Test.bin')
     preview = MapPreview(
         map_info,
         MapLayout(
@@ -148,7 +148,7 @@ def test_map_preview_state_exposes_configured_marker_sprite() -> None:
 
 
 def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None:
-    map_info = LocalMap(file_path='Maps/Test.bin', dialog_key='Test', names={'en': 'Test'})
+    map_info = MapInfo(file_path='Maps/Test.bin')
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
         map_info,
@@ -156,7 +156,9 @@ def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None
             (MapRoom('room', 0, 0, 8, 8, entities=(MapPreviewEntity(4, 4, 'seed', key='seed'),)),)
         ),
         saved_route=MapRoute(
-            map_file=map_info.file_path, rooms=(), excluded_entities=frozenset({'seed'})
+            map_file=map_info.file_path.as_posix(),
+            rooms=(),
+            excluded_entities=frozenset({'seed'}),
         ),
         local_data=local_data,
     )
@@ -171,7 +173,7 @@ def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None
         return data['rooms'][0]['entities']
 
     entities = asyncio.run(check())
-    route = local_data.load_route(map_info.file_path)
+    route = local_data.load_route(map_info.file_path.as_posix())
 
     assert entities == [{'x': 4, 'y': 4, 'kind': 'seed', 'key': 'seed', 'excluded': True}]
     assert route is not None
@@ -179,7 +181,7 @@ def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None
 
 
 def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
-    map_info = LocalMap(file_path='Maps/Test.bin', dialog_key='Test', names={'en': 'Test'})
+    map_info = MapInfo(file_path='Maps/Test.bin')
     preview = MapPreview(
         map_info,
         MapLayout(
@@ -216,7 +218,9 @@ def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
             )
         ),
         saved_route=MapRoute(
-            map_file=map_info.file_path, rooms=(), excluded_entities=frozenset({'extra'})
+            map_file=map_info.file_path.as_posix(),
+            rooms=(),
+            excluded_entities=frozenset({'extra'}),
         ),
     )
 
@@ -234,11 +238,7 @@ def test_map_preview_state_exposes_collectible_summary_inputs() -> None:
 
 
 def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() -> None:
-    map_info = LocalMap(
-        file_path='Maps/Author/Pack/Map.bin',
-        dialog_key='Author_Pack_Map',
-        names={'en': 'Map'},
-    )
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     preview = MapPreview(
         map_info,
         MapLayout(
@@ -254,6 +254,7 @@ def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() 
     state = json.loads(response.text)
 
     assert state['readOnly'] is True
+    assert state['initialMode'] == 'preview'
     assert state['entrances'] == []
     assert state['rooms'][0]['entities'] == [
         {'x': 8, 'y': 16, 'kind': 'strawberry'},
@@ -267,8 +268,59 @@ def test_read_only_map_preview_marks_audited_entities_without_exposing_routes() 
     assert asyncio.run(check()) == 400
 
 
+def test_preview_mode_exposes_routes_and_can_save_edits() -> None:
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
+    preview = MapPreview(
+        map_info,
+        MapLayout(
+            (MapRoom('start', 0, 0, 320, 184),),
+            (
+                MapEntrance(
+                    'start',
+                    'Author/Pack/Target',
+                    x=16,
+                    y=24,
+                    width=32,
+                    height=24,
+                    source=MapEntranceSource.TRIGGER,
+                    element_name='CollabUtils2/ChapterPanelTrigger',
+                    attrs={'map': 'Author/Pack/Target'},
+                ),
+            ),
+        ),
+        initial_mode=MapPreviewMode.PREVIEW,
+    )
+
+    async def check() -> tuple[dict[str, object], int]:
+        state_response = await preview._state(cast(web.Request, _Request({})))
+        assert state_response.text is not None
+        save_response = await preview._save(cast(web.Request, _Request({'rooms': ['start']})))
+        return json.loads(state_response.text), save_response.status
+
+    state, save_status = asyncio.run(check())
+
+    assert state['readOnly'] is False
+    assert state['initialMode'] == 'preview'
+    assert state['entrances'] == [
+        {
+            'room': 'start',
+            'targetSid': 'Author/Pack/Target',
+            'x': 16,
+            'y': 24,
+            'width': 32,
+            'height': 24,
+            'targetTitle': 'Author/Pack/Target',
+            'available': False,
+            'source': 'trigger',
+            'entityId': 'CollabUtils2/ChapterPanelTrigger',
+            'attrs': {'map': 'Author/Pack/Target'},
+        }
+    ]
+    assert save_status == 200
+
+
 def test_map_preview_save_validates_rooms_and_persists_layout_order(tmp_path) -> None:
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
         map_info,
@@ -282,15 +334,15 @@ def test_map_preview_save_validates_rooms_and_persists_layout_order(tmp_path) ->
         return invalid.status
 
     status = asyncio.run(check())
-    route = local_data.load_route(map_info.file_path)
+    route = local_data.load_route(map_info.file_path.as_posix())
 
     assert status == 400
     assert route is not None
-    assert route == MapRoute(map_file=map_info.file_path, rooms=('start', 'goal'))
+    assert route == MapRoute(map_file=map_info.file_path.as_posix(), rooms=('start', 'goal'))
 
 
 def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
         map_info,
@@ -307,11 +359,11 @@ def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
         )
 
     asyncio.run(check())
-    route = local_data.load_route(map_info.file_path)
+    route = local_data.load_route(map_info.file_path.as_posix())
 
     assert route is not None
     assert route == MapRoute(
-        map_file=map_info.file_path,
+        map_file=map_info.file_path.as_posix(),
         rooms=('start', 'goal'),
         room_counts={'start': 2},
     )
@@ -319,7 +371,7 @@ def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
 
 
 def test_map_preview_rejects_non_positive_explicit_room_count(tmp_path) -> None:
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     preview = MapPreview(
         map_info,
         MapLayout((MapRoom('start', 0, 0, 320, 184),)),
@@ -336,7 +388,7 @@ def test_map_preview_rejects_non_positive_explicit_room_count(tmp_path) -> None:
 
 
 def test_map_preview_abandon_cancels_an_open_preview() -> None:
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     preview = MapPreview(map_info, MapLayout(()))
 
     async def check() -> None:
@@ -348,9 +400,7 @@ def test_map_preview_abandon_cancels_an_open_preview() -> None:
 
 
 def test_map_preview_serves_packaged_game_assets() -> None:
-    preview = MapPreview(
-        LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map'), MapLayout(())
-    )
+    preview = MapPreview(MapInfo(file_path='Maps/Author/Pack/Map.bin'), MapLayout(()))
     response = asyncio.run(
         preview._game_asset(cast(web.Request, _Request({}, match_info={'name': 'strawberry.png'})))
     )
@@ -373,40 +423,59 @@ def test_map_preview_serves_only_safe_local_configured_sprites(tmp_path, monkeyp
 
 
 def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, monkeypatch) -> None:
-    source = LocalMap(
-        file_path='Maps/Author/Pack/Source.bin',
-        dialog_key='Author_Pack_Source',
-        names={'en': 'Source'},
-    )
-    target = LocalMap(
-        file_path='Maps/Author/Pack/Target.bin',
-        dialog_key='Author_Pack_Target',
-        names={'en': 'Target'},
-    )
-    mod = make_installed_mod(
+    source = MapInfo(file_path='Maps/Author/Pack/Source.bin')
+    target = MapInfo(file_path='Maps/Author/Pack/Target.bin')
+    source_mod = make_installed_mod(
         source='directory',
-        filename='Mod',
-        path='Mod',
-        metadata_name='Mod',
+        filename='SourceMod',
+        path='SourceMod',
+        metadata_name='SourceMod',
         metadata_version=None,
-        maps=[source, target],
+        maps=[source],
+    )
+    target_mod = make_installed_mod(
+        source='directory',
+        filename='TargetMod',
+        path='TargetMod',
+        metadata_name='TargetMod',
+        metadata_version=None,
+        maps=[target],
     )
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
-    local_data.save_route(MapRoute(map_file=target.file_path, rooms=('saved',)))
+    local_data.save_route(MapRoute(map_file=target.file_path.as_posix(), rooms=('saved',)))
     preview = MapPreview(
-        source,
+        LoadedModMap(source, source_mod),
         MapLayout(
             (MapRoom('lobby', 0, 0, 320, 184),), (MapEntrance('lobby', 'Author/Pack/Target'),)
         ),
-        mod=mod,
         local_data=local_data,
         enders_blender_save=EndersBlenderSave(0, {'Author/Pack/Target': ('target',)}),
+        dialogs={
+            'en': {
+                'Author_Pack_Source': 'Source',
+                'Author_Pack_Target': 'Target',
+            }
+        },
+        routable_maps={
+            'Author/Pack/Target': (
+                Level(
+                    sid='Author/Pack/Target',
+                    dialog_key='Author_Pack_Target',
+                    maps_by_side={LevelSide.A: LoadedModMap(target, target_mod)},
+                ),
+                LevelSide.A,
+            )
+        },
     )
+    loaded_targets: list[LoadedModMap] = []
+
+    def load_target(loaded_map: LoadedModMap) -> MapLayout:
+        loaded_targets.append(loaded_map)
+        return MapLayout((MapRoom('target', 0, 0, 320, 184), MapRoom('saved', 400, 0, 320, 184)))
+
     monkeypatch.setattr(
-        'pist.map_preview.server.routes.load_map_layout',
-        lambda _mod, _map: MapLayout(
-            (MapRoom('target', 0, 0, 320, 184), MapRoom('saved', 400, 0, 320, 184))
-        ),
+        'pist.map_preview.server.routes.load_loaded_map_layout',
+        load_target,
     )
 
     async def check() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
@@ -433,10 +502,69 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
     assert backed['canBack'] is False
     assert backed['canForward'] is True
     assert forwarded['title'] == 'Target'
+    assert loaded_targets
+    assert all(loaded_target.mod is target_mod for loaded_target in loaded_targets)
+
+
+def test_map_preview_uses_runtime_level_key_for_linked_isolated_side(tmp_path, monkeypatch) -> None:
+    source = MapInfo(file_path='Maps/Author/Pack/Source.bin')
+    target = MapInfo(file_path='Maps/Author/Pack/Target-B.bin')
+    source_mod = make_installed_mod(
+        source='directory',
+        filename='SourceMod',
+        path='SourceMod',
+        metadata_name='SourceMod',
+        metadata_version=None,
+        maps=[source],
+    )
+    target_mod = make_installed_mod(
+        source='directory',
+        filename='TargetMod',
+        path='TargetMod',
+        metadata_name='TargetMod',
+        metadata_version=None,
+        maps=[target],
+    )
+    target_level = Level(
+        sid='Author/Pack/Target-B',
+        dialog_key='Author_Pack_Target_B',
+        maps_by_side={LevelSide.A: LoadedModMap(target, target_mod)},
+    )
+    preview = MapPreview(
+        LoadedModMap(source, source_mod),
+        MapLayout(
+            (MapRoom('lobby', 0, 0, 320, 184),),
+            (MapEntrance('lobby', target_level.sid),),
+        ),
+        enders_blender_save=EndersBlenderSave(
+            0,
+            {target_level.sid: ('target',)},
+            {target_level.sid: {'target': 4}},
+            {target_level.sid: {'target': Duration.from_milliseconds(2500)}},
+        ),
+        dialogs={'en': {'Author_Pack_Target_B': 'Isolated Side'}},
+        routable_maps={target_level.sid: (target_level, LevelSide.A)},
+    )
+    monkeypatch.setattr(
+        'pist.map_preview.server.routes.load_loaded_map_layout',
+        lambda _: MapLayout((MapRoom('target', 0, 0, 320, 184),)),
+    )
+
+    response = asyncio.run(
+        preview._open(cast(web.Request, _Request({'targetSid': target_level.sid})))
+    )
+
+    assert response.text is not None
+    opened = json.loads(response.text)
+    assert opened['title'] == 'Isolated Side'
+    assert opened['selected'] == ['target']
+    assert opened['firstClearRooms'] == ['target']
+    assert opened['rooms'][0]['firstClearDeath'] == 4
+    assert opened['rooms'][0]['firstClearTime'] == 2500
 
 
 def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, monkeypatch) -> None:
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    map_info = MapInfo(file_path='Maps/Author/Pack/Map.bin')
     local_data = LocalDataStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
         map_info,
@@ -470,6 +598,6 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, mo
         return await task
 
     assert asyncio.run(check()) is None
-    assert local_data.load_route(map_info.file_path) == MapRoute(
-        map_file=map_info.file_path, rooms=('goal',)
+    assert local_data.load_route(map_info.file_path.as_posix()) == MapRoute(
+        map_file=map_info.file_path.as_posix(), rooms=('goal',)
     )

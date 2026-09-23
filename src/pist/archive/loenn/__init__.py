@@ -11,7 +11,7 @@ from zipfile import BadZipFile
 from luaparser.ast import SyntaxException
 
 from pist.game.binmap import AttrValue
-from pist.game.mod_path import ModPath, iter_files
+from pist.game.content import ContentEntry, iter_files
 
 from .eval import LuaKey, LuaModule, LuaTable, LuaValue, evaluate
 from .selene import SeleneSyntaxError, preprocess
@@ -43,7 +43,7 @@ class LoennPlacement:
 class LoennMod:
     """One validated Mod package and its Everest metadata name."""
 
-    path: ModPath
+    path: ContentEntry
     metadata_name: str
 
 
@@ -225,7 +225,7 @@ def _read_mod_placements(
     return tuple(placements), tuple(warnings)
 
 
-def _read_display_names(loenn_dir: ModPath, *, language: str) -> dict[str, str]:
+def _read_display_names(loenn_dir: ContentEntry, *, language: str) -> dict[str, str]:
     lang_dir = _find_child(loenn_dir, LOENN_LANG_DIRNAME)
     if lang_dir is None:
         return {}
@@ -371,13 +371,13 @@ def _format_mod_names(mod_names: Iterable[str], labels: Mapping[str, str]) -> st
     )
 
 
-def _find_child(root: ModPath, name: str) -> ModPath | None:
+def _find_child(root: ContentEntry, name: str) -> ContentEntry | None:
     if not root.is_dir():
         return None
     return next((path for path in root.iterdir() if path.name.casefold() == name.casefold()), None)
 
 
-def _read_loenn_text(path: ModPath) -> str:
+def _read_loenn_text(path: ContentEntry) -> str:
     """Read Mod-provided Loenn metadata without rejecting legacy ANSI files."""
     data = path.read_bytes()
     for encoding in ('utf-8-sig', 'gb18030', 'cp1252'):

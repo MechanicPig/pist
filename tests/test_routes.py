@@ -8,17 +8,19 @@ from pist.entities.classification import map_entity_stats
 from pist.entities.rules import EntityRules, EntityStat, load_entity_rule_layers
 from pist.game.binmap import BinElement, BinMap
 from pist.game.duration import Duration
-from pist.game.mods import LocalMap
+from pist.game.levels import LoadedModMap
+from pist.game.maps import MapInfo
 from pist.game.routes import (
     EndersBlenderReader,
     MapEntrance,
     MapPreviewEntity,
     MapRoute,
-    load_map_layout,
+    load_loaded_map_layout,
     map_layout,
 )
 from pist.local_data import LocalDataStore
-from pist.map_entrances import load_map_entrance_rule_layers
+from pist.map_entrances import MapEntranceSource, load_map_entrance_rule_layers
+from tests.map_factory import make_level_side
 from tests.mod_factory import make_installed_mod
 
 
@@ -270,8 +272,34 @@ def test_map_layout_extracts_collab_route_links() -> None:
     )
 
     assert map_layout(map_data).entrances == (
-        MapEntrance('lobby', 'Author/Pack/SmallMap', 136, 8, 48, 32),
-        MapEntrance('lobby', 'Author/Pack/Target', 80, 40, 32, 24),
+        MapEntrance(
+            'lobby',
+            'Author/Pack/SmallMap',
+            136,
+            8,
+            48,
+            32,
+            MapEntranceSource.ENTITY,
+            'SJ2021/StrawberryJamJar',
+            {'map': 'Author/Pack/SmallMap', 'x': 160, 'y': 40},
+        ),
+        MapEntrance(
+            'lobby',
+            'Author/Pack/Target',
+            80,
+            40,
+            32,
+            24,
+            MapEntranceSource.TRIGGER,
+            'CollabUtils2/ChapterPanelTrigger',
+            {
+                'map': 'Author/Pack/Target',
+                'x': 80,
+                'y': 40,
+                'width': 32,
+                'height': 24,
+            },
+        ),
     )
 
 
@@ -339,20 +367,15 @@ mapDict_roomStat_firstClear_timer:
 
     assert reader.available_numbers() == [2]
     assert save.first_clear_room_order(
-        LocalMap(file_path='Maps/Author/Pack/Map-B.bin', dialog_key='Map', side='B')
+        *make_level_side(file_path='Maps/Author/Pack/Map-B.bin')
     ) == ('start', 'middle', 'goal')
-    assert (
-        save.first_clear_room_order(
-            LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Map')
-        )
-        == ()
-    )
+    assert save.first_clear_room_order(*make_level_side(file_path='Maps/Author/Pack/Map.bin')) == ()
     assert save.first_clear_room_order(
-        LocalMap(file_path='Maps/Author/Pack/Numbers.bin', dialog_key='Numbers')
+        *make_level_side(file_path='Maps/Author/Pack/Numbers.bin')
     ) == ('0', '1')
-    map_info = LocalMap(file_path='Maps/Author/Pack/Map-B.bin', dialog_key='Map', side='B')
-    assert save.first_clear_room_death(map_info, 'start') == 4
-    assert save.first_clear_room_time(map_info, 'start') == Duration.from_milliseconds(2550)
+    level, side = make_level_side(file_path='Maps/Author/Pack/Map-B.bin')
+    assert save.first_clear_room_death(level, side, 'start') == 4
+    assert save.first_clear_room_time(level, side, 'start') == Duration.from_milliseconds(2550)
 
 
 def test_enders_blender_reader_rejects_invalid_room_orders(tmp_path: Path) -> None:
@@ -401,7 +424,7 @@ def test_enders_blender_reader_preserves_invalid_value_locations(
     assert isinstance(info.value.__cause__, ValidationError)
 
 
-def test_load_map_layout_reads_a_map_from_an_installed_mod_directory(tmp_path: Path) -> None:
+def test_load_loaded_map_layout_reads_an_active_mod_map(tmp_path: Path) -> None:
     lookup = ('Map', 'levels', 'level', 'name')
 
     def element(name: str, attrs: list[bytes], children: list[bytes]) -> bytes:
@@ -431,8 +454,8 @@ def test_load_map_layout_reads_a_map_from_an_installed_mod_directory(tmp_path: P
         metadata_version=None,
     )
 
-    layout = load_map_layout(
-        mod, LocalMap(file_path='Maps/Author/Pack/Map.bin', dialog_key='Author_Pack_Map')
+    layout = load_loaded_map_layout(
+        LoadedModMap(MapInfo(file_path='Maps/Author/Pack/Map.bin'), mod)
     )
 
     assert [room.name for room in layout.rooms] == ['start']

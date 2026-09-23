@@ -1,4 +1,5 @@
 from collections.abc import Iterable, Iterator, MutableMapping
+from collections.abc import Set as AbstractSet
 from itertools import repeat
 from typing import TYPE_CHECKING, Self, overload
 
@@ -13,6 +14,31 @@ _MISSING = sentinel('_MISSING')
 
 type _Item[T] = tuple[str, T]
 type _UpdateSource[T] = SupportsKeysAndGetItem[str, T] | Iterable[_Item[T]]
+
+
+class FrozenCaseFoldSet(AbstractSet[str]):
+    """An immutable string set with Unicode case-folded membership checks."""
+
+    def __init__(self, values: Iterable[str] = (), /) -> None:
+        self._values = frozenset(self._fold(value) for value in values)
+
+    @staticmethod
+    def _fold(value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f'{type(value).__name__!r} object is not case-foldable')
+        return value.casefold()
+
+    def __contains__(self, value: object, /) -> bool:
+        return isinstance(value, str) and value.casefold() in self._values
+
+    def __iter__(self, /) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self, /) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return f'{type(self).__name__}{repr(self._values).removeprefix("frozenset")}'
 
 
 class CaseFoldDict[VT](MutableMapping[str, VT]):

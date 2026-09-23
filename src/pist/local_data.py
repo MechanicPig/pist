@@ -9,15 +9,18 @@ from pathlib import Path
 
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
+from pist.game.collab import JournalReferences
 from pist.game.routes import MapRoute
+from pist.paths import PIST_DIR
 from pist.records import MapRecord
 
-LOCAL_DATA_PATH = Path('.pist/local-data.sqlite3')
+LOCAL_DATA_PATH = PIST_DIR / 'local-data.sqlite3'
 type CollabJournalIconPaths = dict[str, str | None]
 COLLAB_JOURNAL_ICON_PATHS_ADAPTER = TypeAdapter(
     CollabJournalIconPaths,
     config=ConfigDict(strict=True),
 )
+CAMPAIGN_REFS_ADAPTER = TypeAdapter(tuple[str, ...], config=ConfigDict(strict=True))
 
 
 class LocalDataStore:
@@ -63,6 +66,14 @@ class LocalDataStore:
                     fingerprint TEXT NOT NULL,
                     icons TEXT NOT NULL,
                     PRIMARY KEY (mod_path, map_files)
+                );
+                CREATE TABLE IF NOT EXISTS collab_journal_refs (
+                    mod_path TEXT NOT NULL,
+                    map_file TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    campaign_refs TEXT NOT NULL,
+                    invalid_count INTEGER NOT NULL CHECK (invalid_count >= 0),
+                    PRIMARY KEY (mod_path, map_file)
                 );
                 CREATE INDEX IF NOT EXISTS records_by_map_save
                 ON records (mod_metadata_name, map_file, save_slot, id DESC);
@@ -210,5 +221,56 @@ class LocalDataStore:
                     json.dumps(map_files),
                     fingerprint,
                     json.dumps(icons, sort_keys=True),
+                ),
+            )
+
+    def load_collab_journal_refs(
+        self, mod_path: str, map_file: str, fingerprint: str
+    ) -> JournalReferences | None:
+        """Return cached journal references when the lobby map fingerprint still matches."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT campaign_refs, invalid_count FROM collab_journal_refs
+                WHERE mod_path = ? AND map_file = ? AND fingerprint = ?
+                """,
+                (mod_path, map_file, fingerprint),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            campaign_refs = CAMPAIGN_REFS_ADAPTER.validate_json(row[0])
+        except TypeError, ValidationError:
+            return None
+        invalid_count = row[1]
+        if type(invalid_count) is not int or invalid_count < 0:
+            return None
+        return JournalReferences(campaign_refs, invalid_count)
+
+    def save_collab_journal_refs(
+        self,
+        mod_path: str,
+        map_file: str,
+        fingerprint: str,
+        references: JournalReferences,
+    ) -> None:
+        """Replace cached journal references for one concrete lobby map resource."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO collab_journal_refs (
+                    mod_path, map_file, fingerprint, campaign_refs, invalid_count
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(mod_path, map_file) DO UPDATE SET
+                    fingerprint = excluded.fingerprint,
+                    campaign_refs = excluded.campaign_refs,
+                    invalid_count = excluded.invalid_count
+                """,
+                (
+                    mod_path,
+                    map_file,
+                    fingerprint,
+                    json.dumps(references.campaign_refs),
+                    references.invalid_count,
                 ),
             )

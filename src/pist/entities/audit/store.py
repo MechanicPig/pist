@@ -14,6 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from pist.game.binmap import AttrValue
 from pist.game.map_source import MapSource
+from pist.paths import PIST_DIR
 
 from ..rules import EntityRule, EntityRuleLayer, EntityRulesForId
 from .inference import rule_candidates_for_detail
@@ -43,7 +44,7 @@ from .models import (
 )
 from .models import VariantKey as _VariantKey
 
-LOCAL_AUDIT_DB_PATH = Path('.pist/entity-audit.sqlite3')
+LOCAL_AUDIT_DB_PATH = PIST_DIR / 'entity-audit.sqlite3'
 ATTRS_ADAPTER = TypeAdapter(dict[str, AttrValue])
 ATTR_VALUE_ADAPTER = TypeAdapter(AttrValue | None)
 SEMANTIC_ATTRS_SQL = (

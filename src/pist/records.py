@@ -8,9 +8,7 @@ from typing import Final, Literal
 from pydantic import Field, NonNegativeInt
 
 from pist.entities.classification import MapEntityStats
-from pist.game.dialog import DIALOG_LANGUAGES, localized_name
-from pist.game.mods import InstalledMod, LocalMap
-from pist.game.saves import MapStats, SaveSlot, sid_for_map_file
+from pist.game import dialog, levels, saves
 from pist.gamebanana import GameBananaCredit, GameBananaSubmission
 from pist.models import FrozenModel
 from pist.types import CellValue, RecordValues
@@ -58,7 +56,7 @@ MAP_RECORD_PROGRESS_LABELS: Final[Mapping[MapRecordProgress, str]] = {
 
 
 def map_record_progress(
-    stats: MapStats | None,
+    stats: saves.MapStats | None,
     entity_stats: MapEntityStats,
     *,
     is_in_progress: bool,
@@ -107,21 +105,30 @@ class MapRecord(FrozenModel):
 
 
 def create_map_record(
-    mod: InstalledMod,
-    map_info: LocalMap,
+    level: levels.Level,
+    side: levels.LevelSide,
     *,
-    save_slot: SaveSlot,
+    save_slot: saves.SaveSlot,
     gamebanana: GameBananaSubmission | None = None,
     authors: tuple[str, ...] = (),
-    languages: tuple[str, ...] = DIALOG_LANGUAGES,
+    languages: tuple[str, ...] = dialog.DIALOG_LANGUAGES,
+    dialogs: Mapping[str, Mapping[str, str]] | None = None,
     record_values: Mapping[str, Mapping[str, CellValue]] | None = None,
     now: datetime | None = None,
 ) -> MapRecord:
     """Build a local record from one selected Mod map."""
-    stats = save_slot.get_map_stats(map_info)
+    loaded_map = level.maps_by_side[side]
+    if not isinstance(loaded_map, levels.LoadedModMap):
+        raise TypeError('Cannot create a local record for a vanilla map.')
+    mod = loaded_map.mod
+    map_info = loaded_map.map_info
+    stats = save_slot.get_map_stats(level, side)
     recorded_stats = stats if stats is not None and stats.is_recorded else None
-    map_name = localized_name(map_info.names, languages) or map_info.fallback_name
-    english_name = map_info.names.get('en') or map_info.fallback_name
+    current_dialogs = {} if dialogs is None else dialogs
+    names = levels.map_names(level, side, current_dialogs)
+    fallback_name = levels.map_fallback_name(level, side)
+    map_name = dialog.localized_name(names, languages) or fallback_name
+    english_name = names.get('en') or fallback_name
     return MapRecord(
         created_at=now or datetime.now(tz=UTC),
         mod_metadata_name=mod.metadata_name,
@@ -131,9 +138,9 @@ def create_map_record(
         credits=gamebanana.credits if gamebanana is not None else (),
         map_name=map_name,
         map_english_name=english_name if english_name != map_name else None,
-        map_file=map_info.file_path,
-        sid=sid_for_map_file(map_info.file_path),
-        side=map_info.side or 'A',
+        map_file=map_info.file_path.as_posix(),
+        sid=saves.sid_for_level(level),
+        side=side.value,
         authors=authors,
         save_slot=save_slot.number,
         time_played=(

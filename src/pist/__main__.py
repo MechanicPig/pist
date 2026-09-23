@@ -10,19 +10,20 @@ from pathlib import Path
 
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
-from pist.game.mods import DisabledMod, InstalledMod, ModScanner, ModScanReport
+from pist.game.mods import DisabledMod, ModScanner, ModScanReport, ScannedMod
 from pist.game.routes import EndersBlenderReader
 from pist.game.saves import SaveReader
 from pist.local_data import LocalDataStore
+from pist.paths import PIST_DIR
 from pist.secrets import CredentialStore
 from pist.settings import PistSettings, SettingsStore
 from pist.sheet_report import field_coverage_report
 from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
 from pist.ui.entities.audit import review_entity_audit
-from pist.ui.mods.browser import browse_mods
+from pist.ui.maps.browser import browse_maps
 
-INSPECT_DIR = Path('.pist/inspect')
-MOD_REPORT_DIR = Path('.pist/mods')
+INSPECT_DIR = PIST_DIR / 'inspect'
+MOD_REPORT_DIR = PIST_DIR / 'mods'
 
 type SettingValue = Path | str | None
 
@@ -110,7 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=MOD_REPORT_DIR,
         help='Ignored directory for UTF-8 Mod scan JSON.',
     )
-    browse = mods_subcommands.add_parser('browse', help='Browse enabled Mods in a terminal UI.')
+
+    maps = subcommands.add_parser('maps', help='Browse maps available to the game.')
+    maps_subcommands = maps.add_subparsers(dest='maps_command', required=True)
+    browse = maps_subcommands.add_parser('browse', help='Browse active maps in a terminal UI.')
     browse.add_argument('--game-dir', type=Path, help='Game installation directory.')
     browse.add_argument(
         '--save-slot', type=int, default=0, help='Show native stats from this save slot.'
@@ -265,15 +269,15 @@ def mod_scan_summary(result: ModScanReport) -> dict[str, object]:
         'disabled_candidate_count': len(result.disabled_filenames),
         'warning_count': len(result.warnings),
         'warnings': [warning.model_dump() for warning in result.warnings],
-        'map_mod_count': sum(bool(mod.map_files) for mod in result.mods),
+        'map_mod_count': sum(bool(mod.maps) for mod in result.mods),
         'collab_mod_count': sum(mod.collab_id is not None for mod in result.mods),
         'sample': [
             {
                 'metadata_name': mod.metadata_name,
                 'filename': mod.filename,
                 'collab_id': mod.collab_id,
-                'map_file_count': len(mod.map_files),
-                'localized_map_count': sum(bool(map_info.names) for map_info in mod.maps),
+                'map_file_count': len(mod.maps),
+                'dialog_language_count': len(mod.dialogs),
             }
             for mod in result.mods[:10]
         ],
@@ -313,7 +317,7 @@ def latest_inspection_report() -> InspectionReport | None:
         raise ValueError(f'Invalid latest Sheet inspection: {paths[0]!r}') from error
 
 
-async def browse_enabled_mods(
+async def browse_game_maps(
     game_dir: Path,
     save_slot_number: int,
     *,
@@ -341,7 +345,7 @@ async def browse_enabled_mods(
         scan_task_id = startup_progress.add_task(
             '正在扫描已启用 Mod', total=len(preparation.candidates), filename=''
         )
-        scanned_mods: list[InstalledMod] = []
+        scanned_mods: list[ScannedMod] = []
         for candidate in preparation.candidates:
             startup_progress.update(scan_task_id, filename=candidate.name)
             if mod := scanner.scan_mod(candidate):
@@ -363,7 +367,7 @@ async def browse_enabled_mods(
     result = scanner.build_report(scanned_mods, disabled_mods)
     save_reader = SaveReader(game_dir)
     save_slot = save_reader.load(save_slot_number)
-    await browse_mods(
+    await browse_maps(
         result,
         save_reader=save_reader,
         save_slot=save_slot,
@@ -415,9 +419,9 @@ async def async_main(args: argparse.Namespace) -> None:
             temporary_blacklist_path=args.temporary_blacklist,
             whitelist_full_override=args.whitelist_full_override,
         )
-    elif args.command == 'mods' and args.mods_command == 'browse':
+    elif args.command == 'maps' and args.maps_command == 'browse':
         settings = settings_store.load()
-        await browse_enabled_mods(
+        await browse_game_maps(
             default_game_dir(args.game_dir, settings),
             args.save_slot,
             sheet_client=TencentSmartSheetClient(store),

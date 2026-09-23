@@ -6,10 +6,12 @@ const roomsNode = document.querySelector('#rooms');
 const count = document.querySelector('#count');
 const collectibleSummary = document.querySelector('#collectible-summary');
 const hint = document.querySelector('#hint');
-const entityInfo = document.querySelector('#entity-info');
-const entityInfoId = document.querySelector('#entity-info-id');
-const entityInfoSource = document.querySelector('#entity-info-source');
-const entityInfoAttrs = document.querySelector('#entity-info-attrs');
+const mapObjectInfo = document.querySelector('#map-object-info');
+const mapObjectInfoHeader = document.querySelector('#map-object-info-header');
+const mapObjectInfoId = document.querySelector('#map-object-info-id');
+const mapObjectInfoSource = document.querySelector('#map-object-info-source');
+const mapObjectInfoAttrs = document.querySelector('#map-object-info-attrs');
+const mapObjectInfoActions = document.querySelector('#map-object-info-actions');
 const save = document.querySelector('#save');
 const showFirstClearRoute = document.querySelector('#show-first-clear-route');
 const showFirstClearTime = document.querySelector('#show-first-clear-time');
@@ -17,7 +19,7 @@ const selected = new Set();
 const roomCounts = new Map();
 const roomByName = new Map();
 let state;
-let mode = 'review';
+let mode = 'preview';
 let highlightedRoom;
 let scale = 1;
 let offsetX = 0;
@@ -26,15 +28,17 @@ let dragging;
 let selectionBox;
 let finished = false;
 let lastMiddleDown;
-let lastRightClick;
 let selectedRoomToReveal;
 let canvasSelectedRoom;
 let flashingRoom;
 let flashTimer;
 let excludedEntities = new Set();
+let savedEditState;
 let openingMap = false;
+let mapObjectInfoDrag;
 
 const MAP_MARGIN = 100;
+const FLOATING_WINDOW_MARGIN = 12;
 const DOUBLE_CLICK_DELAY = 350;
 const DRAG_THRESHOLD = 4;
 const sprites = new Map();
@@ -168,7 +172,7 @@ function drawEntrance(entrance, room) {
     ctx.lineWidth = 1.5 / scale;
     ctx.strokeRect(box.x, box.y, box.width, box.height);
   }
-  if (mode !== 'navigate') return;
+  if (mode !== 'preview') return;
   ctx.font = `${12 / scale}px sans-serif`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
@@ -376,29 +380,38 @@ function formatTime(milliseconds) {
 
 function update() {
   const reviewing = mode === 'review';
-  const correctingCollectibles = mode === 'collectibles';
   const readOnly = state.readOnly;
   count.hidden = !reviewing;
-  save.hidden = !reviewing && !correctingCollectibles;
+  save.hidden = readOnly;
+  document.querySelector('#cancel').hidden = readOnly;
   count.textContent = `已选择 ${selected.size} / ${state.rooms.length}（实际 ${selectedRoomCount()}）`;
   const summary = collectibleSummaryText();
   collectibleSummary.textContent = summary;
   collectibleSummary.hidden = !summary;
-  hint.textContent = readOnly
-    ? '只读预览；滚轮缩放；中键或右键拖动画布；中键双击复位；点击房间定位。'
-    : reviewing
+  hint.textContent = reviewing
     ? '左键切换房间；列表可调整每个房间的实际数量（默认 1，检测到的存档点仅供参考）；从空白处拖框批量选择（Ctrl 减去，Shift+Ctrl 对称差）；中键或右键拖动画布；中键双击复位。'
-    : correctingCollectibles
-    ? '左键定位房间；右键切换已命中收集品的可获得状态；中键或右键拖动画布；中键双击复位。'
-    : '左键定位房间；右键查看实体属性，右键双击橙色入口跳转；中键或右键拖动画布；中键双击复位。';
+    : `${readOnly ? '只读预览' : '预览地图'}；左键定位房间；右键查看实体或入口属性并选择操作；中键或右键拖动画布；中键双击复位。`;
   document.querySelector('#back').disabled = !state.canBack;
   document.querySelector('#forward').disabled = !state.canForward;
   document.querySelector('#home').disabled = !state.canHome;
   for (const id of ['back', 'forward', 'home']) {
-    document.querySelector(`#${id}`).hidden = readOnly || mode !== 'navigate';
+    document.querySelector(`#${id}`).hidden = readOnly || mode !== 'preview';
   }
   renderList();
   draw();
+}
+
+function editableState() {
+  const rooms = state.rooms.filter(room => selected.has(room.name));
+  return JSON.stringify({
+    rooms: rooms.map(room => room.name),
+    roomCounts: Object.fromEntries(rooms.map(room => [room.name, roomCounts.get(room.name) ?? 1])),
+    excludedEntities: [...excludedEntities].sort(),
+  });
+}
+
+function hasUnsavedChanges() {
+  return state !== undefined && !state.readOnly && editableState() !== savedEditState;
 }
 
 function selectedRoomCount() {
@@ -458,6 +471,13 @@ function centerRoom(room) {
   draw();
 }
 
+function selectPreviewRoom(room) {
+  highlightedRoom = room.name;
+  canvasSelectedRoom = room.name;
+  selectedRoomToReveal = room.name;
+  update();
+}
+
 function roomAt(point) {
   return [...bounds(state.rooms).rooms].reverse().find(room =>
     point.x >= room.x && point.x < room.x + room.width && point.y >= room.y && point.y < room.y + room.height
@@ -467,7 +487,6 @@ function roomAt(point) {
 function nearestEntrance(point) {
   const maximumDistance = 16 / scale;
   return state.entrances
-    .filter(entrance => entrance.available)
     .map(entrance => ({ entrance, box: entranceBox(entrance, roomByName.get(entrance.room)) }))
     .filter(item => item.box)
     .map(item => ({
@@ -481,22 +500,6 @@ function nearestEntrance(point) {
     }))
     .filter(item => item.contains || item.distance <= maximumDistance)
     .sort((left, right) => left.distance - right.distance)[0]?.entrance;
-}
-
-function nearestCollectibleEntity(point) {
-  const maximumDistance = 12 / scale;
-  return state.rooms
-    .flatMap(room => room.entities.map(entity => ({ room, entity })))
-    .filter(item => item.entity.key && item.entity.summary)
-    .map(item => ({
-      ...item,
-      distance: Math.hypot(
-        point.x - (item.room.x + item.entity.x),
-        point.y - (item.room.y + item.entity.y),
-      ),
-    }))
-    .filter(item => item.distance <= maximumDistance)
-    .sort((left, right) => left.distance - right.distance)[0]?.entity;
 }
 
 function nearestInspectableEntity(point) {
@@ -515,13 +518,69 @@ function nearestInspectableEntity(point) {
     .sort((left, right) => left.distance - right.distance)[0];
 }
 
-function showInspectable(item, event) {
-  entityInfoId.textContent = item.entity.entityId;
-  entityInfoSource.textContent = `${item.entity.kind} · ${item.room.name}`;
-  entityInfoAttrs.textContent = JSON.stringify(item.entity.attrs, null, 2);
-  entityInfo.style.left = `${Math.min(event.clientX + 12, innerWidth - 24)}px`;
-  entityInfo.style.top = `${Math.min(event.clientY + 12, innerHeight - 24)}px`;
-  entityInfo.hidden = false;
+function moveMapObjectInfo(left, top) {
+  const rect = mapObjectInfo.getBoundingClientRect();
+  const maximumLeft = Math.max(FLOATING_WINDOW_MARGIN, innerWidth - rect.width - FLOATING_WINDOW_MARGIN);
+  const maximumTop = Math.max(FLOATING_WINDOW_MARGIN, innerHeight - rect.height - FLOATING_WINDOW_MARGIN);
+  mapObjectInfo.style.left = `${Math.min(Math.max(left, FLOATING_WINDOW_MARGIN), maximumLeft)}px`;
+  mapObjectInfo.style.top = `${Math.min(Math.max(top, FLOATING_WINDOW_MARGIN), maximumTop)}px`;
+}
+
+function positionMapObjectInfo(event) {
+  mapObjectInfo.hidden = false;
+  moveMapObjectInfo(event.clientX + FLOATING_WINDOW_MARGIN, event.clientY + FLOATING_WINDOW_MARGIN);
+}
+
+function addMapObjectAction(label, action, disabled = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener('click', action);
+  mapObjectInfoActions.append(button);
+  return button;
+}
+
+function showInspectableEntity(item, event) {
+  const entity = item.entity;
+  mapObjectInfoId.textContent = entity.entityId;
+  mapObjectInfoSource.textContent = `${entity.kind} · ${item.room.name}`;
+  mapObjectInfoAttrs.textContent = JSON.stringify(entity.attrs, null, 2);
+  mapObjectInfoActions.replaceChildren();
+  if (!state.readOnly && mode === 'preview' && entity.key && entity.summary) {
+    const updateAction = button => {
+      button.textContent = excludedEntities.has(entity.key) ? '取消屏蔽' : '屏蔽收集品';
+    };
+    const action = addMapObjectAction('', event => {
+      if (excludedEntities.has(entity.key)) excludedEntities.delete(entity.key);
+      else excludedEntities.add(entity.key);
+      updateAction(event.currentTarget);
+      update();
+    });
+    updateAction(action);
+  }
+  positionMapObjectInfo(event);
+}
+
+function showEntranceInfo(entrance, event) {
+  const source = entrance.source === 'trigger'
+    ? 'Trigger'
+    : entrance.source === 'entity' ? 'Entity' : '地图入口';
+  mapObjectInfoId.textContent = entrance.entityId ?? '地图入口';
+  mapObjectInfoSource.textContent = `${source} · ${entrance.room} → ${entrance.targetTitle}`;
+  mapObjectInfoAttrs.textContent = JSON.stringify(entrance.attrs ?? {}, null, 2);
+  mapObjectInfoActions.replaceChildren();
+  if (!state.readOnly && mode === 'preview') {
+    addMapObjectAction(
+      entrance.available ? '进入地图' : '目标地图不可用',
+      () => {
+        mapObjectInfo.hidden = true;
+        openMap(entrance.targetSid);
+      },
+      !entrance.available,
+    );
+  }
+  positionMapObjectInfo(event);
 }
 
 function toggleRoom(room) {
@@ -531,25 +590,13 @@ function toggleRoom(room) {
     revealRoom(room.name);
     return;
   }
-  if (mode === 'inspect') {
-    if (canvasSelectedRoom === room.name) {
-      canvasSelectedRoom = undefined;
-      highlightedRoom = undefined;
-    } else {
-      canvasSelectedRoom = room.name;
-      highlightedRoom = room.name;
-      selectedRoomToReveal = room.name;
-    }
+  if (canvasSelectedRoom === room.name) {
+    highlightedRoom = undefined;
+    canvasSelectedRoom = undefined;
     update();
     return;
   }
-  if (canvasSelectedRoom === room.name) {
-    canvasSelectedRoom = undefined;
-  } else {
-    canvasSelectedRoom = room.name;
-    selectedRoomToReveal = room.name;
-  }
-  update();
+  selectPreviewRoom(room);
 }
 
 function updateSelectionBox(point) {
@@ -627,24 +674,10 @@ addEventListener('mouseup', event => {
   if (drag.button === 2) {
     if (drag.moved) return;
     const point = world(event);
-    const isDoubleClick = lastRightClick !== undefined
-      && event.timeStamp - lastRightClick.time <= DOUBLE_CLICK_DELAY
-      && Math.hypot(point.x - lastRightClick.point.x, point.y - lastRightClick.point.y) <= 12 / scale;
-    lastRightClick = isDoubleClick ? undefined : { time: event.timeStamp, point };
-    if (mode === 'navigate' && isDoubleClick) {
-      const entrance = nearestEntrance(point);
-      if (entrance) openMap(entrance.targetSid);
-    } else if (!drag.moved && mode === 'collectibles') {
-      const entity = nearestCollectibleEntity(point);
-      if (entity?.key) {
-        if (excludedEntities.has(entity.key)) excludedEntities.delete(entity.key);
-        else excludedEntities.add(entity.key);
-        update();
-      }
-    } else {
-      const inspectable = nearestInspectableEntity(point);
-      if (inspectable) showInspectable(inspectable, event);
-    }
+    const inspectable = nearestInspectableEntity(point);
+    const entrance = nearestEntrance(point);
+    if (inspectable) showInspectableEntity(inspectable, event);
+    else if (entrance) showEntranceInfo(entrance, event);
     return;
   }
   if (selectionBox) {
@@ -687,39 +720,88 @@ canvas.addEventListener('auxclick', event => {
   if (event.button === 1) event.preventDefault();
 });
 canvas.addEventListener('contextmenu', event => event.preventDefault());
-document.querySelector('#entity-info-close').addEventListener('click', () => { entityInfo.hidden = true; });
+canvas.addEventListener('dblclick', event => {
+  if (event.button !== 0 || mode !== 'preview') return;
+  const room = roomAt(world(event));
+  if (!room) return;
+  selectPreviewRoom(room);
+  centerRoom(room);
+});
+document.querySelector('#map-object-info-close').addEventListener('click', () => {
+  mapObjectInfo.hidden = true;
+});
+mapObjectInfoHeader.addEventListener('pointerdown', event => {
+  if (event.button !== 1) return;
+  const rect = mapObjectInfo.getBoundingClientRect();
+  mapObjectInfoDrag = {
+    pointerId: event.pointerId,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+  };
+  mapObjectInfo.classList.add('dragging');
+  mapObjectInfoHeader.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+mapObjectInfoHeader.addEventListener('pointermove', event => {
+  if (mapObjectInfoDrag?.pointerId !== event.pointerId) return;
+  moveMapObjectInfo(
+    event.clientX - mapObjectInfoDrag.offsetX,
+    event.clientY - mapObjectInfoDrag.offsetY,
+  );
+});
+function finishMapObjectInfoDrag(event) {
+  if (mapObjectInfoDrag?.pointerId !== event.pointerId) return;
+  mapObjectInfoDrag = undefined;
+  mapObjectInfo.classList.remove('dragging');
+  if (mapObjectInfoHeader.hasPointerCapture(event.pointerId)) {
+    mapObjectInfoHeader.releasePointerCapture(event.pointerId);
+  }
+}
+mapObjectInfoHeader.addEventListener('pointerup', finishMapObjectInfoDrag);
+mapObjectInfoHeader.addEventListener('pointercancel', finishMapObjectInfoDrag);
+mapObjectInfoHeader.addEventListener('auxclick', event => {
+  if (event.button === 1) event.preventDefault();
+});
 
-function loadState(next) {
+function loadState(next, preserveCanvas = false) {
   const initial = state === undefined;
   state = next;
-  if (state.readOnly) mode = 'inspect';
-  else if (initial) mode = 'review';
+  if (initial) mode = state.initialMode;
+  if (state.readOnly) mode = 'preview';
   selected.clear();
   roomCounts.clear();
   excludedEntities = new Set(
     state.rooms.flatMap(room => room.entities.filter(entity => entity.excluded).map(entity => entity.key)),
   );
   roomByName.clear();
-  highlightedRoom = undefined;
-  canvasSelectedRoom = undefined;
-  lastRightClick = undefined;
+  if (!preserveCanvas) {
+    highlightedRoom = undefined;
+    canvasSelectedRoom = undefined;
+  }
+  mapObjectInfo.hidden = true;
   state.rooms.forEach(room => {
     roomByName.set(room.name, room);
     roomCounts.set(room.name, room.roomCount ?? 1);
   });
+  if (highlightedRoom && !roomByName.has(highlightedRoom)) highlightedRoom = undefined;
+  if (canvasSelectedRoom && !roomByName.has(canvasSelectedRoom)) canvasSelectedRoom = undefined;
   state.selected.forEach(name => selected.add(name));
+  savedEditState = editableState();
   document.title = `地图预览：${state.title}`;
   document.querySelector('#title').textContent = state.title;
   document.querySelector('#mode').hidden = state.readOnly;
   document.querySelector('#overlays').hidden = state.readOnly;
-  document.querySelector('#cancel').textContent = state.readOnly ? '关闭' : '取消';
+  document.querySelectorAll('input[name="mode"]').forEach(input => {
+    input.checked = input.value === mode;
+  });
   resize();
-  setupView();
+  if (!preserveCanvas) setupView();
   update();
 }
 
 async function openMap(targetSid) {
   if (openingMap) return;
+  if (!await confirmLeavingEdits()) return;
   openingMap = true;
   try {
     const response = await fetch(`${base}/open`, {
@@ -736,6 +818,7 @@ async function openMap(targetSid) {
 }
 
 async function navigate(action) {
+  if (!await confirmLeavingEdits()) return;
   const response = await fetch(`${base}/${action}`, { method: 'POST' });
   const data = await response.json();
   if (data.closed) { finishPage('已返回，可关闭此页面。'); return; }
@@ -763,14 +846,25 @@ function finishPage(message) {
 async function saveRoute() {
   const response = await fetch(`${base}/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rooms: [...selected], roomCounts: Object.fromEntries([...selected].map(name => [name, roomCounts.get(name) ?? 1])), excludedEntities: [...excludedEntities] }) });
   if (!response.ok) { showError((await response.json()).error); return; }
+  savedEditState = editableState();
+  update();
   showStatus('已保存。');
+  return true;
+}
+
+async function confirmLeavingEdits() {
+  if (!hasUnsavedChanges()) return true;
+  if (confirm('当前地图有未保存的修改。是否保存后继续？')) {
+    return await saveRoute() === true;
+  }
+  return confirm('是否放弃未保存的修改并继续？');
 }
 
 async function cancel() {
   const response = await fetch(`${base}/cancel`, { method: 'POST' });
   const data = await response.json();
   if (!response.ok) { showError(data.error); return; }
-  loadState(data);
+  loadState(data, true);
   showStatus('已还原到上次保存的结果。');
 }
 
@@ -800,9 +894,21 @@ addEventListener('mousedown', event => {
     }
   }
 }, { capture: true });
-addEventListener('resize', resize);
+addEventListener('resize', () => {
+  resize();
+  if (!mapObjectInfo.hidden) {
+    const rect = mapObjectInfo.getBoundingClientRect();
+    moveMapObjectInfo(rect.left, rect.top);
+  }
+});
 new ResizeObserver(resize).observe(canvas);
 addEventListener('pagehide', () => {
   if (!finished) fetch(`${base}/abandon`, { method: 'POST', keepalive: true });
+});
+addEventListener('beforeunload', event => {
+  if (!finished && hasUnsavedChanges()) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
 });
 (async () => { loadState(await (await fetch(`${base}/state`)).json()); })();
