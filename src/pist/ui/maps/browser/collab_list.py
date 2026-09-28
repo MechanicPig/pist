@@ -1,7 +1,9 @@
 """Collab journal-list loading widget."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
+from berries.game.levels import Level, LevelSide, Map
+from berries.game.saves import SaveSlot
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -9,9 +11,6 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import ListItem, LoadingIndicator, Static
-
-from pist.game.levels import Level, LevelSide
-from pist.game.saves import SaveSlot
 
 from .map_list import LEFT_MOUSE_BUTTON, MapItem, MapSideButton, SideGroup
 
@@ -25,6 +24,7 @@ class CollabMapList(Vertical):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
         *,
         extra_items: Iterable[ListItem] = (),
     ) -> None:
@@ -34,6 +34,7 @@ class CollabMapList(Vertical):
         self.languages = tuple(languages)
         self.dialogs = dialogs
         self.save_slot = save_slot
+        self.source_name_for = source_name_for
         self.extra_items = tuple(extra_items)
         self.icon_order: tuple[tuple[Level, LevelSide], ...] | None = None
         self._progress = Static('正在读取日志图标…')
@@ -91,6 +92,7 @@ class LobbyMapItem(MapItem):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
         submission_maps: Widget,
         *children: Widget,
     ) -> None:
@@ -102,6 +104,7 @@ class LobbyMapItem(MapItem):
             languages,
             dialogs,
             save_slot,
+            source_name_for,
             submission_maps,
             *children,
             leading=self._toggle,
@@ -131,6 +134,7 @@ class SideLobbyMapItem(LobbyMapItem):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
         submission_maps: Widget,
     ) -> None:
         self._sides = tuple(sorted(sides))
@@ -145,6 +149,7 @@ class SideLobbyMapItem(LobbyMapItem):
             languages,
             dialogs,
             save_slot,
+            source_name_for,
             submission_maps,
             controls,
         )

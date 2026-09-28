@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from annotated_types import MinLen
+from berries.game.dialog import DIALOG_LANGUAGES
+from berries.models import FrozenModel
 from pydantic import ValidationError
 
-from pist.game.dialog import DIALOG_LANGUAGES
-from pist.models import FrozenModel
 from pist.paths import PIST_DIR
 
 SETTINGS_PATH = PIST_DIR / 'settings.json'

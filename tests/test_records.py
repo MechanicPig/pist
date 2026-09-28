@@ -3,15 +3,14 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from berries.game.duration import Duration
+from berries.game.levels import Level, LevelSide
+from berries.game.saves import MapStats, SaveSlot
+from berries.gamebanana import GameBananaSubmission
+from berries.map_entity_id import MapEntityID
 
-from pist.entities.classification import MapEntityStats
-from pist.entities.map_entity_id import MapEntityID
-from pist.game.collab import JournalReferences
-from pist.game.duration import Duration
-from pist.game.levels import Level, LevelSide
-from pist.game.saves import MapStats, SaveSlot
-from pist.gamebanana import GameBananaSubmission
-from pist.local_data import LocalDataStore
+from pist.entity_stats import MapEntityStats
+from pist.record_store import RecordStore
 from pist.records import (
     MapRecord,
     MapRecordProgress,
@@ -21,6 +20,14 @@ from pist.records import (
 )
 from tests.map_factory import make_level_side
 from tests.mod_factory import make_installed_mod
+
+EXAMPLE_MOD = make_installed_mod(
+    source='zip',
+    filename='Example.zip',
+    path='C:/Celeste/Mods/Example.zip',
+    metadata_name='ExampleMetadata',
+    metadata_version='1.0.0',
+)
 
 
 def _example_map(
@@ -33,13 +40,7 @@ def _example_map(
         file_path=file_path,
         dialog_key=dialog_key,
         side=side,
-        mod=make_installed_mod(
-            source='zip',
-            filename='Example.zip',
-            path='C:/Celeste/Mods/Example.zip',
-            metadata_name='ExampleMetadata',
-            metadata_version='1.0.0',
-        ),
+        mod=EXAMPLE_MOD,
     )
 
 
@@ -64,8 +65,8 @@ def test_map_record_rejects_negative_save_stats(save_slot: int, deaths: int | No
 def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> None:
     stats = MapEntityStats(
         counts={'strawberry': 1},
-        existing_kinds=frozenset({'cassette'}),
-        selected_kinds=frozenset({'heart'}),
+        existing_stats=frozenset({'cassette'}),
+        selected_stats=frozenset({'heart'}),
     )
 
     assert (
@@ -118,7 +119,7 @@ def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> No
 def test_map_record_progress_requires_each_existing_collectible() -> None:
     completed = MapStats(Duration.from_milliseconds(1), 1, single_run_completed=True)
 
-    cassette = MapEntityStats(existing_kinds=frozenset({'cassette'}))
+    cassette = MapEntityStats(existing_stats=frozenset({'cassette'}))
     assert (
         map_record_progress(completed, cassette, is_in_progress=False)
         is MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
@@ -134,7 +135,7 @@ def test_map_record_progress_requires_each_existing_collectible() -> None:
         is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
     )
 
-    heart = MapEntityStats(existing_kinds=frozenset({'heart'}))
+    heart = MapEntityStats(existing_stats=frozenset({'heart'}))
     assert (
         map_record_progress(completed, heart, is_in_progress=False)
         is MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
@@ -168,6 +169,7 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
 
     record = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=save_slot,
         dialogs={
             'zh-cn': {'Author_Pack_Map': '示例地图'},
@@ -193,6 +195,7 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
 def test_create_map_record_preserves_configured_record_values() -> None:
     record = create_map_record(
         *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         record_values={'主表': {'红草莓数': 3, '磁带': True, '水晶之心': '通关收集'}},
     )
@@ -203,6 +206,7 @@ def test_create_map_record_preserves_configured_record_values() -> None:
 def test_create_map_record_marks_normal_map_as_a_side() -> None:
     record = create_map_record(
         *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
     )
 
@@ -213,6 +217,7 @@ def test_create_map_record_rejects_vanilla_map() -> None:
     with pytest.raises(TypeError, match='vanilla map'):
         create_map_record(
             *make_level_side(file_path='Maps/0-Intro.bin', dialog_key='AREA_0'),
+            mod=None,
             save_slot=SaveSlot(0, {}),
         )
 
@@ -220,6 +225,7 @@ def test_create_map_record_rejects_vanilla_map() -> None:
 def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
     record = create_map_record(
         *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         gamebanana=GameBananaSubmission.model_validate(
             {
@@ -248,6 +254,7 @@ def test_create_map_record_omits_zero_time_stats() -> None:
     map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
     record = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(), 12)}),
     )
 
@@ -256,98 +263,40 @@ def test_create_map_record_omits_zero_time_stats() -> None:
     assert record.deaths is None
 
 
-def test_local_data_store_round_trips_a_record(tmp_path: Path) -> None:
+def test_record_store_round_trips_a_record(tmp_path: Path) -> None:
     record = create_map_record(
         *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
         now=datetime(2026, 9, 4, 12, tzinfo=UTC),
     )
 
-    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
-    record_id = store.save_record(record)
+    store = RecordStore(tmp_path / '.pist/local-data.sqlite3')
+    record_id = store.save(record)
 
     assert record_id == 1
-    assert store.load_record(record_id) == record
+    assert store.load(record_id) == record
 
 
-def test_local_data_store_caches_collab_journal_icons(tmp_path: Path) -> None:
-    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
-    map_files = ('Maps/Collab/1-Easy.bin', 'Maps/Collab/2-Medium.bin')
-    icons = {
-        map_files[0]: 'areas/Collab/meters/1-easy',
-        map_files[1]: None,
-    }
-
-    store.save_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'first', icons)
-
-    assert (
-        store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'first') == icons
-    )
-    assert (
-        store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', map_files, 'changed') is None
-    )
-
-
-def test_local_data_store_discards_invalid_cached_collab_journal_icons(tmp_path: Path) -> None:
-    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
-    with store._connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO collab_journal_icons (mod_path, map_files, fingerprint, icons)
-            VALUES (?, ?, ?, ?)
-            """,
-            ('C:/Celeste/Mods/Collab.zip', '[]', 'first', '{"Maps/Collab.bin": 1}'),
-        )
-
-    assert store.load_collab_journal_icons('C:/Celeste/Mods/Collab.zip', (), 'first') is None
-
-
-def test_local_data_store_caches_collab_journal_refs(tmp_path: Path) -> None:
-    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
-    references = JournalReferences(('Collab/1-Easy', 'Addon/Maps'), 2)
-
-    store.save_collab_journal_refs(
-        'C:/Celeste/Mods/Collab.zip',
-        'Maps/Collab/0-Lobbies/1-Easy.bin',
-        'first',
-        references,
-    )
-
-    assert (
-        store.load_collab_journal_refs(
-            'C:/Celeste/Mods/Collab.zip',
-            'Maps/Collab/0-Lobbies/1-Easy.bin',
-            'first',
-        )
-        == references
-    )
-    assert (
-        store.load_collab_journal_refs(
-            'C:/Celeste/Mods/Collab.zip',
-            'Maps/Collab/0-Lobbies/1-Easy.bin',
-            'changed',
-        )
-        is None
-    )
-
-
-def test_local_data_store_updates_the_same_map_and_save_slot_in_place(tmp_path: Path) -> None:
+def test_record_store_updates_the_same_map_and_save_slot_in_place(tmp_path: Path) -> None:
     map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
-    store = LocalDataStore(tmp_path / '.pist/local-data.sqlite3')
+    store = RecordStore(tmp_path / '.pist/local-data.sqlite3')
     initial = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
     )
     current = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
     )
 
-    record_id = store.save_record(initial)
-    assert store.existing_record_id(current) == record_id
-    assert store.save_record(current) == record_id
+    record_id = store.save(initial)
+    assert store.existing_id(current) == record_id
+    assert store.save(current) == record_id
 
-    saved = store.load_record(record_id)
+    saved = store.load(record_id)
     assert saved.time_played == '0:00:02'
     assert saved.deaths == 5
 
@@ -356,12 +305,14 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
     map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
     saved = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
         authors=('Alice',),
         record_values={'主表': {'红草莓数': 2, '起始日期': '2026-09-01', '备注': '好图'}},
     )
     current = create_map_record(
         *map_info,
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
         record_values={'主表': {'红草莓数': 4, '主房间数': 8}},
     )
@@ -376,11 +327,12 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
     }
 
 
-def test_local_data_store_rejects_record_without_native_play_time(tmp_path: Path) -> None:
+def test_record_store_rejects_record_without_native_play_time(tmp_path: Path) -> None:
     record = create_map_record(
         *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        mod=EXAMPLE_MOD,
         save_slot=SaveSlot(0, {}),
     )
 
     with pytest.raises(ValueError, match='without native play time'):
-        LocalDataStore(tmp_path / '.pist/local-data.sqlite3').save_record(record)
+        RecordStore(tmp_path / '.pist/local-data.sqlite3').save(record)

@@ -1,19 +1,17 @@
 """Load explicit Campaign projections for Collab lobby sides."""
 
-from __future__ import annotations
-
 import tomllib
 from pathlib import Path
 from typing import Annotated
 
 import tomlkit
+from berries.game.content import MAPS_DIR, ContentPath
+from berries.game.levels import LevelSide
+from berries.models import FrozenModel
+from berries.types import NonEmptyStr
 from pydantic import AfterValidator, ValidationError, field_validator, model_validator
 
-from pist.game.content import ContentPath
-from pist.game.levels import LevelSide
-from pist.models import FrozenModel
 from pist.paths import PIST_DIR, SHARED_DATA_DIR, SOURCE_ROOT
-from pist.types import NonEmptyStr
 
 SHARED_COLLAB_LOBBIES_PATH = SHARED_DATA_DIR / 'collab_lobbies.toml'
 LOCAL_COLLAB_LOBBIES_PATH = PIST_DIR / 'collab_lobbies.toml'
@@ -33,7 +31,7 @@ def _validate_campaign_ref(campaign: str) -> str:
     if '\\' in campaign:
         raise ValueError('A Campaign reference must use forward slashes.')
     path = ContentPath(campaign)
-    if path.parts[0] == 'Maps':
+    if path.parts[0] == MAPS_DIR.name:
         raise ValueError('Campaign references must omit the Maps prefix.')
     return campaign
 

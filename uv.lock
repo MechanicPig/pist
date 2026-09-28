@@ -2,6 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[manifest]
+members = [
+    "berries",
+    "pist",
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
@@ -106,6 +112,33 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309" },
+]
+
+[[package]]
+name = "berries"
+version = "0.1.0"
+source = { editable = "packages/berries" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "annotated-types" },
+    { name = "platformdirs" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "pyyaml" },
+    { name = "tomlkit" },
+    { name = "typing-extensions" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.11.0" },
+    { name = "annotated-types", specifier = ">=0.7.0" },
+    { name = "platformdirs", specifier = ">=4.11.7" },
+    { name = "pydantic", specifier = ">=2.12.0" },
+    { name = "pydantic-core", specifier = ">=2.41.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "tomlkit", specifier = ">=0.15.1" },
+    { name = "typing-extensions", specifier = ">=4.16.0" },
 ]
 
 [[package]]
@@ -461,15 +494,16 @@ wheels = [
 
 [[package]]
 name = "pist"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "berries" },
     { name = "keyring" },
     { name = "luaparser" },
     { name = "platformdirs" },
     { name = "pydantic" },
-    { name = "pyyaml" },
+    { name = "rich" },
     { name = "textual" },
     { name = "tomlkit" },
     { name = "typing-extensions" },
@@ -485,11 +519,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.0" },
+    { name = "berries", editable = "packages/berries" },
     { name = "keyring", specifier = ">=25.6.0" },
     { name = "luaparser", specifier = ">=4.1.0" },
     { name = "platformdirs", specifier = ">=4.11.7" },
     { name = "pydantic", specifier = ">=2.12.0" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rich", specifier = ">=14.0.0" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "tomlkit", specifier = ">=0.15.1" },
     { name = "typing-extensions", specifier = ">=4.16.0" },

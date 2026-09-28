@@ -1,7 +1,11 @@
 import json
-from collections.abc import Collection
+from collections.abc import Iterable
 
 import pytest
+from berries.entities.classification import VariantReview
+from berries.entities.rules import entity_rules_toml
+from berries.game.binmap import AttrValue
+from berries.game.map_source import MapSource
 
 from pist.entities.audit import (
     AttrAuditStatus,
@@ -17,10 +21,6 @@ from pist.entities.audit import (
 from pist.entities.audit import store as audit_store
 from pist.entities.audit.models import VariantKey
 from pist.entities.audit.store import _attrs
-from pist.entities.classification import VariantReview
-from pist.entities.rules import entity_rules_toml
-from pist.game.binmap import AttrValue
-from pist.game.map_source import MapSource
 
 
 def test_variant_key_rejects_unknown_persisted_fields() -> None:
@@ -516,10 +516,10 @@ def test_unreviewed_variant_count_deduplicates_location_only_variants(
                                     'map_file': 'Maps/Test.bin',
                                     'map_name': 'Test',
                                 },
-                                'room': f'room-{index}',
-                                'attrs': {'moon': True, 'x': index * 8, 'y': 16},
+                                'room': f'room-{i}',
+                                'attrs': {'moon': True, 'x': i * 8, 'y': 16},
                             }
-                            for index in range(12)
+                            for i in range(12)
                         ],
                     }
                 ]
@@ -560,7 +560,7 @@ def test_needs_variant_review_scopes_its_snapshot(
     store = EntityAuditStore(tmp_path / 'entity-audit.sqlite3')
     queried_names: list[set[str]] = []
 
-    def checker(entity_names: Collection[str] | None = None) -> VariantReview:
+    def checker(entity_names: Iterable[str] | None = None) -> VariantReview:
         assert entity_names is not None
         queried_names.append(set(entity_names))
         return lambda *_args: False

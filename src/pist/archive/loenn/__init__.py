@@ -8,10 +8,9 @@ from importlib.resources import files
 from typing import cast
 from zipfile import BadZipFile
 
+from berries.game.binmap import AttrValue
+from berries.game.content import ContentEntry
 from luaparser.ast import SyntaxException
-
-from pist.game.binmap import AttrValue
-from pist.game.content import ContentEntry, iter_files
 
 from .eval import LuaKey, LuaModule, LuaTable, LuaValue, evaluate
 from .selene import SeleneSyntaxError, preprocess
@@ -150,7 +149,7 @@ def _builtin_modules(placements: Iterable[LoennPlacement]) -> dict[str, LuaValue
                 'name': 'strawberry',
                 'placements': LuaTable(
                     {
-                        index: LuaTable(
+                        i: LuaTable(
                             {
                                 'name': placement.name,
                                 'data': LuaTable(
@@ -158,7 +157,7 @@ def _builtin_modules(placements: Iterable[LoennPlacement]) -> dict[str, LuaValue
                                 ),
                             }
                         )
-                        for index, placement in enumerate(strawberry_placements, start=1)
+                        for i, placement in enumerate(strawberry_placements, start=1)
                     }
                 ),
             }
@@ -166,12 +165,10 @@ def _builtin_modules(placements: Iterable[LoennPlacement]) -> dict[str, LuaValue
     }
 
 
-def load_loenn_registry(
-    mods: Iterable[LoennMod], *, language: str = DEFAULT_LANGUAGE
-) -> LoennRegistry:
+def load_loenn_registry(mods: Iterable[LoennMod], *, lang: str = DEFAULT_LANGUAGE) -> LoennRegistry:
     """Load static Loenn entity placements contributed by the given Mod packages."""
     mods = tuple(mods)
-    mod_labels = _mod_labels(mods, language=language)
+    mod_labels = _mod_labels(mods, lang=lang)
     builtin_placements = _builtin_placements()
     static_modules = _builtin_modules(builtin_placements)
     placements = list(builtin_placements)
@@ -179,7 +176,7 @@ def load_loenn_registry(
     for mod in mods:
         try:
             mod_placements, mod_warnings = _read_mod_placements(
-                mod, language=language, mod_labels=mod_labels, static_modules=static_modules
+                mod, lang=lang, mod_labels=mod_labels, static_modules=static_modules
             )
             placements.extend(mod_placements)
             warnings.extend(mod_warnings)
@@ -191,7 +188,7 @@ def load_loenn_registry(
 def _read_mod_placements(
     mod: LoennMod,
     *,
-    language: str,
+    lang: str,
     mod_labels: Mapping[str, str],
     static_modules: Mapping[str, LuaValue],
 ) -> tuple[tuple[LoennPlacement, ...], tuple[LoennWarning, ...]]:
@@ -199,37 +196,39 @@ def _read_mod_placements(
     loenn_dir = _find_child(mod_path, LOENN_DIRNAME)
     if loenn_dir is None:
         return (), ()
-    display_names = _read_display_names(loenn_dir, language=language)
+    display_names = _read_display_names(loenn_dir, lang=lang)
     entities_dir = _find_child(loenn_dir, LOENN_ENTITIES_DIRNAME)
     if entities_dir is None:
         return (), ()
     placements: list[LoennPlacement] = []
     warnings: list[LoennWarning] = []
-    for path in iter_files(entities_dir):
-        if path.at.suffix.casefold() != '.lua':
-            continue
-        source = f'{mod_path.name}/{path.at.as_posix()}'
-        try:
-            placements.extend(
-                _parse_entity_file(
-                    _read_loenn_text(path),
-                    display_names=display_names,
-                    source=source,
-                    mod_name=mod.metadata_name,
-                    mod_labels=mod_labels,
-                    static_modules=static_modules,
+    for directory, _, filenames in entities_dir.walk():
+        for filename in filenames:
+            path = directory / filename
+            if path.at.suffix.casefold() != '.lua':
+                continue
+            source = f'{mod_path.name}/{path.at.as_posix()}'
+            try:
+                placements.extend(
+                    _parse_entity_file(
+                        _read_loenn_text(path),
+                        display_names=display_names,
+                        source=source,
+                        mod_name=mod.metadata_name,
+                        mod_labels=mod_labels,
+                        static_modules=static_modules,
+                    )
                 )
-            )
-        except (SeleneSyntaxError, SyntaxException) as error:
-            warnings.append(LoennWarning(source=source, message=str(error)))
+            except (SeleneSyntaxError, SyntaxException) as error:
+                warnings.append(LoennWarning(source=source, message=str(error)))
     return tuple(placements), tuple(warnings)
 
 
-def _read_display_names(loenn_dir: ContentEntry, *, language: str) -> dict[str, str]:
+def _read_display_names(loenn_dir: ContentEntry, *, lang: str) -> dict[str, str]:
     lang_dir = _find_child(loenn_dir, LOENN_LANG_DIRNAME)
     if lang_dir is None:
         return {}
-    filename = f'{language}{LANG_FILE_EXT}'
+    filename = f'{lang}{LANG_FILE_EXT}'
     lang_path = _find_child(lang_dir, filename)
     if lang_path is None:
         return {}
@@ -239,14 +238,14 @@ def _read_display_names(loenn_dir: ContentEntry, *, language: str) -> dict[str, 
     }
 
 
-def _mod_labels(mods: Iterable[LoennMod], *, language: str) -> dict[str, str]:
+def _mod_labels(mods: Iterable[LoennMod], *, lang: str) -> dict[str, str]:
     """Read the human-readable Mod labels used by Loenn's entity registry."""
     labels = {mod.metadata_name: mod.metadata_name for mod in mods}
     for mod in mods:
         loenn_dir = _find_child(mod.path, LOENN_DIRNAME)
         if loenn_dir is None:
             continue
-        for key, value in _read_display_names(loenn_dir, language=language).items():
+        for key, value in _read_display_names(loenn_dir, lang=lang).items():
             if (match := MOD_LANGUAGE_PATTERN.fullmatch(key)) is not None:
                 labels[match['name']] = value
     return labels
@@ -317,8 +316,8 @@ def _placements(table: LuaTable) -> tuple[tuple[str, dict[str, AttrValue]], ...]
         return ((_placement_name(table), _attrs(table)),)
     return tuple(
         (_placement_name(value), _attrs(value))
-        for index in range(1, len(table.fields) + 1)
-        if isinstance(value := table.get(index), LuaTable) and isinstance(value.get('name'), str)
+        for i in range(1, len(table.fields) + 1)
+        if isinstance(value := table.get(i), LuaTable) and isinstance(value.get('name'), str)
     )
 
 

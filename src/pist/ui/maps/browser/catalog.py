@@ -2,10 +2,9 @@
 
 from collections.abc import Iterable, Mapping
 
+from berries.game import campaigns as game_campaigns
+from berries.game import dialog, levels, saves
 from rich.text import Text
-
-from pist.game import campaigns as game_campaigns
-from pist.game import dialog, levels, saves
 
 
 def _add_line(text: Text, label: str, value: object) -> None:
@@ -31,7 +30,7 @@ def maps_by_path(
     return tuple(
         sorted(
             maps,
-            key=lambda item: item[0].maps_by_side[item[1]].map_info.file_path.as_posix().casefold(),
+            key=lambda item: item[0][item[1]].map_info.file_path.as_posix().casefold(),
         )
     )
 
@@ -41,16 +40,17 @@ def map_detail_lines(
     side: levels.LevelSide,
     languages: Iterable[str],
     dialogs: Mapping[str, Mapping[str, str]],
+    source_name: str,
     save_slot: saves.SaveSlot | None = None,
 ) -> Text:
     """Render the secondary information for one map item."""
     text = Text()
-    loaded_map = level.maps_by_side[side]
+    loaded_map = level[side]
     map_info = loaded_map.map_info
     text.append_text(
-        _alternate_name_lines(levels.map_names(level, side, dialogs), languages, indent='  ')
+        _alternate_name_lines(level.localized_names(side, dialogs), languages, indent='  ')
     )
-    text.append(f'  来源: {loaded_map.source_name}\n', style='dim')
+    text.append(f'  来源: {source_name}\n', style='dim')
     text.append(f'  文件: {map_info.file_path}\n', style='dim')
     if save_slot is not None:
         stats = save_slot.get_map_stats(level, side)
@@ -77,7 +77,7 @@ def map_title(
     marker: str = '• ',
 ) -> Text:
     """Render a map title, marking only its non-default side."""
-    name = levels.map_display_name(level, side, dialogs, languages)
+    name = level.display_name(side, dialogs, languages)
     if side is levels.LevelSide.A:
         return Text(f'{marker}{name}')
     suffix = f' {side.value}'
@@ -89,17 +89,15 @@ def map_title(
 
 
 def format_campaign_summary(
-    campaign: game_campaigns.LoadedCampaign,
+    campaign: game_campaigns.Campaign,
     languages: Iterable[str],
     dialogs: Mapping[str, Mapping[str, str]],
+    source_names: Iterable[str],
 ) -> Text:
     """Render the identity and physical sources of one selected campaign."""
     text = Text()
-    _add_line(text, '名称', game_campaigns.campaign_display_name(campaign, dialogs, languages))
+    _add_line(text, '名称', campaign.display_name(dialogs, languages))
     _add_line(text, '路径', campaign.directory)
     _add_line(text, '地图数', campaign.map_count)
-    source_names = tuple(
-        dict.fromkeys(level.maps_by_side[side].source_name for level, side in campaign.iter_sides())
-    )
-    _add_line(text, '来源', '、'.join(source_names))
+    _add_line(text, '来源', '、'.join(dict.fromkeys(source_names)))
     return text

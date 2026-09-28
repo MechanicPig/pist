@@ -1,0 +1,27 @@
+[stats.strawberry]
+kind = "strawberry"
+aggregation = "count"
+table = "主表"
+field = "红草莓数"
+
+[stats.moonberry]
+kind = "moonberry"
+aggregation = "count"
+table = "主表"
+field = "月莓数"
+
+[stats.cassette]
+kind = "cassette"
+aggregation = "exist"
+table = "主表"
+field = "磁带"
+
+[stats.heart]
+kind = "heart"
+aggregation = "select"
+table = "主表"
+field = "水晶之心"
+
+[stats.heart.values]
+end_level_heart = "通关收集"
+keep_going_heart = "额外收集"

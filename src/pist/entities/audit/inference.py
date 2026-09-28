@@ -4,9 +4,9 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from pist.game.binmap import AttrValue
+from berries.entities.rules import EntityRuleConditions
+from berries.game.binmap import AttrValue
 
-from ..rules import EntityRuleConditions
 from .models import (
     META_ATTR_PREFIX,
     UNKNOWN,

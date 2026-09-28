@@ -4,19 +4,20 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Collection, Generator, Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from berries.entities.rules import EntityRule, EntityRuleLayer, EntityRulesForId
+from berries.game.binmap import AttrValue
+from berries.game.map_source import MapSource
 from pydantic import TypeAdapter, ValidationError
 
-from pist.game.binmap import AttrValue
-from pist.game.map_source import MapSource
 from pist.paths import PIST_DIR
 
-from ..rules import EntityRule, EntityRuleLayer, EntityRulesForId
 from .inference import rule_candidates_for_detail
 from .models import (
     CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS,
@@ -68,7 +69,7 @@ class _VariantReviewChecker:
         ignored_names = self.ignored_names_by_entity.get(entity_name, frozenset())
         signatures = self.reviewed_signatures_by_entity.get(entity_name, frozenset())
         return bool(signatures) and (
-            _variant_signature(_semantic_attrs(dict(attrs)), meta, ignored_names) not in signatures
+            _variant_signature(_semantic_attrs(attrs), meta, ignored_names) not in signatures
         )
 
 
@@ -230,7 +231,7 @@ class EntityAuditStore:
         self,
         entity_name: str,
         report_id: int | None = None,
-        variants: Collection[EntityVariant] | None = None,
+        variants: Iterable[EntityVariant] | None = None,
     ) -> tuple[AuditMapOccurrences, ...]:
         """Return map and room counts without materializing raw entity instances."""
         with self._connect() as conn:
@@ -382,7 +383,7 @@ class EntityAuditStore:
         return int(row['variant_count'])
 
     def variant_review_checker(
-        self, entity_names: Collection[str] | None = None
+        self, entity_names: Iterable[str] | None = None
     ) -> _VariantReviewChecker:
         """Return an immutable snapshot for checking the given map entity IDs.
 
@@ -1001,7 +1002,7 @@ def _attrs(value: str) -> dict[str, AttrValue]:
         raise TypeError('Expected serialized entity attributes to be a JSON object.') from error
 
 
-def _semantic_attrs(attrs: dict[str, AttrValue]) -> dict[str, AttrValue]:
+def _semantic_attrs(attrs: Mapping[str, AttrValue]) -> dict[str, AttrValue]:
     """Return raw explicit attributes except physical instance-location fields."""
     return {name: value for name, value in attrs.items() if name not in LOCATION_ATTR_NAMES}
 
@@ -1018,7 +1019,7 @@ def _variant_key_parts(key: str) -> tuple[dict[str, AttrValue], dict[str, AttrVa
 def _variant_signature(
     attrs: Mapping[str, AttrValue],
     meta: Mapping[str, AttrValue],
-    ignored_names: Collection[str],
+    ignored_names: AbstractSet[str],
 ) -> EntityVariantSignature:
     """Return the raw presence/value signature still relevant to classification review."""
     return EntityVariantSignature(

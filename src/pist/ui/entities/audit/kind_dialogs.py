@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
+from berries.entities.rules import EntityRules
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -12,18 +13,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Select, Static
 from textual.widgets._select import SelectCurrent, SelectOverlay
 
-from pist.entities.rules import EntityRules, EntityStat, EntityTableField
-
 from ..kinds import KindTree, add_kind_nodes, kind_button_label
 
 NEW_KIND_NAME_ID = 'audit-new-kind-name'
 NEW_KIND_LABEL_ID = 'audit-new-kind-label'
 NEW_KIND_SPRITE_ID = 'audit-new-kind-sprite'
 NEW_KIND_PARENT_ID = 'audit-new-kind-parent'
-NEW_KIND_STAT_ID = 'audit-new-kind-stat'
-NEW_KIND_TABLE_ID = 'audit-new-kind-table'
-NEW_KIND_FIELD_ID = 'audit-new-kind-field'
-NEW_KIND_SELECT_VALUE_ID = 'audit-new-kind-select-value'
 SAVE_NEW_KIND_ID = 'audit-save-new-kind'
 KIND_TREE_ID = 'audit-kind-tree'
 
@@ -36,9 +31,6 @@ class NewKind:
     label: str
     parent: str | None
     sprite: str | None
-    stat: EntityStat
-    table_field: EntityTableField | None
-    select_value: str | None
 
 
 type SaveKind = Callable[[NewKind, str | None], EntityRules | None]
@@ -65,15 +57,6 @@ class AuditSelect(Select[str]):
         yield AuditSelectOverlay(type_to_search=self._type_to_search).data_bind(
             compact=Select.compact
         )
-
-
-def _entity_stat_options() -> tuple[tuple[str, str], ...]:
-    return (
-        ('不统计', EntityStat.NONE.value),
-        ('统计数量（整数）', EntityStat.COUNT.value),
-        ('是否存在（布尔值）', EntityStat.EXIST.value),
-        ('单选值（字符串）', EntityStat.SELECT.value),
-    )
 
 
 class KindDeleteScreen(ModalScreen[bool]):
@@ -161,31 +144,6 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
                 kind_button_label(self._rules, self._parent_kind, prompt='父类别：无'),
                 id=NEW_KIND_PARENT_ID,
             )
-            stat = EntityStat.NONE if self._definition is None else self._definition.stat
-            table_field = None if self._definition is None else self._definition.table_field
-            yield AuditSelect(
-                _entity_stat_options(),
-                value=stat.value,
-                id=NEW_KIND_STAT_ID,
-            )
-            yield Input(
-                '' if table_field is None else table_field.table,
-                placeholder='目标表名，例如主表',
-                id=NEW_KIND_TABLE_ID,
-                disabled=stat is EntityStat.NONE,
-            )
-            yield Input(
-                '' if table_field is None else table_field.field,
-                placeholder='目标字段名，例如红草莓数',
-                id=NEW_KIND_FIELD_ID,
-                disabled=stat is EntityStat.NONE,
-            )
-            yield Input(
-                '' if self._definition is None else self._definition.select_value or '',
-                placeholder='单选值，例如通关收集（仅 select 的子类别可填）',
-                id=NEW_KIND_SELECT_VALUE_ID,
-                disabled=not self._can_set_select_value(stat),
-            )
             with Horizontal():
                 yield Button('取消', id='new-kind-cancel')
                 yield Button('保存', id=SAVE_NEW_KIND_ID, variant='primary')
@@ -211,33 +169,6 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
         self.query_one(f'#{NEW_KIND_PARENT_ID}', Button).label = kind_button_label(
             self._rules, parent, prompt='父类别：无'
         )
-        self._update_select_value_disabled()
-
-    @on(Select.Changed, f'#{NEW_KIND_STAT_ID}')
-    def change_stat(self, event: Select.Changed) -> None:
-        """Enable table-field inputs only for output-producing statistics."""
-        enabled = event.value != EntityStat.NONE.value
-        self.query_one(f'#{NEW_KIND_TABLE_ID}', Input).disabled = not enabled
-        self.query_one(f'#{NEW_KIND_FIELD_ID}', Input).disabled = not enabled
-        self._update_select_value_disabled()
-
-    def _can_set_select_value(self, stat: EntityStat) -> bool:
-        """Return whether this kind inherits a select-stat owner from its parent."""
-        if stat is not EntityStat.NONE:
-            return False
-        parent = self._parent_kind
-        while parent is not None:
-            definition = self._rules.kinds[parent]
-            if definition.stat is EntityStat.SELECT:
-                return True
-            parent = definition.parent
-        return False
-
-    def _update_select_value_disabled(self) -> None:
-        stat = EntityStat(self.query_one(f'#{NEW_KIND_STAT_ID}', Select).value)
-        self.query_one(
-            f'#{NEW_KIND_SELECT_VALUE_ID}', Input
-        ).disabled = not self._can_set_select_value(stat)
 
     @on(Button.Pressed, f'#{SAVE_NEW_KIND_ID}')
     def save(self) -> None:
@@ -247,25 +178,12 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
             return
         label = self.query_one(f'#{NEW_KIND_LABEL_ID}', Input).value.strip() or name
         sprite = self.query_one(f'#{NEW_KIND_SPRITE_ID}', Input).value.strip() or None
-        stat = EntityStat(self.query_one(f'#{NEW_KIND_STAT_ID}', Select).value)
-        table_field = None
-        if stat is not EntityStat.NONE:
-            table = self.query_one(f'#{NEW_KIND_TABLE_ID}', Input).value.strip()
-            field = self.query_one(f'#{NEW_KIND_FIELD_ID}', Input).value.strip()
-            if not table or not field:
-                self.notify('统计类别需要填写目标表名和字段名。', severity='warning')
-                return
-            table_field = EntityTableField(table=table, field=field)
-        select_value = self.query_one(f'#{NEW_KIND_SELECT_VALUE_ID}', Input).value.strip() or None
         self.dismiss(
             NewKind(
                 name=name,
                 label=label,
                 parent=self._parent_kind,
                 sprite=sprite,
-                stat=stat,
-                table_field=table_field,
-                select_value=select_value,
             )
         )
 

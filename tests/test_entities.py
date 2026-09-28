@@ -3,8 +3,7 @@ from pathlib import Path
 
 import pytest
 import tomlkit
-
-from pist.entities.rules import (
+from berries.entities.rules import (
     SHARED_ENTITIES_PATH,
     EntityConfigStore,
     EntityKind,
@@ -12,34 +11,17 @@ from pist.entities.rules import (
     EntityRuleLayer,
     EntityRules,
     EntityRulesForId,
-    EntityStat,
-    EntityTableField,
-    entity_kind,
     entity_rules_toml,
-    kind_sprite,
     load_entity_rule_layers,
     load_entity_rules,
-    stat_owner,
 )
 
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
 
 
-def test_entity_rule_configuration_normalizes_required_names() -> None:
-    table_field = EntityTableField(table=' maps ', field=' strawberries ')
-    kind = EntityKind(label='Berry', select_value=' end_level_heart ')
-
-    assert table_field.table == 'maps'
-    assert table_field.field == 'strawberries'
-    assert kind.select_value == 'end_level_heart'
-
-
 @pytest.mark.parametrize(
     'model',
     (
-        lambda: EntityTableField(table=' ', field='strawberries'),
-        lambda: EntityTableField(table='maps', field=' '),
-        lambda: EntityKind(label='Berry', select_value=' '),
         lambda: EntityRule(missing=('',)),
         lambda: EntityRule(missing_meta=('',)),
     ),
@@ -81,43 +63,14 @@ def test_entity_kind_uses_exact_entity_and_attribute_rules(
     attrs: dict[str, bool],
     expected: str | None,
 ) -> None:
-    assert entity_kind(name, attrs, rules=SHARED_RULES) == expected
-
-
-def test_stat_owner_is_inherited_from_the_kind_tree() -> None:
-    assert stat_owner('strawberry', rules=SHARED_RULES) == (
-        'strawberry',
-        EntityStat.COUNT,
-    )
-    assert stat_owner('moonberry', rules=SHARED_RULES) == (
-        'moonberry',
-        EntityStat.COUNT,
-    )
-    assert stat_owner('goldenberry', rules=SHARED_RULES) is None
-    assert stat_owner('grabless_goldenberry', rules=SHARED_RULES) is None
-    assert stat_owner('cassette', rules=SHARED_RULES) == (
-        'cassette',
-        EntityStat.EXIST,
-    )
-    assert stat_owner('heart', rules=SHARED_RULES) == (
-        'heart',
-        EntityStat.SELECT,
-    )
-    assert stat_owner('end_level_heart', rules=SHARED_RULES) == (
-        'heart',
-        EntityStat.SELECT,
-    )
-    assert stat_owner('keep_going_heart', rules=SHARED_RULES) == (
-        'heart',
-        EntityStat.SELECT,
-    )
+    assert SHARED_RULES.entity_kind(name, attrs) == expected
 
 
 def test_kind_sprite_is_inherited_without_implying_statistics() -> None:
-    rules = load_entity_rules(Path('src/pist/data/entities.toml'))
+    rules = load_entity_rules(Path('packages/berries/src/berries/data/entities.toml'))
 
-    assert kind_sprite('strawberry', rules=rules) == 'strawberry.png'
-    assert kind_sprite('goldenberry', rules=rules) is None
+    assert rules.kind_sprite('strawberry') == 'strawberry.png'
+    assert rules.kind_sprite('goldenberry') is None
 
 
 def test_heart_kind_uses_configured_attribute_rules_and_default() -> None:
@@ -126,14 +79,11 @@ def test_heart_kind_uses_configured_attribute_rules_and_default() -> None:
         .with_rule('heartGem', 'keep_going_heart', {'endLevel': False})
         .with_rule('heartGem', 'end_level_heart', {})
     )
-    assert entity_kind('heartGem', {'endLevel': True}, rules=rules) == 'end_level_heart'
-    assert entity_kind('heartGem', {'endLevel': False}, rules=rules) == 'keep_going_heart'
-    assert entity_kind('heartGem', {}, rules=rules) == 'end_level_heart'
-    assert (
-        entity_kind('ArphimigonHelper/HeartGem', {'endLevel': 'true'}, rules=rules)
-        == 'end_level_heart'
-    )
-    assert entity_kind('fakeHeart', {'endLevel': True}, rules=rules) is None
+    assert rules.entity_kind('heartGem', {'endLevel': True}) == 'end_level_heart'
+    assert rules.entity_kind('heartGem', {'endLevel': False}) == 'keep_going_heart'
+    assert rules.entity_kind('heartGem', {}) == 'end_level_heart'
+    assert rules.entity_kind('ArphimigonHelper/HeartGem', {'endLevel': 'true'}) == 'end_level_heart'
+    assert rules.entity_kind('fakeHeart', {'endLevel': True}) is None
 
 
 def test_entity_rules_can_be_loaded_from_custom_config(tmp_path) -> None:
@@ -145,8 +95,6 @@ label = 'Berry'
 [kinds.testberry]
 label = 'Test Berry'
 parent = 'berry'
-stat = 'count'
-table_field = { table = 'maps', field = 'test berries' }
 
 [entities."TestHelper/Berry"]
 rules = [{ kind = 'testberry', when = { moon = true } }]
@@ -156,12 +104,8 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
 
     rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
-    assert entity_kind('TestHelper/Berry', {'moon': True}, rules=rules) == 'testberry'
-    assert entity_kind('TestHelper/Berry', {'moon': False}, rules=rules) is None
-    assert stat_owner('testberry', rules=rules) == (
-        'testberry',
-        EntityStat.COUNT,
-    )
+    assert rules.entity_kind('TestHelper/Berry', {'moon': True}) == 'testberry'
+    assert rules.entity_kind('TestHelper/Berry', {'moon': False}) is None
 
 
 def test_entity_rules_rejects_kind_definitions_in_an_entity_rule_file(tmp_path) -> None:
@@ -204,15 +148,15 @@ rules = [
 
     rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
-    assert entity_kind('TestHelper/Heart', {'fake': True}, rules=rules) is None
+    assert rules.entity_kind('TestHelper/Heart', {'fake': True}) is None
     assert (
-        entity_kind('TestHelper/Heart', {'fake': False}, meta={'HeartIsEnd': True}, rules=rules)
+        rules.entity_kind('TestHelper/Heart', {'fake': False}, meta={'HeartIsEnd': True})
         == 'end_level_heart'
     )
-    assert entity_kind('TestHelper/Heart', {'fake': False}, rules=rules) is None
-    assert entity_kind('TestHelper/Heart', {}, rules=rules) == 'end_level_heart'
-    assert entity_kind('TestHelper/Heart', {'fake': False}, meta={}, rules=rules) is None
-    assert entity_kind('TestHelper/Heart', {}, meta={'HeartIsEnd': False}, rules=rules) is None
+    assert rules.entity_kind('TestHelper/Heart', {'fake': False}) is None
+    assert rules.entity_kind('TestHelper/Heart', {}) == 'end_level_heart'
+    assert rules.entity_kind('TestHelper/Heart', {'fake': False}, meta={}) is None
+    assert rules.entity_kind('TestHelper/Heart', {}, meta={'HeartIsEnd': False}) is None
 
     serialized = entity_rules_toml(rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}))
     assert 'exclude' not in serialized
@@ -243,8 +187,8 @@ label = 'Strawberry'
     )
     rules = rules.with_exclusion('Example/Berry', {'fake': True})
 
-    assert entity_kind('Example/Berry', {'fake': True}, rules=rules) is None
-    assert entity_kind('Example/Berry', {'fake': False}, rules=rules) == 'strawberry'
+    assert rules.entity_kind('Example/Berry', {'fake': True}) is None
+    assert rules.entity_kind('Example/Berry', {'fake': False}) == 'strawberry'
 
 
 def test_entity_rules_reject_unknown_kind_and_parent(tmp_path) -> None:
@@ -282,7 +226,7 @@ rules = [{ kind = 'berry' }]
 
     rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
-    assert entity_kind('TestHelper/Berry', {}, rules=rules) == 'berry'
+    assert rules.entity_kind('TestHelper/Berry', {}) == 'berry'
 
 
 def test_adding_a_child_preserves_rules_targeting_its_new_parent() -> None:
@@ -295,7 +239,7 @@ def test_adding_a_child_preserves_rules_targeting_its_new_parent() -> None:
 
     updated = rules.with_kind('secretberry', '秘密草莓', parent='moonberry')
 
-    assert entity_kind('strawberry', {}, rules=updated) == 'moonberry'
+    assert updated.entity_kind('strawberry', {}) == 'moonberry'
     assert 'moonberry' not in updated.leaf_kind_names
 
 
@@ -335,27 +279,6 @@ def test_entity_rules_can_update_a_kind_without_renaming_it() -> None:
 
     assert updated.kinds['customberry'] == EntityKind(
         label='Custom Strawberry', parent='berry', sprite='customberry.png'
-    )
-
-
-def test_updating_kind_presentation_preserves_its_statistic_target() -> None:
-    rules = EntityRules(
-        kinds={
-            'berry': EntityKind(label='Berry'),
-            'strawberry': EntityKind(
-                label='Strawberry',
-                parent='berry',
-                stat=EntityStat.COUNT,
-                table_field=EntityTableField(table='主表', field='红草莓数'),
-            ),
-        }
-    )
-
-    updated = rules.with_updated_kind('strawberry', '红草莓', parent='berry')
-
-    assert updated.kinds['strawberry'].stat is EntityStat.COUNT
-    assert updated.kinds['strawberry'].table_field == EntityTableField(
-        table='主表', field='红草莓数'
     )
 
 
@@ -458,9 +381,9 @@ rules = [{ kind = 'strawberry' }]
 
     loaded = store.load()
     assert loaded.kinds['goldenberry'].parent == 'redberry'
-    assert entity_kind('strawberry', {}, rules=loaded) == 'redberry'
-    assert entity_kind('Example/Collectible', {'moon': False}, rules=loaded) == 'redberry'
-    assert entity_kind('Local/Collectible', {}, rules=loaded) == 'redberry'
+    assert loaded.entity_kind('strawberry', {}) == 'redberry'
+    assert loaded.entity_kind('Example/Collectible', {'moon': False}) == 'redberry'
+    assert loaded.entity_kind('Local/Collectible', {}) == 'redberry'
 
     deleted = loaded.with_deleted_kind('redberry')
     store.delete_kind('redberry', 'berry', deleted)
@@ -468,9 +391,9 @@ rules = [{ kind = 'strawberry' }]
     loaded = store.load()
     assert 'redberry' not in loaded.kinds
     assert loaded.kinds['goldenberry'].parent == 'berry'
-    assert entity_kind('strawberry', {}, rules=loaded) == 'berry'
-    assert entity_kind('Example/Collectible', {'moon': False}, rules=loaded) == 'berry'
-    assert entity_kind('Local/Collectible', {}, rules=loaded) == 'berry'
+    assert loaded.entity_kind('strawberry', {}) == 'berry'
+    assert loaded.entity_kind('Example/Collectible', {'moon': False}) == 'berry'
+    assert loaded.entity_kind('Local/Collectible', {}) == 'berry'
 
 
 def test_entity_rules_reject_sprite_paths_outside_sprite_directories(tmp_path) -> None:
@@ -494,7 +417,7 @@ sprite = '../outside.png'
         "stat = 'count'\ntable_field = { table = 'maps', field = 'berries' }",
     ],
 )
-def test_entity_rules_reject_invalid_table_field_config(tmp_path, kind_config: str) -> None:
+def test_entity_rules_reject_application_stat_config(tmp_path, kind_config: str) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         f"""[kinds.berry]
@@ -551,12 +474,10 @@ label = 'Berry'
 [kinds.strawberry]
 label = 'Strawberry'
 parent = 'berry'
-stat = 'count'
 
 [kinds.moonberry]
 label = 'Moonberry'
 parent = 'berry'
-stat = 'count'
 
 [entities."TestHelper/Berry"]
 rules = [{ kind = 'strawberry' }]
@@ -577,9 +498,9 @@ rules = [{ kind = 'moonberry', when = { moon = true } }]
     store.save(rules)
 
     reloaded = load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
-    assert entity_kind('TestHelper/Berry', {}, rules=reloaded) == 'strawberry'
-    assert entity_kind('TestHelper/Berry', {'moon': True}, rules=reloaded) == 'moonberry'
-    assert entity_kind('TestHelper/Berry', {'golden': True}, rules=reloaded) == 'moonberry'
+    assert reloaded.entity_kind('TestHelper/Berry', {}) == 'strawberry'
+    assert reloaded.entity_kind('TestHelper/Berry', {'moon': True}) == 'moonberry'
+    assert reloaded.entity_kind('TestHelper/Berry', {'golden': True}) == 'moonberry'
     assert '[kinds.strawberry]' not in local_path.read_text(encoding='utf-8')
 
 
@@ -588,8 +509,6 @@ def test_local_entity_layer_rejects_kind_definitions(tmp_path) -> None:
     shared_path.write_text(
         """[kinds.heart]
 label = 'Heart'
-stat = 'select'
-table_field = { table = 'maps', field = 'heart' }
 """,
         encoding='utf-8',
     )
@@ -641,7 +560,7 @@ rules = [{ kind = 'moonberry' }]
     store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path, local_path=local_path)
     rules = store.load()
 
-    assert entity_kind('TestHelper/Berry', {}, rules=rules) == 'moonberry'
+    assert rules.entity_kind('TestHelper/Berry', {}) == 'moonberry'
     assert len(store.conflicts) == 1
     conflict = store.conflicts[0]
     assert conflict.entity_name == 'TestHelper/Berry'
@@ -694,4 +613,4 @@ label = 'Berry'
     store.save_generated_layer(generated)
 
     assert store.load_shared_layer() == generated
-    assert entity_kind('TestHelper/Berry', {}, rules=store.load()) == 'berry'
+    assert store.load().entity_kind('TestHelper/Berry', {}) == 'berry'

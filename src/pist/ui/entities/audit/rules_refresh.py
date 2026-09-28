@@ -3,14 +3,13 @@
 import difflib
 from typing import ClassVar
 
+from berries.entities.rules import EntityRuleLayer, EntityRulesForId, entity_rules_toml
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
-
-from pist.entities.rules import EntityRuleLayer, EntityRulesForId, entity_rules_toml
 
 
 class AuditRulesRefreshScreen(ModalScreen[bool]):

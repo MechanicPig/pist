@@ -16,22 +16,27 @@ Pist 同时处理宿主文件系统路径、ZIP 内的 Everest 虚拟资源路�
 | 对象 | 结论 | 证据 |
 | --- | --- | --- |
 | 本地游戏、Mod、设置和数据路径 | 使用 `Path`；身份遵循宿主文件系统。 | Python `pathlib`；Everest 使用宿主路径 API。 |
-| Everest 资源路径、ZIP 条目 | 使用 `/` 和 `PurePosixPath`；身份精确且区分大小写。 | `Everest.Content.cs`。 |
+| 目录内容条目的相对定位路径 | 使用宿主平台的 `PurePath`；打开时与根 `Path` 拼接。 | Python `pathlib`；Everest 使用宿主路径 API。 |
+| ZIP 条目的相对定位路径 | 使用 `PurePosixPath`；身份精确且区分大小写。 | ZIP 格式；`Everest.Content.cs`。 |
+| Everest 虚拟资源路径 | 使用 `ContentPath`，规范分隔符后保持精确且区分大小写。 | `Everest.Content.cs`。 |
 | SID、Collab ID、LevelSet、大厅关联 | 是标识字符串；精确且区分大小写。 | `CollabUtils2/LobbyHelper.cs`。 |
 | Mod metadata 与 dependency 名称 | 是 Everest 身份；精确且区分大小写。 | `Everest.Loader.cs`。 |
 | `dialog_key` | 是由 SID 等文本派生的查询键，不是 SID 或资源路径。 | Everest `Extensions.DialogKeyify`。 |
+| Dialog 语言文件名 | `Dialog/` 与 `.txt` 精确匹配；完整语言文件名大小写不敏感。 | Everest `Everest.Content.cs`、`Patches/Language.cs`。 |
 | Dialog 查询 | 游戏与 Pist 均大小写不敏感。 | Celeste `Language.cs`；Everest `patch_Dialog.cs`。 |
 | UI 排序、显示筛选 | 可用 `casefold()`；不得复用为身份匹配。 | Pist 的展示策略。 |
 
 ### 本地文件系统路径
 
 - 用 `Path` 定位、拼接、打开和遍历；不要手工替换分隔符。
+- 目录内容树中的 `DirContentEntry.at` 是相对于其根目录的宿主 `PurePath`，不得包含绝对路径或父目录段。
 - 不以 `casefold()` 推断物理路径相同；需要比较两个已存在文件时使用 `Path.samefile()`。
 
 ### Everest 虚拟资源路径
 
 - Everest 将 `\\` 规范为 `/`，随后以默认 `Dictionary<string, ModAsset>` 查表。
-- 因而可先规范分隔符，再使用 `PurePosixPath` 做结构拆分；不得折叠大小写。
+- ZIP 内部条目使用 `PurePosixPath` 定位；目录条目使用宿主 `PurePath` 定位。两者进入地图、SID 或 Dialog 等领域模型时，显式转换为统一的 `ContentPath`。
+- `ContentPath` 先规范分隔符，再按 `PurePosixPath` 结构拆分；不得折叠大小写。
 - 证据：`Everest.Content.cs` 的 `Crawl`（约 390–396 行）、`Map`（约 65 行）和 `TryGet`（约 510、558 行）。
 
 ### SID 与 Collab 标识
@@ -52,6 +57,13 @@ Pist 同时处理宿主文件系统路径、ZIP 内的 Everest 虚拟资源路�
 - 游戏的 `Language.Dialog` 使用 `StringComparer.OrdinalIgnoreCase`；Pist 的 `CaseFoldDict` 与此保持一致。因此 Dialog key 的查询大小写不敏感。
 - 路径到 `dialog_key` 的结构转换仍先遵循虚拟地图路径规则；Dialog 查询不敏感不能反推 SID 或资源路径不敏感。
 - 证据：`Everest/Extensions.cs` 的 `DialogKeyify`（约 130 行），`Everest/Patches/Dialog.cs` 的 `Get` / `Has`（约 176–213 行），以及 Celeste `Language.cs` 的 `Language.Dialog` 初始化（约 45 行）。
+
+### Dialog 语言文件
+
+- Everest 仅把精确位于 `Dialog/` 且扩展名为小写 `.txt` 的资源识别为普通 Dialog 文件。
+- 资源被识别后，加载器使用 `OrdinalIgnoreCase` 匹配完整的无扩展名虚拟路径；因此 `English.txt`、`english.txt` 与 `ENGLISH.txt` 表示同一语言文件。
+- Pist 保持目录和扩展名的精确语义，只在已支持语言的文件名匹配处忽略大小写；这不是通用虚拟资源路径规则。
+- 证据：Everest `Everest.Content.cs` 的 `GuessType` / `MatchExtension`（约 736、855 行），`Patches/Language.cs` 的 `_GetLanguageText`（约 252 行），以及 `Patches/Dialog.cs` 的 `_GetFiles`（约 46 行）。
 
 ### 扩展名
 

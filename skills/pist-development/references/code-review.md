@@ -47,7 +47,7 @@
 
 - 当一个模块提供一组相关能力、调用处需要多个成员，或模块名能说明成员来源时，优先 `import module` / `import module as alias` 并通过 `module.member` 访问；典型标准库如 `re`、`json`、`sqlite3` 通常作为模块使用。
 - 少量且本身就是惯用独立名称的类型、装饰器或函数可以直接导入，例如 `Path`、`dataclass`。不要为消除所有 `from` import 而牺牲可读性。
-- 从同一模块逐项导入形成长列表，或读代码必须回到文件头才能判断名称来源，是收敛为模块导入的信号。别名取当前作用域内最短且无歧义的名称，如 `import pist.game.mods as mods`。
+- 从同一模块逐项导入形成长列表，或读代码必须回到文件头才能判断名称来源，是收敛为模块导入的信号。别名取当前作用域内最短且无歧义的名称，如 `import berries.game.mods as mods`。
 - UI 导入同名领域模块时应显式消歧；例如 `from pist.entities import audit as backend` 可避免与 `pist.ui.entities.audit` 混淆。只有存在实际歧义时才使用 `backend`、`domain`、`game_` 等前缀，不按目录层级机械加长别名。
 - 审查模块导入方式时同步检查公共入口与内部实现边界：内部调用优先导入职责所属模块，不因包级偶然重导出而逐项导入大量名称。
 

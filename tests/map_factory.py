@@ -3,16 +3,15 @@
 from pathlib import Path
 from typing import Literal
 
-from pist.game.content import ContentPath, GameContent
-from pist.game.dialog import dialog_key_for_map_file, split_map_side_suffix
-from pist.game.levels import (
+from berries.game.content import ContentPath, GameContent
+from berries.game.dialog import dialog_key_for_map_file, split_map_side_suffix
+from berries.game.levels import (
     Level,
     LevelSide,
-    LoadedModMap,
-    LoadedVanillaMap,
+    Map,
 )
-from pist.game.maps import MapInfo
-from pist.game.mods import InstalledMod
+from berries.game.maps import MapInfo
+from berries.game.mods import InstalledMod
 
 
 def make_level_side(
@@ -32,14 +31,10 @@ def make_level_side(
     base_file, side_suffix = split_map_side_suffix(ContentPath(file_path))
     resolved_side = side or side_suffix
     level_side = LevelSide.A if resolved_side is None else LevelSide(resolved_side)
-    loaded_map = (
-        LoadedVanillaMap(info, GameContent(Path('Content')))
-        if mod is None
-        else LoadedModMap(info, mod)
-    )
+    loaded_map = Map(info, GameContent(Path('Content'))) if mod is None else Map(info, mod)
     level = Level(
         sid=sid or '/'.join(base_file.with_suffix('').parts[1:]),
         dialog_key=dialog_key or dialog_key_for_map_file(base_file),
-        maps_by_side={LevelSide.A: loaded_map, level_side: loaded_map},
+        maps=(loaded_map,) * (level_side.position + 1),
     )
     return level, level_side

@@ -97,12 +97,9 @@ def test_submit_update_reads_all_record_pages(monkeypatch) -> None:
         assert result_type is RecordsResult
         calls.append(options)
         offset = options.offset
+        await asyncio.sleep(0)
         return RecordsResult.model_validate(
-            {
-                'records': [
-                    {'recordID': f'r{index}'} for index in range(offset, min(offset + 100, 101))
-                ]
-            }
+            {'records': [{'recordID': f'r{i}'} for i in range(offset, min(offset + 100, 101))]}
         )
 
     monkeypatch.setattr(client, '_post_operation', get_records)
@@ -134,8 +131,8 @@ def test_incomplete_record_omits_map_data_from_main_table(status: str) -> None:
     fields = FieldsResult.model_validate(
         {
             'fields': [
-                {'fieldID': f'field-{index}', 'fieldTitle': title, 'fieldType': field_type}
-                for index, (title, field_type) in enumerate(
+                {'fieldID': f'field-{i}', 'fieldTitle': title, 'fieldType': field_type}
+                for i, (title, field_type) in enumerate(
                     (
                         ('Mod元数据名', 1),
                         ('地图名', 1),

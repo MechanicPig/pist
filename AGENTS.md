@@ -9,8 +9,8 @@ Pist 用于扫描本地 Celeste 与已启用 Mod，辅助记录地图初见数�
 ## 工程约束
 
 - 使用 Python 3.14 及以上版本；依赖、虚拟环境和锁文件统一由 `uv` 管理。
-- 源码位于 `src/pist/`，测试位于 `tests/`，打包的共享数据位于 `src/pist/data/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
-- 运行时本地数据统一位于名为 `.pist` 的目录：源码工作区使用仓库根目录，安装包使用 `platformdirs` 选择的平台用户数据目录；`PIST_DATA_DIR` 可覆盖其完整路径。开发用检查报告、临时脚本、参考仓库及构建产物仍放在仓库内被忽略的 `.pist/`；其中 `local-data.sqlite3`、扫描报告和构建产物不得手工修改。
+- 公共包 Berries 位于 `packages/berries/src/berries/`，个人应用 Pist 位于 `src/pist/`，测试位于 `tests/`；公共共享数据位于 `packages/berries/src/berries/data/`，应用数据位于 `src/pist/data/` 与 `src/pist/app_resources/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
+- Pist 运行时本地数据位于名为 `.pist` 的目录：源码工作区使用仓库根目录，安装包使用 `platformdirs` 选择的平台用户数据目录；`PIST_DATA_DIR` 可覆盖其完整路径。Berries 单独安装时使用自己的平台用户数据目录和 `BERRIES_DATA_DIR`，在本仓库源码 workspace 中则与 Pist 共用根目录 `.pist/`。开发用检查报告、临时脚本、参考仓库及构建产物仍放在仓库内被忽略的 `.pist/`；其中 `local-data.sqlite3`、扫描报告和构建产物不得手工修改。
 - 仅面向内部开发的本地数据结构变更时，先确认没有进程占用对应的 `.pist/*.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
 - 变更 SQLite 的表、字段或其语义前，先向用户列出 schema diff 与当前本地数据迁移方案供审查；获确认后再实施，并删除旧 schema，不保留运行时兼容层。
 - 新增依赖前先确认标准库或既有依赖无法合理解决问题；通过 `uv add` 或 `uv add --group dev` 更新 `pyproject.toml` 与 `uv.lock`，不要手改锁文件。
@@ -32,12 +32,12 @@ uv run pist --help
 
 # 完整验证
 uv run pytest --basetemp .pist/pytest
-uv run ruff check src/pist tests
-uv run ruff format --check src/pist tests
-uv run pyright src/pist tests
+uv run ruff check packages/berries/src src/pist tests examples
+uv run ruff format --check packages/berries/src src/pist tests examples
+uv run pyright packages/berries/src src/pist tests
 
 # 验证打包产物
-uv build --out-dir .pist/build
+uv build --all-packages --out-dir .pist/build
 ```
 
 当环境不允许 pytest 写入系统临时目录时，测试必须统一复用项目内的临时根目录：
@@ -61,7 +61,7 @@ uv run pytest --basetemp .pist/pytest
 
 ## 架构原则
 
-- `game` 只承载游戏文件、存档、Mod 与地图的读取；`entities` 与 `map_entrances` 承载 Pist 的可配置地图解释规则，前者还包含实体统计分析与审计知识。它们及数据模型均不依赖 Textual、浏览器页面或其他 UI；UI 只协调用户交互与领域服务。
+- `berries.game` 只承载游戏文件、存档、Mod 与地图的读取；`berries.entities` 与 `berries.map_entrances` 承载可复用的地图解释规则。Pist 的个人实体统计位于 `pist.entity_stats`，审计位于 `pist.entities.audit`；公共模块及数据模型均不依赖 Textual、浏览器页面或其他 UI，UI 只协调用户交互与领域服务。
 - `ui` 按用户可见工作流组织子包；仅跨工作流复用的 Textual 基类或控件保留在 `ui` 根部，避免将不同界面的实现平铺在一起。
 - 包的 `__init__.py` 只提供稳定的公共入口；具体实现放在职责明确的子模块中。内部调用优先导入实现所属模块，而不是依赖包入口的偶然重导出。
 - 实体规则以明确的实体 ID 和属性条件为准，不能仅根据名称、前缀或显示文本推断语义。保留“属性未写入”与“显式写入默认值”的差异。

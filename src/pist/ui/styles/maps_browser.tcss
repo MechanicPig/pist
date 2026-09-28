@@ -23,6 +23,15 @@ Horizontal {
     text-style: bold;
 }
 
+#browser-warnings-button {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    margin-right: 1;
+    padding: 0 1;
+    border: none;
+}
+
 #campaign-list-title:light {
     color: #0083b2;
 }
@@ -174,8 +183,32 @@ Horizontal {
 }
 
 DatePickerScreen, RecordReferenceScreen, RecordEditorScreen, AuthorSelectionScreen,
-LobbyCampaignEditorScreen {
+LobbyCampaignEditorScreen, BrowserWarningsScreen {
     align: center middle;
+}
+
+#browser-warnings-dialog {
+    width: 70%;
+    height: 70%;
+    border: tall $warning;
+    padding: 1 2;
+    background: $surface;
+}
+
+#browser-warnings-content {
+    height: 1fr;
+    margin-top: 1;
+}
+
+.browser-warning-entry {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#browser-warnings-actions {
+    height: auto;
+    align: right middle;
+    padding-top: 1;
 }
 
 MapActionScreen {

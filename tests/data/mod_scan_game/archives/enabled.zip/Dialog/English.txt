@@ -1,0 +1,3 @@
+Test_0_Map=English Map
+Test_0_Map_author=by Alice
+Test_0_Map_collabcreditstags=Beginner

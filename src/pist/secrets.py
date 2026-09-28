@@ -3,10 +3,9 @@
 import asyncio
 
 import keyring
+from berries.models import FrozenModel
+from berries.types import NonEmptyStr
 from pydantic import ValidationError
-
-from pist.models import FrozenModel
-from pist.types import NonEmptyStr
 
 SERVICE_NAME = 'pist.tencent_docs'
 DIRECT_CREDENTIALS_KEY = 'direct_credentials'

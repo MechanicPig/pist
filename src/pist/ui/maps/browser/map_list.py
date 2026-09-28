@@ -2,15 +2,14 @@
 
 from collections.abc import Callable, Iterable, Mapping
 
+from berries.game import maps as game_maps
+from berries.game.levels import Level, LevelSide, Map
+from berries.game.saves import SaveSlot
 from textual import events, on
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import ListItem, ListView, Static
-
-from pist.game import maps as game_maps
-from pist.game.levels import Level, LevelSide, LoadedMap
-from pist.game.saves import SaveSlot
 
 from .catalog import map_detail_lines, map_title
 
@@ -24,6 +23,7 @@ type MapItemFactory = Callable[
         Iterable[str],
         Mapping[str, Mapping[str, str]],
         SaveSlot | None,
+        Callable[[Map], str],
     ],
     'MapItem',
 ]
@@ -67,6 +67,7 @@ class MapItem(ListItem):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
         *children: Widget,
         leading: Widget | None = None,
         classes: str | None = None,
@@ -77,11 +78,14 @@ class MapItem(ListItem):
         self._languages = languages
         self._dialogs = dialogs
         self._marker = marker
+        self._source_name_for = source_name_for
         self._title = Static(
             map_title(level, side, languages, dialogs, marker=marker), classes='map-item-title'
         )
         self._content = Static(
-            map_detail_lines(level, side, languages, dialogs, save_slot),
+            map_detail_lines(
+                level, side, languages, dialogs, source_name_for(level[side]), save_slot
+            ),
             classes='map-item-content',
         )
         leading_children = () if leading is None else (leading,)
@@ -90,12 +94,12 @@ class MapItem(ListItem):
     @property
     def map_info(self) -> game_maps.MapInfo:
         """Return the map data for callers that do not need its source package."""
-        return self.loaded_map.map_info
+        return self.map.map_info
 
     @property
-    def loaded_map(self) -> LoadedMap:
+    def map(self) -> Map:
         """Return the concrete map asset for the currently selected Side."""
-        return self.level.maps_by_side[self.side]
+        return self.level[self.side]
 
     @property
     def state_key(self) -> str:
@@ -107,7 +111,14 @@ class MapItem(ListItem):
     def refresh_stats(self, save_slot: SaveSlot | None) -> None:
         """Update only this item's dynamic native save statistics."""
         self._content.update(
-            map_detail_lines(self.level, self.side, self._languages, self._dialogs, save_slot)
+            map_detail_lines(
+                self.level,
+                self.side,
+                self._languages,
+                self._dialogs,
+                self._source_name_for(self.map),
+                save_slot,
+            )
         )
 
     def set_side(self, side: LevelSide, save_slot: SaveSlot | None) -> None:
@@ -155,6 +166,7 @@ class SideMapItem(MapItem):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
     ) -> None:
         self._sides = tuple(sorted(sides))
         self._index = 0
@@ -162,7 +174,15 @@ class SideMapItem(MapItem):
         self._previous = MapSideButton(-1)
         self._next = MapSideButton(1)
         self._controls = Horizontal(self._previous, self._next, classes='map-side-controls')
-        super().__init__(level, self._sides[0], languages, dialogs, save_slot, self._controls)
+        super().__init__(
+            level,
+            self._sides[0],
+            languages,
+            dialogs,
+            save_slot,
+            source_name_for,
+            self._controls,
+        )
         self.add_class('side-map-item')
         self._update_buttons()
 
@@ -190,9 +210,9 @@ class SideMapItem(MapItem):
 
     def restore_selected_side(self, map_file: game_maps.MapFilePath) -> None:
         """Restore the selected side after replacing a Collab map list."""
-        for index, side in enumerate(self._sides):
-            if self.level.maps_by_side[side].map_info.file_path == map_file:
-                self._index = index
+        for i, side in enumerate(self._sides):
+            if self.level[side].map_info.file_path == map_file:
+                self._index = i
                 self.set_side(side, self._save_slot)
                 self._update_buttons()
                 break
@@ -207,6 +227,7 @@ class MapList(ListView):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
         *,
         item_factory: MapItemFactory | None = None,
         extra_items: Iterable[ListItem] = (),
@@ -215,9 +236,10 @@ class MapList(ListView):
         self._dialogs = dialogs
         self._side_groups = _map_side_groups(self.maps)
         self._item_factory = item_factory
+        self.source_name_for = source_name_for
         super().__init__(
             *(
-                self.item_for(level, sides, languages, dialogs, save_slot)
+                self.item_for(level, sides, languages, dialogs, save_slot, source_name_for)
                 for level, sides in self._side_groups
             ),
             *extra_items,
@@ -231,13 +253,14 @@ class MapList(ListView):
         languages: Iterable[str],
         dialogs: Mapping[str, Mapping[str, str]],
         save_slot: SaveSlot | None,
+        source_name_for: Callable[[Map], str],
     ) -> MapItem:
         """Build the list item while preserving a specialized lobby item factory."""
         if self._item_factory is None:
             if len(sides) > 1:
-                return SideMapItem(level, sides, languages, dialogs, save_slot)
-            return MapItem(level, sides[0], languages, dialogs, save_slot)
-        return self._item_factory(level, sides, languages, dialogs, save_slot)
+                return SideMapItem(level, sides, languages, dialogs, save_slot, source_name_for)
+            return MapItem(level, sides[0], languages, dialogs, save_slot, source_name_for)
+        return self._item_factory(level, sides, languages, dialogs, save_slot, source_name_for)
 
     @property
     def map_items(self) -> tuple[MapItem, ...]:

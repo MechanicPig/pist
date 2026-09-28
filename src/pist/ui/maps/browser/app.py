@@ -7,12 +7,32 @@ from html import unescape
 from pathlib import Path
 from typing import ClassVar
 
+from berries import map_layout
+from berries.entities.classification import (
+    CollectedEntityRuleIssue,
+    CollectedEntityRuleIssueStatus,
+)
+from berries.entities.rules import load_entity_rule_layers
+from berries.game import campaigns as game_campaigns
+from berries.game import collab as game_collab
+from berries.game import enders_blender
+from berries.game import levels as game_levels
+from berries.game import maps as game_maps
+from berries.game import mods as game_mods
+from berries.game.binmap import AttrValue
+from berries.game.content import MAPS_DIR
+from berries.game.dialog import localized_name
+from berries.game.map_hiders import MapHiderRules
+from berries.game.map_source import MapSource
+from berries.game.saves import SaveReader, SaveSlot
+from berries.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSubmission
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import (
+    Button,
     Footer,
     Header,
     ListItem,
@@ -20,6 +40,8 @@ from textual.widgets import (
     Static,
 )
 
+from pist import entity_stats, record_entities, routes
+from pist.app_data import AppDataStores
 from pist.collab_lobbies import (
     DEFAULT_COLLAB_LOBBY_OVERRIDES,
     SHARED_COLLAB_LOBBIES_WRITABLE,
@@ -27,44 +49,28 @@ from pist.collab_lobbies import (
     CollabLobbyOverrideStore,
 )
 from pist.entities.audit import LOCAL_AUDIT_DB_PATH, EntityAuditStore
-from pist.entities.classification import (
-    CollectedEntityRuleIssue,
-    CollectedEntityRuleIssueStatus,
-    SelectConflict,
-)
-from pist.game import campaigns as game_campaigns
-from pist.game import collab as game_collab
-from pist.game import levels as game_levels
-from pist.game import maps as game_maps
-from pist.game import mods as game_mods
-from pist.game import routes
-from pist.game.binmap import AttrValue
-from pist.game.content import ContentPath
-from pist.game.dialog import localized_name
-from pist.game.map_hiders import MapHiderRules
-from pist.game.map_source import MapSource
-from pist.game.saves import SaveReader, SaveSlot
-from pist.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSubmission
-from pist.local_data import LocalDataStore
-from pist.map_preview import MapPreview, MapPreviewError, MapPreviewMode
+from pist.entity_stats import SelectConflict
+from pist.paths import PIST_DIR
 from pist.records import (
     MapRecord,
     create_map_record,
     map_record_progress,
     merge_saved_record,
 )
+from pist.route_editor import MapRouteEditor, MapRouteEditorError, MapRouteEditorMode
 from pist.settings import PistSettings, SettingsStore
 from pist.sheet_report import manual_record_fields
 from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
 from pist.types import RecordValues
 
 from ...tui import RefreshableCssApp
-from . import campaign_list, catalog, collab_list, map_actions, map_list, records
+from . import campaign_list, catalog, collab_list, diagnostics, map_actions, map_list, records
 from .collab_order import CollabMapOrderController
 
 CAMPAIGN_LIST_ID = 'campaign-list'
 CAMPAIGN_LIST_HEADER_ID = 'campaign-list-header'
 CAMPAIGN_LIST_TITLE_ID = 'campaign-list-title'
+BROWSER_WARNINGS_BUTTON_ID = 'browser-warnings-button'
 DETAIL_ID = 'detail'
 MAP_DETAIL_ID = 'map-detail'
 DETAIL_SCROLL_ID = 'detail-scroll'
@@ -81,10 +87,15 @@ def _plain_html(value: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', value).strip()
 
 
+def _scan_warning_text(warning: game_mods.ModScanWarning) -> str:
+    """Format one scanner warning for the consolidated warning window."""
+    return f'Mod 扫描 {warning.mod_filename}/{warning.file_path}：{warning.message}'
+
+
 def _select_conflict_hints(conflicts: tuple[SelectConflict, ...]) -> dict[str, str]:
     """Return visible field hints for select-stat values that conflict in one map."""
     return {
-        conflict.table_field.field: f'多个结果：{"、".join(sorted(conflict.values))}'
+        conflict.rule.field: f'多个结果：{"、".join(sorted(conflict.values))}'
         for conflict in conflicts
     }
 
@@ -106,7 +117,7 @@ def _blocking_collected_entity_issues(
 
 
 def _unique_campaign_map_groups(
-    campaigns: Iterable[game_campaigns.LoadedCampaign],
+    campaigns: Iterable[game_campaigns.Campaign],
 ) -> tuple[tuple[tuple[game_levels.Level, game_levels.LevelSide], ...], ...]:
     """Preserve journal Campaign groups while removing duplicate Level sides."""
     result: list[tuple[tuple[game_levels.Level, game_levels.LevelSide], ...]] = []
@@ -123,13 +134,18 @@ def _unique_campaign_map_groups(
     return tuple(result)
 
 
-def _is_source_collab_map(level: game_levels.Level, side: game_levels.LevelSide) -> bool:
+def _is_source_collab_map(
+    catalog: game_campaigns.CampaignCatalog,
+    level: game_levels.Level,
+    side: game_levels.LevelSide,
+) -> bool:
     """Return whether a map is inside its source Mod's declared Collab root."""
-    source = level.maps_by_side[side]
+    map_file = level[side]
+    mod = catalog.mod_for(map_file)
     return (
-        isinstance(source, game_levels.LoadedModMap)
-        and source.mod.collab_id is not None
-        and source.map_info.file_path.is_relative_to(ContentPath('Maps', source.mod.collab_id))
+        mod is not None
+        and mod.collab_id is not None
+        and map_file.map_info.file_path.is_relative_to(MAPS_DIR / mod.collab_id)
     )
 
 
@@ -157,8 +173,8 @@ class MapBrowserApp(RefreshableCssApp[None]):
         settings_store: SettingsStore | None = None,
         save_reader: SaveReader | None = None,
         save_slot: SaveSlot | None = None,
-        route_reader: routes.EndersBlenderReader | None = None,
-        local_data: LocalDataStore | None = None,
+        route_reader: enders_blender.EndersBlenderReader | None = None,
+        data_stores: AppDataStores | None = None,
         gamebanana_client: GameBananaClient | None = None,
         inspection_report: InspectionReport | None = None,
         sheet_client: TencentSmartSheetClient | None = None,
@@ -175,7 +191,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self._save_reader = save_reader
         self._save_slot = save_slot
         self._route_reader = route_reader
-        self._local_data = local_data or LocalDataStore()
+        self._data_stores = data_stores or AppDataStores()
         self._gamebanana_client = gamebanana_client
         self._sheet_client = sheet_client
         self._sheet_source = sheet_source
@@ -185,7 +201,6 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self._manual_record_fields = (
             () if inspection_report is None else manual_record_fields(inspection_report)
         )
-        self._scan_warnings = report.warnings
         game_dir = Path(report.mods_dir).parent
         vanilla_dialogs = game_campaigns.load_vanilla_dialogs(game_dir)
         vanilla_maps = game_campaigns.load_vanilla_maps(game_dir)
@@ -202,16 +217,24 @@ class MapBrowserApp(RefreshableCssApp[None]):
             for campaign in (*self._campaigns, *self._hidden_campaigns)
             if campaign.source is MapSource.MOD
         }
+        self._lobby_campaign_cache: dict[
+            tuple[str, game_levels.LevelSide], tuple[game_campaigns.Campaign, ...]
+        ] = {}
         self._routable_maps = {
             level.sid: (level, game_levels.LevelSide.A)
             for campaign in (*self._campaigns, *self._hidden_campaigns)
             for level in campaign.levels
         }
         self._dialogs = self._campaign_catalog.dialogs
-        self._map_hider_diagnostics = self._campaign_catalog.map_hider_diagnostics
+        self._browser_warnings = (
+            *(_scan_warning_text(warning) for warning in report.warnings),
+            *self._campaign_catalog.diagnostics,
+        )
         self._showing_hidden_campaigns = not self._campaigns and bool(self._hidden_campaigns)
         self._selected_campaign = next(iter(self._displayed_campaigns), None)
-        self._collab_order = CollabMapOrderController(self._local_data)
+        self._collab_order = CollabMapOrderController(
+            self._data_stores.catalog, self._campaign_catalog
+        )
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -219,6 +242,12 @@ class MapBrowserApp(RefreshableCssApp[None]):
             with Vertical(id='campaign-panel'):
                 with Horizontal(id=CAMPAIGN_LIST_HEADER_ID):
                     yield Static(self._campaign_collection_title, id=CAMPAIGN_LIST_TITLE_ID)
+                    if self._browser_warnings:
+                        yield Button(
+                            f'警告（{len(self._browser_warnings)}）',
+                            id=BROWSER_WARNINGS_BUTTON_ID,
+                            variant='warning',
+                        )
                     with Horizontal(classes='campaign-list-controls'):
                         yield self._campaign_collection_button(-1)
                         yield self._campaign_collection_button(1)
@@ -234,7 +263,10 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     initial_campaign = self._selected_campaign
                     yield Static(
                         catalog.format_campaign_summary(
-                            initial_campaign, self._dialog_languages, self._dialogs
+                            initial_campaign,
+                            self._dialog_languages,
+                            self._dialogs,
+                            self._campaign_source_names(initial_campaign),
                         ),
                         id=DETAIL_ID,
                     )
@@ -243,19 +275,24 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     yield Static(Text('没有可加载的 campaign 地图。'), id=DETAIL_ID)
         yield Footer()
 
-    def _campaign_label(self, campaign: game_campaigns.LoadedCampaign) -> Text:
-        name = game_campaigns.campaign_display_name(campaign, self._dialogs, self._dialog_languages)
+    def _campaign_label(self, campaign: game_campaigns.Campaign) -> Text:
+        name = campaign.display_name(self._dialogs, self._dialog_languages)
         label = Text(f'• {name}')
         label.append(f'  ({campaign.map_count} 图)', style='dim')
-        source_count = len(
-            {level.maps_by_side[side].source_name for level, side in campaign.iter_sides()}
-        )
+        source_count = len(set(self._campaign_source_names(campaign)))
         if source_count > 1:
             label.append(f'  [{source_count} 个 Mod]', style='yellow')
         return label
 
+    def _campaign_source_names(self, campaign: game_campaigns.Campaign) -> tuple[str, ...]:
+        """Return physical source names in stable first-map order."""
+        return tuple(
+            self._campaign_catalog.source_name_for(level[side])
+            for level, side in campaign.iter_sides()
+        )
+
     @property
-    def _displayed_campaigns(self) -> tuple[game_campaigns.LoadedCampaign, ...]:
+    def _displayed_campaigns(self) -> tuple[game_campaigns.Campaign, ...]:
         """Return the currently selected campaign collection for the left list."""
         return self._hidden_campaigns if self._showing_hidden_campaigns else self._campaigns
 
@@ -309,7 +346,10 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self._update_campaign_collection_buttons()
         self.query_one(f'#{DETAIL_ID}', Static).update(
             catalog.format_campaign_summary(
-                self._selected_campaign, self._dialog_languages, self._dialogs
+                self._selected_campaign,
+                self._dialog_languages,
+                self._dialogs,
+                self._campaign_source_names(self._selected_campaign),
             )
         )
         await self._refresh_map_detail()
@@ -326,24 +366,18 @@ class MapBrowserApp(RefreshableCssApp[None]):
             self._dialog_languages,
             self._dialogs,
             self._save_slot,
+            self._campaign_catalog.source_name_for,
             item_factory=item_factory,
             extra_items=extra_items,
         )
 
     def on_mount(self) -> None:
-        if self._scan_warnings:
-            first = self._scan_warnings[0]
-            suffix = (
-                '' if len(self._scan_warnings) == 1 else f'等 {len(self._scan_warnings)} 个文件'
-            )
-            self.notify(
-                f'扫描时跳过无法解码的文本：{first.mod_filename}/{first.file_path}{suffix}',
-                severity='warning',
-                timeout=10,
-            )
-        for diagnostic in self._map_hider_diagnostics:
-            self.notify(diagnostic, severity='warning', timeout=10)
         self.call_after_refresh(self._start_collab_order_loading)
+
+    @on(Button.Pressed, f'#{BROWSER_WARNINGS_BUTTON_ID}')
+    def show_browser_warnings(self) -> None:
+        """Open the details behind the warning count shown in the campaign header."""
+        self.push_screen(diagnostics.BrowserWarningsScreen(self._browser_warnings))
 
     def on_unmount(self) -> None:
         self._collab_order.cancel()
@@ -351,7 +385,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
     def _start_collab_order_loading(self) -> None:
         self._collab_order.start(self)
 
-    def _map_widgets(self, campaign: game_campaigns.LoadedCampaign) -> list[Widget]:
+    def _map_widgets(self, campaign: game_campaigns.Campaign) -> list[Widget]:
         widgets: list[Widget] = [Static(Text('地图\n', style='bold underline'))]
         if self._campaign_overrides(campaign):
             widgets.append(
@@ -363,7 +397,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     classes='map-override-warning',
                 )
             )
-        if any(isinstance(level, game_campaigns.CollabLobby) for level in campaign.levels):
+        if any(level.is_lobby for level in campaign.levels):
             widgets.append(self._collab_lobby_list(campaign))
         else:
             widgets.append(
@@ -374,7 +408,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
             )
         return widgets
 
-    def _collab_lobby_list(self, campaign: game_campaigns.LoadedCampaign) -> map_list.MapList:
+    def _collab_lobby_list(self, campaign: game_campaigns.Campaign) -> map_list.MapList:
         """Render 0-Lobbies maps, adding lazy expansion only to actual lobbies."""
 
         def lobby_item(
@@ -383,11 +417,16 @@ class MapBrowserApp(RefreshableCssApp[None]):
             languages: Iterable[str],
             dialogs: Mapping[str, Mapping[str, str]],
             save_slot: SaveSlot | None,
+            source_name_for: Callable[[game_levels.Map], str],
         ) -> map_list.MapItem:
-            if not isinstance(level, game_campaigns.CollabLobby):
+            if not level.is_lobby:
                 if len(sides) > 1:
-                    return map_list.SideMapItem(level, sides, languages, dialogs, save_slot)
-                return map_list.MapItem(level, sides[0], languages, dialogs, save_slot)
+                    return map_list.SideMapItem(
+                        level, sides, languages, dialogs, save_slot, source_name_for
+                    )
+                return map_list.MapItem(
+                    level, sides[0], languages, dialogs, save_slot, source_name_for
+                )
             submission_maps = Vertical(classes='lobby-maps')
             if len(sides) > 1:
                 return collab_list.SideLobbyMapItem(
@@ -396,6 +435,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     languages,
                     dialogs,
                     save_slot,
+                    source_name_for,
                     submission_maps,
                 )
             return collab_list.LobbyMapItem(
@@ -404,16 +444,17 @@ class MapBrowserApp(RefreshableCssApp[None]):
                 languages,
                 dialogs,
                 save_slot,
+                source_name_for,
                 submission_maps,
             )
 
         return self._map_list(campaign.iter_sides(), item_factory=lobby_item)
 
     def _campaign_overrides(
-        self, campaign: game_campaigns.LoadedCampaign
+        self, campaign: game_campaigns.Campaign
     ) -> tuple[game_campaigns.MapOverride, ...]:
         """Return overrides whose replacement remains active in this campaign."""
-        active_maps = {id(level.maps_by_side[side]) for level, side in campaign.iter_sides()}
+        active_maps = {id(level[side]) for level, side in campaign.iter_sides()}
         return tuple(
             override
             for override in self._campaign_catalog.overrides
@@ -421,19 +462,20 @@ class MapBrowserApp(RefreshableCssApp[None]):
         )
 
     def _load_lobby_journal_refs(
-        self, loaded_map: game_levels.LoadedMap
+        self, loaded_map: game_levels.Map
     ) -> game_collab.JournalReferences:
         """Load one lobby map's journal references through the rebuildable cache."""
-        if not isinstance(loaded_map, game_levels.LoadedModMap):
+        mod = self._campaign_catalog.mod_for(loaded_map)
+        if mod is None:
             return game_collab.journal_references(loaded_map)
-        mod_path = str(loaded_map.mod.path)
-        map_file = loaded_map.info.file_path.as_posix()
+        mod_path = str(mod.path)
+        map_file = loaded_map.map_info.file_path.as_posix()
         fingerprint = game_collab.journal_fingerprint(loaded_map)
-        cached = self._local_data.load_collab_journal_refs(mod_path, map_file, fingerprint)
+        cached = self._data_stores.catalog.load_references(mod_path, map_file, fingerprint)
         if cached is not None:
             return cached
         references = game_collab.journal_references(loaded_map)
-        self._local_data.save_collab_journal_refs(mod_path, map_file, fingerprint, references)
+        self._data_stores.catalog.save_references(mod_path, map_file, fingerprint, references)
         return references
 
     @on(collab_list.LobbyMapItem.ExpansionRequested)
@@ -441,10 +483,10 @@ class MapBrowserApp(RefreshableCssApp[None]):
         """Resolve and render the current lobby side only when it is expanded."""
         item = event.item
         lobby = item.level
-        if not isinstance(lobby, game_campaigns.CollabLobby):
+        if not item.level.is_lobby:
             return
         side = item.side
-        campaigns = await self._resolve_lobby_campaigns(lobby, side, item.loaded_map)
+        campaigns = await self._resolve_lobby_campaigns(lobby, side, item.map)
         if item.level is not lobby or item.side is not side:
             return
         map_groups = _unique_campaign_map_groups(campaigns)
@@ -456,6 +498,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     self._dialog_languages,
                     self._dialogs,
                     self._save_slot,
+                    self._campaign_catalog.source_name_for,
                 )
             )
             self._collab_order.start(self.query_one(f'#{MAP_DETAIL_ID}', Vertical))
@@ -464,18 +507,17 @@ class MapBrowserApp(RefreshableCssApp[None]):
 
     async def _resolve_lobby_campaigns(
         self,
-        lobby: game_campaigns.CollabLobby,
+        lobby: game_levels.Level,
         side: game_levels.LevelSide,
-        loaded_map: game_levels.LoadedMap,
-    ) -> tuple[game_campaigns.LoadedCampaign, ...]:
+        loaded_map: game_levels.Map,
+    ) -> tuple[game_campaigns.Campaign, ...]:
         """Resolve one lobby projection from config or its lazily scanned journals."""
-        campaigns = lobby.campaigns_by_side.get(side)
+        cache_key = (lobby.sid, side)
+        campaigns = self._lobby_campaign_cache.get(cache_key)
         if campaigns is None:
             configured_refs = self._collab_lobby_overrides.campaigns_for(lobby.sid, side)
             if configured_refs is not None:
-                campaigns, diagnostics = game_campaigns.resolve_lobby_side(
-                    lobby,
-                    side,
+                campaigns, diagnostics = game_campaigns.resolve_campaign_refs(
                     self._campaigns_by_directory,
                     configured_refs,
                     reference_name='配置',
@@ -487,13 +529,14 @@ class MapBrowserApp(RefreshableCssApp[None]):
                     references = await asyncio.to_thread(self._load_lobby_journal_refs, loaded_map)
                 except (OSError, ValueError) as error:
                     self.notify(f'无法读取大厅日志：{error}', severity='warning')
-                    campaigns = ()
+                    return ()
                 else:
-                    campaigns, diagnostics = game_campaigns.resolve_lobby_side(
-                        lobby, side, self._campaigns_by_directory, references.campaign_refs
+                    campaigns, diagnostics = game_campaigns.resolve_campaign_refs(
+                        self._campaigns_by_directory, references.campaign_refs
                     )
                     for diagnostic in (*references.diagnostics, *diagnostics):
                         self.notify(diagnostic, severity='warning')
+            self._lobby_campaign_cache[cache_key] = campaigns
         return campaigns
 
     async def _edit_lobby_campaigns(self, item: collab_list.LobbyMapItem) -> None:
@@ -502,22 +545,23 @@ class MapBrowserApp(RefreshableCssApp[None]):
             self.notify('当前浏览会话未提供大厅地图集配置存储。', severity='warning')
             return
         lobby = item.level
-        if not isinstance(lobby, game_campaigns.CollabLobby):
+        if not item.level.is_lobby:
             return
         side = item.side
         configured = self._collab_lobby_overrides.campaigns_for(lobby.sid, side)
         if configured is None:
-            scanned = await self._resolve_lobby_campaigns(lobby, side, item.loaded_map)
+            scanned = await self._resolve_lobby_campaigns(lobby, side, item.map)
             initial = tuple(map_actions.campaign_ref(campaign) for campaign in scanned)
         else:
             initial = configured
-        loaded_map = item.loaded_map
-        if not isinstance(loaded_map, game_levels.LoadedModMap):
+        mod = self._campaign_catalog.mod_for(item.map)
+        if mod is None:
             return
         choices = map_actions.lobby_campaign_choices(
             self._campaigns_by_directory.values(),
             self._hidden_campaigns,
-            loaded_map.mod,
+            mod,
+            self._campaign_catalog,
             self._dialogs,
             self._dialog_languages,
             initial,
@@ -564,7 +608,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
         except (OSError, ValueError) as error:
             self.notify(f'无法保存大厅地图集：{error}', severity='error')
             return
-        lobby.campaigns_by_side.pop(side, None)
+        self._lobby_campaign_cache.pop((lobby.sid, side), None)
         self.notify(message)
         if not item.collapsed:
             item.post_message(collab_list.LobbyMapItem.ExpansionRequested(item))
@@ -578,17 +622,17 @@ class MapBrowserApp(RefreshableCssApp[None]):
     ) -> Widget:
         """Use Collab's journal ordering for known Collab map collections."""
         loaded_maps = tuple(maps)
-        if any(
-            not isinstance(level.maps_by_side[side], game_levels.LoadedModMap)
-            for level, side in loaded_maps
-        ):
+        if any(self._campaign_catalog.mod_for(level[side]) is None for level, side in loaded_maps):
             return self._map_list(loaded_maps, extra_items=extra_items)
-        if use_collab_order or all(_is_source_collab_map(*item) for item in loaded_maps):
+        if use_collab_order or all(
+            _is_source_collab_map(self._campaign_catalog, *item) for item in loaded_maps
+        ):
             return collab_list.CollabMapList(
                 (loaded_maps,),
                 self._dialog_languages,
                 self._dialogs,
                 self._save_slot,
+                self._campaign_catalog.source_name_for,
                 extra_items=extra_items,
             )
         return self._map_list(loaded_maps, extra_items=extra_items)
@@ -602,7 +646,10 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self._selected_campaign = event.item.campaign
         self.query_one(f'#{DETAIL_ID}', Static).update(
             catalog.format_campaign_summary(
-                event.item.campaign, self._dialog_languages, self._dialogs
+                event.item.campaign,
+                self._dialog_languages,
+                self._dialogs,
+                self._campaign_source_names(event.item.campaign),
             )
         )
         await self._refresh_map_detail()
@@ -646,7 +693,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
                 map_actions.MapActionScreen(
                     event.screen_x,
                     event.screen_y,
-                    can_edit_lobby=isinstance(item.level, game_campaigns.CollabLobby),
+                    can_edit_lobby=item.level.is_lobby,
                 ),
                 lambda action: self._run_map_action(item, action),
             )
@@ -668,8 +715,8 @@ class MapBrowserApp(RefreshableCssApp[None]):
 
     async def _preview_record(self, level: game_levels.Level, side: game_levels.LevelSide) -> None:
         """Edit a local record for one map after an explicit mouse gesture."""
-        active_map = level.maps_by_side[side]
-        mod = active_map.mod if isinstance(active_map, game_levels.LoadedModMap) else None
+        active_map = level[side]
+        mod = self._campaign_catalog.mod_for(active_map)
         map_info = active_map.map_info
         if mod is None:
             self.notify('原版地图不支持创建本地初见记录。', severity='warning')
@@ -707,7 +754,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
                         '未找到与 Everest 元数据名精确匹配的 GameBanana 提交。', severity='warning'
                     )
         author_text = localized_name(
-            game_levels.map_dialog_texts(level, self._dialogs, 'author'),
+            level.dialog_texts(self._dialogs, 'author'),
             self._dialog_languages,
         )
         author_source: records.AuthorSource = gamebanana
@@ -720,15 +767,16 @@ class MapBrowserApp(RefreshableCssApp[None]):
         record = create_map_record(
             level,
             side,
+            mod=mod,
             save_slot=self._save_slot,
             gamebanana=gamebanana,
             languages=self._dialog_languages,
             dialogs=self._dialogs,
             record_values=record_values,
         )
-        existing_record_id = self._local_data.existing_record_id(record)
+        existing_record_id = self._data_stores.records.existing_id(record)
         if existing_record_id is not None:
-            record = merge_saved_record(record, self._local_data.load_record(existing_record_id))
+            record = merge_saved_record(record, self._data_stores.records.load(existing_record_id))
         self.push_screen(
             records.RecordEditorScreen(
                 record,
@@ -759,23 +807,23 @@ class MapBrowserApp(RefreshableCssApp[None]):
     def _collab_tags(self, level: game_levels.Level) -> str | None:
         """Return localized collab tags for their dedicated record-grid field."""
         tags = localized_name(
-            game_levels.map_dialog_texts(level, self._dialogs, 'collabcreditstags'),
+            level.dialog_texts(self._dialogs, 'collabcreditstags'),
             self._dialog_languages,
         )
         return tags if tags is not None and tags.strip() else None
 
     def _record_source(
         self, level: game_levels.Level, side: game_levels.LevelSide
-    ) -> tuple[routes.MapEntityRecordSource, routes.MapRoute | None] | None:
+    ) -> tuple[record_entities.MapEntityRecordSource, routes.MapRoute | None] | None:
         """Read one map and retain it while the user refreshes entity rules."""
-        loaded_map = level.maps_by_side[side]
+        loaded_map = level[side]
         map_info = loaded_map.map_info
         try:
-            route = self._local_data.load_route(map_info.file_path.as_posix())
+            route = self._data_stores.routes.load(map_info.file_path.as_posix())
             saved_stats = (
                 None if self._save_slot is None else self._save_slot.get_map_stats(level, side)
             )
-            source = routes.load_loaded_map_entity_record_source(
+            source = record_entities.load_map_entity_record_source(
                 loaded_map,
                 frozenset() if saved_stats is None else saved_stats.collected_strawberries,
                 excluded_entities=frozenset() if route is None else route.excluded_entities,
@@ -786,8 +834,8 @@ class MapBrowserApp(RefreshableCssApp[None]):
         return source, route
 
     def _record_values(
-        self, source: routes.MapEntityRecordSource, route: routes.MapRoute | None
-    ) -> tuple[routes.MapEntityRecordReview, RecordValues, dict[str, str]]:
+        self, source: record_entities.MapEntityRecordSource, route: routes.MapRoute | None
+    ) -> tuple[record_entities.MapEntityRecordReview, RecordValues, dict[str, str]]:
         """Summarize a retained map with the current rules and saved route corrections."""
         review = source.review(variant_review_loader=self._variant_review_checker)
         record_values = review.stats.record_values
@@ -825,8 +873,8 @@ class MapBrowserApp(RefreshableCssApp[None]):
     def _save_record(self, record: MapRecord | None) -> None:
         if record is None:
             return
-        existing_record_id = self._local_data.existing_record_id(record)
-        record_id = self._local_data.save_record(record)
+        existing_record_id = self._data_stores.records.existing_id(record)
+        record_id = self._data_stores.records.save(record)
         action = '已更新' if existing_record_id is not None else '已保存'
         self.notify(f'{action}本地记录：{record_id}')
         if self._sheet_client is not None and self._sheet_source is not None:
@@ -868,7 +916,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
     def _start_map_preview(self, level: game_levels.Level, side: game_levels.LevelSide) -> None:
         """Start a read-only browser map preview without blocking the map browser."""
         self.run_worker(
-            self._preview_map(level, side, initial_mode=MapPreviewMode.PREVIEW),
+            self._preview_map(level, side, initial_mode=MapRouteEditorMode.PREVIEW),
             name='map-preview',
             group='map-preview',
             exclusive=False,
@@ -877,7 +925,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
     def _start_route_editor(self, level: game_levels.Level, side: game_levels.LevelSide) -> None:
         """Start an editable route preview without blocking the map browser."""
         self.run_worker(
-            self._preview_map(level, side, initial_mode=MapPreviewMode.REVIEW),
+            self._preview_map(level, side, initial_mode=MapRouteEditorMode.REVIEW),
             name='route-editor',
             group='map-preview',
             exclusive=False,
@@ -888,19 +936,19 @@ class MapBrowserApp(RefreshableCssApp[None]):
         level: game_levels.Level,
         side: game_levels.LevelSide,
         *,
-        initial_mode: MapPreviewMode,
+        initial_mode: MapRouteEditorMode,
     ) -> None:
         """Open one selected map in the requested initial interaction mode."""
-        active_map = level.maps_by_side[side]
+        active_map = level[side]
         map_info = active_map.map_info
         try:
-            layout = routes.load_loaded_map_layout(active_map)
-            saved_route = self._local_data.load_route(map_info.file_path.as_posix())
+            layout = map_layout.load_map_layout(active_map)
+            saved_route = self._data_stores.routes.load(map_info.file_path.as_posix())
         except ValueError as error:
             self.notify(str(error), severity='warning')
             return
         first_clear_rooms: tuple[str, ...] = ()
-        enders_blender_save: routes.EndersBlenderSave | None = None
+        enders_blender_save: enders_blender.EndersBlenderSave | None = None
         if self._route_reader is not None and self._save_slot is not None:
             try:
                 enders_blender_save = self._route_reader.load(self._save_slot.number)
@@ -908,22 +956,23 @@ class MapBrowserApp(RefreshableCssApp[None]):
             except ValueError as error:
                 self.notify(str(error), severity='warning')
         try:
-            await MapPreview(
+            classification_rules = load_entity_rule_layers(local_path=PIST_DIR / 'entities.toml')
+            await MapRouteEditor(
                 active_map,
                 layout,
                 first_clear_rooms=first_clear_rooms,
                 saved_route=saved_route,
-                local_data=self._local_data,
+                route_store=self._data_stores.routes,
                 enders_blender_save=enders_blender_save,
                 initial_mode=initial_mode,
-                title=game_levels.map_display_name(
-                    level, side, self._dialogs, self._dialog_languages
-                ),
+                title=level.display_name(side, self._dialogs, self._dialog_languages),
                 dialogs=self._dialogs,
                 level_side=(level, side),
                 routable_maps=self._routable_maps,
+                classification_rules=classification_rules,
+                statistic_rules=entity_stats.load_entity_stat_rules(classification_rules),
             ).preview()
-        except MapPreviewError as error:
+        except MapRouteEditorError as error:
             self.notify(str(error), severity='warning')
 
     def action_scroll_detail_down(self) -> None:
@@ -987,7 +1036,7 @@ async def browse_maps(
     settings_store: SettingsStore | None = None,
     save_reader: SaveReader | None = None,
     save_slot: SaveSlot | None = None,
-    route_reader: routes.EndersBlenderReader | None = None,
+    route_reader: enders_blender.EndersBlenderReader | None = None,
     inspection_report: InspectionReport | None = None,
     sheet_client: TencentSmartSheetClient | None = None,
     sheet_source: str | None = None,

@@ -1,0 +1,8 @@
+- Name: EnabledZip
+  Version: 1.2.3
+  Dependencies:
+    - Name: RequiredDependency
+      Version: 1.0
+  OptionalDependencies:
+    - Name: OptionalDependency
+      Version: 2.0

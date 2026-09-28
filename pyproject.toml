@@ -1,19 +1,20 @@
 [project]
 name = "pist"
-version = "0.4.0"
+version = "0.5.0"
 description = "Celeste Mod map first-playthrough tracker for Tencent Docs Smart Sheets."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "berries>=0.1.0,<0.2.0",
     "aiohttp>=3.11.0",
-    "keyring>=25.6.0",
     "luaparser>=4.1.0",
     "pydantic>=2.12.0",
     "typing-extensions>=4.16.0",
-    "pyyaml>=6.0.3",
-    "textual>=8.2.8",
     "tomlkit>=0.15.1",
     "platformdirs>=4.11.7",
+    "keyring>=25.6.0",
+    "rich>=14.0.0",
+    "textual>=8.2.8",
 ]
 
 [dependency-groups]
@@ -30,6 +31,12 @@ pist = "pist.__main__:main"
 requires = ["uv_build>=0.8.0,<0.13.0"]
 build-backend = "uv_build"
 
+[tool.uv.sources]
+berries = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/berries"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -39,6 +46,9 @@ enableExperimentalFeatures = true
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = ["UP010"]
 
 [tool.ruff.format]
 quote-style = "single"

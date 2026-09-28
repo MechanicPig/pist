@@ -89,8 +89,8 @@ return placements
     assert isinstance(placements, LuaTable)
     assert tuple(
         placement.get('name')
-        for index in range(1, 5)
-        if isinstance(placement := placements.get(index), LuaTable)
+        for i in range(1, 5)
+        if isinstance(placement := placements.get(i), LuaTable)
     ) == ('cassette_0', 'cassette_1', 'cassette_2', 'cassette_3')
     first = placements.get(1)
     assert isinstance(first, LuaTable)

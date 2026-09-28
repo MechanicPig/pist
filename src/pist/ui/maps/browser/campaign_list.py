@@ -2,12 +2,11 @@
 
 from collections.abc import Iterable
 
+from berries.game import campaigns as game_campaigns
 from rich.text import Text
 from textual import events, on
 from textual.message import Message
 from textual.widgets import ListItem, ListView, Static
-
-from pist.game import campaigns as game_campaigns
 
 LEFT_MOUSE_BUTTON = 1
 
@@ -15,7 +14,7 @@ LEFT_MOUSE_BUTTON = 1
 class CampaignItem(ListItem):
     """One selectable campaign in the flat campaign list."""
 
-    def __init__(self, campaign: game_campaigns.LoadedCampaign, label: Text) -> None:
+    def __init__(self, campaign: game_campaigns.Campaign, label: Text) -> None:
         self.campaign = campaign
         super().__init__(Static(label))
 

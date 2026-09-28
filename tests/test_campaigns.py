@@ -2,21 +2,25 @@
 
 from pathlib import Path
 
-from pist.game.campaigns import (
-    CollabLobby,
-    LoadedCampaign,
-    campaign_names,
+from berries.game.campaigns import (
+    Campaign,
     load_campaigns,
     load_vanilla_dialogs,
     load_vanilla_maps,
-    resolve_lobby_side,
+    resolve_campaign_refs,
 )
-from pist.game.everest import Dependency, EverestModMetadata, Version
-from pist.game.levels import Level, LevelSide, LoadedMap, LoadedModMap, map_dialog_texts, map_names
-from pist.game.map_hiders import MapHiderRules
-from pist.game.map_source import MapSource
-from pist.game.maps import MapInfo
-from pist.game.mods import ZipMod
+from berries.game.content import MAPS_DIR, GameContent
+from berries.game.everest import Dependency, ModMetadata, Version
+from berries.game.levels import (
+    Level,
+    LevelSide,
+    Map,
+)
+from berries.game.map_hiders import MapHiderRules
+from berries.game.map_source import MapSource
+from berries.game.maps import MapInfo
+from berries.game.mods import ZipMod
+
 from tests.mod_factory import make_installed_mod
 
 
@@ -24,11 +28,11 @@ def _map(path: str) -> MapInfo:
     return MapInfo(file_path=path)
 
 
-def _loaded_maps(campaign: LoadedCampaign) -> tuple[LoadedMap, ...]:
-    return tuple(level.maps_by_side[side] for level, side in campaign.iter_sides())
+def _loaded_maps(campaign: Campaign) -> tuple[Map, ...]:
+    return tuple(level[side] for level, side in campaign.iter_sides())
 
 
-def _first_side(campaign: LoadedCampaign) -> tuple[Level, LevelSide]:
+def _first_side(campaign: Campaign) -> tuple[Level, LevelSide]:
     return next(campaign.iter_sides())
 
 
@@ -54,13 +58,13 @@ def test_campaigns_follow_required_dependency_content_order() -> None:
     catalog = load_campaigns((delayed, helper))
 
     loaded_map = _loaded_maps(catalog.campaigns[0])[0]
-    assert isinstance(loaded_map, LoadedModMap)
-    assert loaded_map.mod is delayed
+    assert isinstance(loaded_map, Map)
+    assert catalog.mod_for(loaded_map) is delayed
     assert len(catalog.overrides) == 1
-    assert isinstance(catalog.overrides[0].previous, LoadedModMap)
-    assert isinstance(catalog.overrides[0].replacement, LoadedModMap)
-    assert catalog.overrides[0].previous.mod is helper
-    assert catalog.overrides[0].replacement.mod is delayed
+    assert isinstance(catalog.overrides[0].previous, Map)
+    assert isinstance(catalog.overrides[0].replacement, Map)
+    assert catalog.mod_for(catalog.overrides[0].previous) is helper
+    assert catalog.mod_for(catalog.overrides[0].replacement) is delayed
 
 
 def test_campaigns_omit_packages_with_unsatisfied_required_dependencies() -> None:
@@ -78,6 +82,36 @@ def test_campaigns_omit_packages_with_unsatisfied_required_dependencies() -> Non
 
     assert catalog.campaigns == ()
     assert catalog.unloaded_mods == (unavailable,)
+    assert len(catalog.diagnostics) == 1
+    assert 'Unavailable.zip' in catalog.diagnostics[0]
+    assert 'Missing' in catalog.diagnostics[0]
+
+
+def test_campaigns_report_a_present_incompatible_optional_dependency() -> None:
+    delayed = make_installed_mod(
+        source='zip',
+        filename='A-Delayed.zip',
+        path='A-Delayed.zip',
+        metadata_name='Delayed',
+        metadata_version='1.0.0',
+        optional_dependencies=[Dependency(name='Optional', version=Version.parse('2.0.0'))],
+        maps=[_map('Maps/Pack/Map.bin')],
+    )
+    optional = make_installed_mod(
+        source='zip',
+        filename='Z-Optional.zip',
+        path='Z-Optional.zip',
+        metadata_name='Optional',
+        metadata_version='1.0.0',
+    )
+
+    catalog = load_campaigns((delayed, optional))
+
+    assert catalog.campaigns == ()
+    assert catalog.unloaded_mods == (delayed,)
+    assert len(catalog.diagnostics) == 1
+    assert '可选依赖版本不兼容' in catalog.diagnostics[0]
+    assert 'Optional 1.0.0（需要 2.0.0）' in catalog.diagnostics[0]
 
 
 def test_campaigns_use_globally_merged_dialog_entries_for_active_maps() -> None:
@@ -111,16 +145,22 @@ def test_campaigns_use_globally_merged_dialog_entries_for_active_maps() -> None:
         path='LaterDialog.zip',
         metadata_name='LaterDialog',
         metadata_version='1.0.0',
-        dialogs={'en': {'MAPMODIFIER_EXAMPLE': 'Final name', 'MapModifier': 'Final campaign'}},
+        dialogs={
+            'en': {
+                'MAPMODIFIER_EXAMPLE': 'Final name',
+                'MapModifier': 'Final campaign',
+                'levelset_MapModifier': 'Prefixed campaign',
+            }
+        },
     )
 
     catalog = load_campaigns((map_mod, first_dialog, later_dialog))
 
     level, side = _first_side(catalog.campaigns[0])
-    assert map_names(level, side, catalog.dialogs) == {'en': 'Final name'}
-    assert map_dialog_texts(level, catalog.dialogs, 'author') == {'en': 'First author'}
-    assert map_dialog_texts(level, catalog.dialogs, 'collabcreditstags') == {'en': 'Beginner'}
-    assert campaign_names(catalog.campaigns[0], catalog.dialogs) == {'en': 'Final campaign'}
+    assert level.localized_names(side, catalog.dialogs) == {'en': 'Final name'}
+    assert level.dialog_texts(catalog.dialogs, 'author') == {'en': 'First author'}
+    assert level.dialog_texts(catalog.dialogs, 'collabcreditstags') == {'en': 'Beginner'}
+    assert catalog.campaigns[0].localized_names(catalog.dialogs) == {'en': 'Prefixed campaign'}
 
 
 def test_campaigns_ignore_dialogs_from_unloaded_packages() -> None:
@@ -145,7 +185,8 @@ def test_campaigns_ignore_dialogs_from_unloaded_packages() -> None:
 
     catalog = load_campaigns((map_mod, unavailable_dialog))
 
-    assert map_names(*_first_side(catalog.campaigns[0]), catalog.dialogs) == {}
+    level, side = _first_side(catalog.campaigns[0])
+    assert level.localized_names(side, catalog.dialogs) == {}
 
 
 def test_campaigns_use_base_dialog_entries_before_loaded_mod_entries() -> None:
@@ -176,10 +217,10 @@ def test_campaigns_use_base_dialog_entries_before_loaded_mod_entries() -> None:
         base_dialogs={'en': {'MapModifier_Example': 'Base name'}},
     )
 
-    assert map_names(*_first_side(base_catalog.campaigns[0]), base_catalog.dialogs) == {
-        'en': 'Base name'
-    }
-    assert map_names(*_first_side(catalog.campaigns[0]), catalog.dialogs) == {'en': 'Mod name'}
+    base_level, base_side = _first_side(base_catalog.campaigns[0])
+    assert base_level.localized_names(base_side, base_catalog.dialogs) == {'en': 'Base name'}
+    level, side = _first_side(catalog.campaigns[0])
+    assert level.localized_names(side, catalog.dialogs) == {'en': 'Mod name'}
 
 
 def test_campaigns_separate_maps_hidden_by_an_active_helper_mod(tmp_path: Path) -> None:
@@ -392,7 +433,10 @@ def test_campaigns_merge_active_maps_from_multiple_packages() -> None:
 
     campaign = catalog.campaigns[0]
     assert campaign.directory.as_posix() == 'Maps/Pack/1-Easy'
-    assert [loaded_map.source_name for loaded_map in _loaded_maps(campaign)] == ['First', 'Second']
+    assert [catalog.source_name_for(map_file) for map_file in _loaded_maps(campaign)] == [
+        'First',
+        'Second',
+    ]
 
 
 def test_a_later_manifest_entry_can_activate_its_physical_package() -> None:
@@ -400,12 +444,12 @@ def test_a_later_manifest_entry_can_activate_its_physical_package() -> None:
         filename='Bundle.zip',
         path=Path('Bundle.zip'),
         manifest=(
-            EverestModMetadata(
+            ModMetadata(
                 name='DelayedEntry',
                 version=Version.parse('1.0.0'),
                 dependencies=[Dependency(name='Helper', version=Version.parse('1.0.0'))],
             ),
-            EverestModMetadata(name='AvailableEntry', version=Version.parse('1.0.0')),
+            ModMetadata(name='AvailableEntry', version=Version.parse('1.0.0')),
         ),
         maps=[_map('Maps/Pack/Bundle.bin')],
     )
@@ -413,8 +457,8 @@ def test_a_later_manifest_entry_can_activate_its_physical_package() -> None:
     catalog = load_campaigns((bundle,))
 
     loaded_map = _loaded_maps(catalog.campaigns[0])[0]
-    assert isinstance(loaded_map, LoadedModMap)
-    assert loaded_map.mod is bundle
+    assert isinstance(loaded_map, Map)
+    assert catalog.mod_for(loaded_map) is bundle
     assert catalog.unloaded_mods == ()
 
 
@@ -440,10 +484,10 @@ def test_campaigns_delay_content_until_an_optional_dependency_loads() -> None:
     catalog = load_campaigns((delayed, optional))
 
     loaded_map = _loaded_maps(catalog.campaigns[0])[0]
-    assert isinstance(loaded_map, LoadedModMap)
-    assert isinstance(catalog.overrides[0].previous, LoadedModMap)
-    assert loaded_map.mod is delayed
-    assert catalog.overrides[0].previous.mod is optional
+    assert isinstance(loaded_map, Map)
+    assert isinstance(catalog.overrides[0].previous, Map)
+    assert catalog.mod_for(loaded_map) is delayed
+    assert catalog.mod_for(catalog.overrides[0].previous) is optional
 
 
 def test_campaigns_do_not_require_an_absent_optional_dependency() -> None:
@@ -460,8 +504,8 @@ def test_campaigns_do_not_require_an_absent_optional_dependency() -> None:
     catalog = load_campaigns((standalone,))
 
     loaded_map = _loaded_maps(catalog.campaigns[0])[0]
-    assert isinstance(loaded_map, LoadedModMap)
-    assert loaded_map.mod is standalone
+    assert isinstance(loaded_map, Map)
+    assert catalog.mod_for(loaded_map) is standalone
     assert catalog.unloaded_mods == ()
 
 
@@ -503,14 +547,14 @@ def test_campaigns_retry_delayed_entries_immediately_after_each_load() -> None:
 
     catalog = load_campaigns((first_delayed, first_helper, second_delayed, second_helper))
 
-    assert [override.replacement.source_name for override in catalog.overrides] == [
+    assert [catalog.source_name_for(override.replacement) for override in catalog.overrides] == [
         'FirstDelayed',
         'SecondHelper',
         'SecondDelayed',
     ]
 
 
-def test_campaigns_keep_root_maps_outside_campaign_groups() -> None:
+def test_root_maps_form_the_empty_campaign_directory() -> None:
     root_map_mod = make_installed_mod(
         source='zip',
         filename='Root.zip',
@@ -518,12 +562,15 @@ def test_campaigns_keep_root_maps_outside_campaign_groups() -> None:
         metadata_name='Root',
         metadata_version='1.0.0',
         maps=[_map('Maps/Root.bin')],
+        dialogs={'en': {'levelset_': 'Root maps'}},
     )
 
     catalog = load_campaigns((root_map_mod,))
 
-    assert catalog.campaigns[0].is_ungrouped
-    assert catalog.campaigns[0].fallback_name == '未归类地图'
+    assert catalog.campaigns[0].directory == MAPS_DIR
+    assert catalog.campaigns[0].dialog_key == ''
+    assert catalog.campaigns[0].localized_names(catalog.dialogs) == {'en': 'Root maps'}
+    assert catalog.campaigns[0].fallback_name == '未分类'
     assert _loaded_maps(catalog.campaigns[0])[0].map_info.file_path.as_posix() == 'Maps/Root.bin'
 
 
@@ -574,16 +621,16 @@ def test_collab_special_maps_are_separate_from_its_campaign_maps() -> None:
     assert len(catalog.campaigns) == 1
     campaign = catalog.campaigns[0]
     assert campaign.directory.as_posix() == 'Maps/ExampleCollab/0-Lobbies'
-    assert campaign_names(campaign, catalog.dialogs) == {'zh-cn': '更新合集'}
+    assert campaign.localized_names(catalog.dialogs) == {'zh-cn': '更新合集'}
     assert [item.map_info for item in _loaded_maps(campaign)] == [prologue, lobby]
-    assert isinstance(campaign.levels[1], CollabLobby)
+    assert campaign.levels[1].is_lobby
     assert [item.directory.as_posix() for item in catalog.hidden_campaigns] == [
         'Maps/ExampleCollab/0-Gyms',
         'Maps/ExampleCollab/1-Easy',
     ]
     assert [item.map_info for item in _loaded_maps(catalog.hidden_campaigns[0])] == [gym]
     assert [item.map_info for item in _loaded_maps(catalog.hidden_campaigns[1])] == [playable]
-    assert campaign_names(catalog.hidden_campaigns[1], catalog.dialogs) == {'zh-cn': '更新大厅'}
+    assert catalog.hidden_campaigns[1].localized_names(catalog.dialogs) == {'zh-cn': '更新大厅'}
 
 
 def test_lobby_journal_references_use_exact_campaign_identities() -> None:
@@ -608,15 +655,13 @@ def test_lobby_journal_references_use_exact_campaign_identities() -> None:
     )
     catalog = load_campaigns((collab, collab_utils))
     lobby = catalog.campaigns[0].levels[0]
-    assert isinstance(lobby, CollabLobby)
+    assert lobby.is_lobby
     campaigns = {
         str(campaign.directory): campaign
         for campaign in (*catalog.campaigns, *catalog.hidden_campaigns)
     }
 
-    resolved, diagnostics = resolve_lobby_side(
-        lobby,
-        LevelSide.A,
+    resolved, diagnostics = resolve_campaign_refs(
         campaigns,
         (
             'ExampleCollab/1-Easy',
@@ -631,7 +676,6 @@ def test_lobby_journal_references_use_exact_campaign_identities() -> None:
         '日志引用的地图集不存在：ExampleCollab/1-EASY',
         '日志引用的地图集不存在：ExampleCollab/./1-Easy',
     )
-    assert lobby.campaigns_by_side[LevelSide.A] == resolved
 
 
 def test_orphaned_collab_b_side_remains_a_distinct_lobby_map() -> None:
@@ -660,9 +704,9 @@ def test_orphaned_collab_b_side_remains_a_distinct_lobby_map() -> None:
     campaign = load_campaigns((collab, collab_utils)).campaigns[0]
 
     level, side = _first_side(campaign)
-    assert level.maps_by_side[side].map_info.file_path == lobby.file_path
+    assert level[side].map_info.file_path == lobby.file_path
     assert side is LevelSide.A
-    assert isinstance(campaign.levels[0], CollabLobby)
+    assert campaign.levels[0].is_lobby
 
 
 def test_vanilla_maps_form_a_distinct_campaign_from_ungrouped_mod_maps(tmp_path: Path) -> None:
@@ -672,7 +716,9 @@ def test_vanilla_maps_form_a_distinct_campaign_from_ungrouped_mod_maps(tmp_path:
     maps_dir.mkdir(parents=True)
     dialog_dir.mkdir()
     (maps_dir / '0-Intro.bin').touch()
-    (dialog_dir / 'English.txt').write_text('AREA_0=Prologue', encoding='utf-8')
+    (dialog_dir / 'English.txt').write_text(
+        'AREA_0=Prologue\nLEVELSET_CELESTE=Celeste', encoding='utf-8'
+    )
     mod = make_installed_mod(
         source='zip',
         filename='Loose.zip',
@@ -695,11 +741,43 @@ def test_vanilla_maps_form_a_distinct_campaign_from_ungrouped_mod_maps(tmp_path:
     vanilla, ungrouped = catalog.campaigns
     assert vanilla.source is MapSource.VANILLA
     assert vanilla.directory.as_posix() == 'Maps'
-    assert vanilla.fallback_name == '原版地图'
+    assert vanilla.dialog_key == 'Celeste'
+    assert vanilla.localized_names(catalog.dialogs) == {'en': 'Celeste'}
+    assert vanilla.fallback_name == '官图'
     assert vanilla.map_count == 1
     level, side = _first_side(vanilla)
     assert level.sid == 'Celeste/0-Intro'
-    assert map_names(level, side, catalog.dialogs) == {'en': 'Updated Prologue'}
+    assert level.localized_names(side, catalog.dialogs) == {'en': 'Updated Prologue'}
     assert ungrouped.source is MapSource.MOD
     assert ungrouped.directory.as_posix() == 'Maps'
-    assert ungrouped.fallback_name == '未归类地图'
+    assert ungrouped.fallback_name == '未分类'
+
+
+def test_mod_maps_claiming_the_vanilla_campaign_remain_distinct_and_warn() -> None:
+    mod = make_installed_mod(
+        source='zip',
+        filename='VanillaCollision.zip',
+        path='VanillaCollision.zip',
+        metadata_name='VanillaCollision',
+        metadata_version='1.0.0',
+        maps=[
+            _map('Maps/Celeste/1-ForsakenCity.bin'),
+            _map('Maps/Celeste/Extra.bin'),
+        ],
+    )
+    vanilla_map = Map(_map('Maps/1-ForsakenCity.bin'), GameContent(Path('Content')))
+
+    catalog = load_campaigns(
+        (mod,),
+        vanilla_maps=(vanilla_map,),
+        base_dialogs={'zh-cn': {'LEVELSET_CELESTE': '官图'}},
+    )
+
+    vanilla, collision = catalog.campaigns
+    assert vanilla.source is MapSource.VANILLA
+    assert collision.source is MapSource.MOD
+    assert collision.directory == MAPS_DIR / 'Celeste'
+    assert collision.display_name(catalog.dialogs, ('zh-cn',)) == '官图（Mod）'
+    assert len(catalog.diagnostics) == 1
+    assert 'VanillaCollision' in catalog.diagnostics[0]
+    assert 'Celeste/1-ForsakenCity' in catalog.diagnostics[0]

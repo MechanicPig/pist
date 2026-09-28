@@ -1,11 +1,16 @@
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from unittest.mock import patch
 from zipfile import ZipFile
 
 import pytest
+from berries.game.content import (
+    ContentEntry,
+    ContentPath,
+    DirContentEntry,
+    GameContent,
+    ZipContentEntry,
+)
 from pydantic import BaseModel
-
-from pist.game.content import ContentEntry, ContentPath, GameContent, iter_files
 
 
 class _ContentPathModel(BaseModel):
@@ -54,7 +59,17 @@ def test_game_content_opens_its_directory_as_a_content_tree(tmp_path: Path) -> N
     map_path.write_bytes(b'map')
 
     with GameContent(content_dir).open() as root:
-        assert root.joinpath('Maps/Example.bin').read_bytes() == b'map'
+        map_entry = root.joinpath('Maps/Example.bin')
+
+        assert isinstance(map_entry, DirContentEntry)
+        assert map_entry.path == map_path
+        assert ContentPath(root.at) == ContentPath()
+        assert isinstance(map_entry.at, PurePath)
+        assert not isinstance(map_entry.at, ContentPath)
+        assert ContentPath(map_entry.at) == ContentPath('Maps/Example.bin')
+        assert map_entry.read_bytes() == b'map'
+        with pytest.raises(ValueError, match='remain within their root'):
+            root.joinpath('../outside.bin')
 
 
 def test_zip_content_entry_infers_directories_and_sorts_their_children(tmp_path: Path) -> None:
@@ -65,8 +80,15 @@ def test_zip_content_entry_infers_directories_and_sorts_their_children(tmp_path:
         archive.writestr('Dialog/English.txt', b'')
 
     with ContentEntry(archive_path) as root:
+        assert isinstance(root, ZipContentEntry)
+        assert root.zip_file.filename is not None
+        assert Path(root.zip_file.filename) == archive_path
         maps = root.joinpath('Maps')
 
+        assert ContentPath(root.at) == ContentPath()
+        assert isinstance(maps.at, PurePosixPath)
+        assert not isinstance(maps.at, ContentPath)
+        assert ContentPath(maps.at) == ContentPath('Maps')
         assert [path.at.as_posix() for path in root.iterdir()] == ['Dialog', 'Maps']
         assert maps.exists()
         assert maps.is_dir()
@@ -74,7 +96,19 @@ def test_zip_content_entry_infers_directories_and_sorts_their_children(tmp_path:
             'Maps/Alpha',
             'Maps/Zebra',
         ]
-        assert [path.at.as_posix() for path in iter_files(maps)] == [
+        assert [
+            (directory.at.as_posix(), dirnames, filenames)
+            for directory, dirnames, filenames in maps.walk()
+        ] == [
+            ('Maps', ['Alpha', 'Zebra'], []),
+            ('Maps/Alpha', [], ['Map.bin']),
+            ('Maps/Zebra', [], ['Map.bin']),
+        ]
+        assert [
+            (directory / filename).at.as_posix()
+            for directory, _, filenames in maps.walk()
+            for filename in filenames
+        ] == [
             'Maps/Alpha/Map.bin',
             'Maps/Zebra/Map.bin',
         ]
@@ -93,34 +127,57 @@ def test_zip_content_entry_reads_root_file(tmp_path: Path) -> None:
         assert manifest.read_text() == '- Name: Example\n'
 
 
-def test_zip_content_entry_checks_missing_file_without_building_directory_index(
-    tmp_path: Path,
-) -> None:
+def test_zip_content_entry_checks_missing_file_from_flat_index(tmp_path: Path) -> None:
     archive_path = tmp_path / 'mod.zip'
     with ZipFile(archive_path, 'w') as archive:
         archive.writestr('Maps/Example.bin', b'')
 
-    with (
-        ContentEntry(archive_path) as root,
-        patch.object(
-            ZipFile, 'infolist', side_effect=AssertionError('directory index should stay lazy')
-        ),
-    ):
+    with ContentEntry(archive_path) as root:
         assert not root.joinpath('missing.txt').is_file()
 
 
-def test_zip_content_entry_uses_directory_index_for_recursive_traversal(tmp_path: Path) -> None:
+def test_zip_content_entry_walk_does_not_recurse_through_iterdir(tmp_path: Path) -> None:
     archive_path = tmp_path / 'mod.zip'
     with ZipFile(archive_path, 'w') as archive:
         archive.writestr('Maps/Example.bin', b'')
         archive.writestr('Maps/Another.bin', b'')
 
+    with (
+        ContentEntry(archive_path) as root,
+        patch.object(
+            ZipContentEntry,
+            'iterdir',
+            side_effect=AssertionError('walk should use the flat member index'),
+        ),
+    ):
+        assert [
+            (directory / filename).at.as_posix()
+            for directory, _, filenames in root.walk()
+            for filename in filenames
+        ] == [
+            'Maps/Another.bin',
+            'Maps/Example.bin',
+        ]
+
+
+def test_zip_content_entry_reuses_cached_walk_adjacency(tmp_path: Path) -> None:
+    archive_path = tmp_path / 'mod.zip'
+    with ZipFile(archive_path, 'w') as archive:
+        archive.writestr('Maps/Example.bin', b'')
+
     with ContentEntry(archive_path) as root:
-        list(root.iterdir())
+        assert isinstance(root, ZipContentEntry)
+        first_walk = [
+            (directory.at, dirnames, filenames) for directory, dirnames, filenames in root.walk()
+        ]
         with patch.object(
-            ZipFile, 'getinfo', side_effect=AssertionError('should use the directory index')
+            root.zip_file,
+            'member_index',
+            side_effect=AssertionError('walk should reuse cached adjacency'),
         ):
-            assert [path.at.as_posix() for path in iter_files(root)] == [
-                'Maps/Another.bin',
-                'Maps/Example.bin',
+            second_walk = [
+                (directory.at, dirnames, filenames)
+                for directory, dirnames, filenames in root.walk()
             ]
+
+    assert second_walk == first_walk

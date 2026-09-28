@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar
 
+from berries.game import campaigns as game_campaigns
+from berries.game import mods as game_mods
+from berries.game.content import MAPS_DIR
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -13,21 +16,17 @@ from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.widgets import Button, SelectionList, Static
 
-from pist.game import campaigns as game_campaigns
-from pist.game import levels as game_levels
-from pist.game import mods as game_mods
-from pist.game.content import ContentPath
 
-
-def campaign_ref(campaign: game_campaigns.LoadedCampaign) -> str:
+def campaign_ref(campaign: game_campaigns.Campaign) -> str:
     """Return one Campaign directory in CollabUtils2 journal-reference form."""
-    return campaign.directory.relative_to(ContentPath('Maps')).as_posix()
+    return campaign.directory.relative_to(MAPS_DIR).as_posix()
 
 
 def lobby_campaign_choices(
-    campaigns: Iterable[game_campaigns.LoadedCampaign],
-    hidden_campaigns: Iterable[game_campaigns.LoadedCampaign],
+    campaigns: Iterable[game_campaigns.Campaign],
+    hidden_campaigns: Iterable[game_campaigns.Campaign],
     current_mod: game_mods.InstalledMod,
+    catalog: game_campaigns.CampaignCatalog,
     dialogs: Mapping[str, Mapping[str, str]],
     languages: Iterable[str],
     initial: Iterable[str],
@@ -37,27 +36,19 @@ def lobby_campaign_choices(
     candidates = sorted(
         campaigns,
         key=lambda campaign: (
-            not (id(campaign) in hidden_campaign_ids and _campaign_uses_mod(campaign, current_mod)),
+            not (
+                id(campaign) in hidden_campaign_ids
+                and catalog.campaign_uses_mod(campaign, current_mod)
+            ),
             campaign.directory.as_posix().casefold(),
         ),
     )
     choices = {
-        campaign_ref(campaign): game_campaigns.campaign_display_name(campaign, dialogs, languages)
-        for campaign in candidates
+        campaign_ref(campaign): campaign.display_name(dialogs, languages) for campaign in candidates
     }
     for ref in initial:
         choices.setdefault(ref, f'{ref}（当前未找到）')
     return tuple(choices.items())
-
-
-def _campaign_uses_mod(
-    campaign: game_campaigns.LoadedCampaign, mod: game_mods.InstalledMod
-) -> bool:
-    for level, side in campaign.iter_sides():
-        loaded_map = level.maps_by_side[side]
-        if isinstance(loaded_map, game_levels.LoadedModMap) and loaded_map.mod is mod:
-            return True
-    return False
 
 
 class MapAction(StrEnum):

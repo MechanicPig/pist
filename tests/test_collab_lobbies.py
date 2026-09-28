@@ -1,13 +1,13 @@
 from pathlib import Path
 
 import pytest
+from berries.game.levels import LevelSide
 
 from pist.collab_lobbies import (
     CollabLobbyOverrideStore,
     load_collab_lobby_override_layers,
     load_collab_lobby_overrides,
 )
-from pist.game.levels import LevelSide
 
 
 def test_local_collab_lobby_override_replaces_shared_side(tmp_path: Path) -> None:

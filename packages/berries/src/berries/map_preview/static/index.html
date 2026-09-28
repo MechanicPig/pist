@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地图预览</title>
+<link rel="stylesheet" href="assets/map_preview.css">
+</head>
+<body>
+<header>
+  <h1 id="title">地图预览</h1>
+  <button id="fit" class="secondary">适应画布</button>
+  <button id="back" class="secondary">后退</button>
+  <button id="forward" class="secondary">前进</button>
+  <button id="home" class="secondary">返回起点</button>
+</header>
+<main>
+  <canvas id="map"></canvas>
+  <aside>
+    <input id="filter" placeholder="筛选房间名">
+    <div id="rooms"></div>
+    <div id="hint">滚轮缩放，中键或右键拖动画布；双击房间以定位。</div>
+  </aside>
+</main>
+<section id="object-info" hidden>
+  <div><strong id="object-id"></strong><button id="object-close">关闭</button></div>
+  <span id="object-source"></span>
+  <pre id="object-attrs"></pre>
+  <button id="object-open" hidden>打开目标地图</button>
+</section>
+<div id="status" hidden></div>
+<script src="assets/map_preview.js"></script>
+</body>
+</html>

@@ -5,6 +5,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
+from berries.game.content import CONTENT_DIRNAME
+from berries.game.map_source import MapSource
+from berries.game.maps import MapInfo
+from berries.game.mods import MODS_DIRNAME
+from berries.map_layout import MapLayout, MapPreviewEntity, load_map_layout_from_path
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -14,9 +19,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, ListItem, ListView, Static
 
 from pist.entities.audit import AuditMapOccurrences, AuditSource, RawEntityOccurrence
-from pist.game.map_source import MapSource
-from pist.game.maps import MapInfo
-from pist.game.routes import MapLayout, MapPreviewEntity, load_map_layout_from_path
 
 OCCURRENCE_MAP_LIST_ID = 'occurrence-map-list'
 OCCURRENCE_ROOM_LIST_ID = 'occurrence-room-list'
@@ -114,11 +116,11 @@ def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[MapInfo, M
     map_file = source.map_file
     match source.scope:
         case MapSource.VANILLA:
-            root = game_dir / 'Content'
+            root = game_dir / CONTENT_DIRNAME
         case MapSource.MOD:
             if not source.mod_file:
                 raise ValueError(f'审计报告缺少 Mod 文件名：{source.map_file}')
-            root = game_dir / 'Mods' / source.mod_file
+            root = game_dir / MODS_DIRNAME / source.mod_file
         case _:
             raise ValueError(f'不支持预览此审计来源：{source.scope}')
     if not root.exists():

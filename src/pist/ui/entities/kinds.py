@@ -2,14 +2,13 @@
 
 from collections import defaultdict
 
+from berries.entities.rules import EntityRules
 from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.widgets import Tree
 from textual.widgets._tree import NodeID, TreeNode
-
-from pist.entities.rules import EntityRules
 
 
 class KindTree(Tree[str]):

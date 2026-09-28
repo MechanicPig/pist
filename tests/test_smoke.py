@@ -11,6 +11,17 @@ def test_package_loads() -> None:
     assert __doc__
 
 
+def test_entity_audit_is_a_pist_subcommand() -> None:
+    args = build_parser().parse_args(
+        ['entities', 'audit', 'report.json', '--game-dir', 'C:/Celeste']
+    )
+
+    assert args.command == 'entities'
+    assert args.entities_command == 'audit'
+    assert args.input_path.name == 'report.json'
+    assert args.game_dir.name == 'Celeste'
+
+
 def test_map_browse_defaults_to_save_slot_zero() -> None:
     parser = build_parser()
     args = parser.parse_args(['maps', 'browse'])

@@ -3,14 +3,12 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from berries.entities.rules import EntityRuleConditions
+from berries.game.binmap import AttrValue
+from berries.game.map_source import MapSource
+from berries.models import ExternalModel, FrozenModel
 from pydantic import AliasChoices, Field
 from typing_extensions import Sentinel as sentinel
-
-from pist.game.binmap import AttrValue
-from pist.game.map_source import MapSource
-from pist.models import ExternalModel, FrozenModel
-
-from ..rules import EntityRuleConditions
 
 LOCATION_ATTR_NAMES = frozenset({'id', 'x', 'y', 'width', 'height', 'originX', 'originY'})
 META_ATTR_PREFIX = '@meta.'

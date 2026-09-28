@@ -3,7 +3,7 @@ import json
 from collections.abc import Callable
 from typing import Self
 
-from pist.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSearchResp
+from berries.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSearchResp
 
 
 class _Response:
@@ -38,7 +38,7 @@ class _Session:
 
 
 def _mock_session(monkeypatch, handler: Callable[[str, dict[str, object]], object]) -> None:
-    monkeypatch.setattr('pist.gamebanana.ClientSession', lambda **_: _Session(handler))
+    monkeypatch.setattr('berries.gamebanana.ClientSession', lambda **_: _Session(handler))
 
 
 def test_lookup_selects_submission_containing_exact_metadata_name(monkeypatch) -> None:

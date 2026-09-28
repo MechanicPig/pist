@@ -9,6 +9,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
+from berries.entities.rules import (
+    EntityConfigStore,
+    EntityRuleLayer,
+    EntityRules,
+)
+from berries.game.binmap import AttrValue
+from berries.game.content import ContentPath
+from berries.game.saves import MapProgress, SaveReader
+from berries.map_preview import MapPreview
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -18,16 +27,6 @@ from textual.widgets.option_list import Option
 
 from pist.entities import audit as backend
 from pist.entities.audit.inference import rule_candidates_for_detail
-from pist.entities.rules import (
-    EntityConfigStore,
-    EntityRuleLayer,
-    EntityRules,
-    EntityStat,
-)
-from pist.game.binmap import AttrValue
-from pist.game.content import ContentPath
-from pist.game.saves import MapProgress, SaveReader
-from pist.map_preview import MapPreview
 
 from ...tui import RefreshableCssApp
 from ..kinds import kind_button_label
@@ -498,8 +497,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         await MapPreview(
             map_info,
             layout,
-            audit_entities=entities,
-            read_only=True,
+            extra_entities=entities,
             title=occurrences.source.map_name,
         ).preview()
 
@@ -594,9 +592,6 @@ class EntityAuditApp(RefreshableCssApp[None]):
                     result.label,
                     parent=result.parent,
                     sprite=result.sprite,
-                    stat=result.stat,
-                    table_field=result.table_field,
-                    select_value=result.select_value,
                 )
                 if previous_name is None
                 else self._rules.with_renamed_kind(
@@ -605,9 +600,6 @@ class EntityAuditApp(RefreshableCssApp[None]):
                     result.label,
                     parent=result.parent,
                     sprite=result.sprite,
-                    stat=result.stat,
-                    table_field=result.table_field,
-                    select_value=result.select_value,
                 )
             )
             if previous_name is not None and previous_name != result.name:
@@ -1082,15 +1074,6 @@ def _entity_status_options() -> tuple[tuple[str, str], ...]:
     )
 
 
-def _entity_stat_options() -> tuple[tuple[str, str], ...]:
-    return (
-        ('不统计', EntityStat.NONE.value),
-        ('统计数量（整数）', EntityStat.COUNT.value),
-        ('是否存在（布尔值）', EntityStat.EXIST.value),
-        ('单选值（字符串）', EntityStat.SELECT.value),
-    )
-
-
 def _entity_status_order() -> tuple[backend.EntityAuditStatus, ...]:
     """Keep work queues first and clearly excluded entities last."""
     return (
@@ -1185,9 +1168,9 @@ def _classification_group_options(
                 group,
                 rules,
             ),
-            str(index),
+            str(i),
         )
-        for index, group in enumerate(groups)
+        for i, group in enumerate(groups)
     )
 
 

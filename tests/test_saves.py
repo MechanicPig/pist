@@ -2,13 +2,21 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from berries.game.content import ContentPath
+from berries.game.duration import Duration
+from berries.game.saves import (
+    MapProgress,
+    MapStats,
+    SaveReader,
+    mod_save_data_path,
+    mod_save_path,
+    save_slot_path,
+    sid_for_map_file,
+)
+from berries.map_entity_id import MapEntityID
+from berries.types import NonNegativeDecimalInt
 from pydantic import TypeAdapter, ValidationError
 
-from pist.entities.map_entity_id import MapEntityID
-from pist.game.content import ContentPath
-from pist.game.duration import Duration
-from pist.game.saves import MapProgress, MapStats, SaveReader, sid_for_level, sid_for_map_file
-from pist.types import NonNegativeDecimalInt
 from tests.map_factory import make_level_side
 
 
@@ -79,15 +87,11 @@ def test_sid_for_map_file_removes_b_and_c_side_suffixes() -> None:
         sid_for_map_file(ContentPath('maps/Author/Pack/Map.bin'))
 
 
-def test_sid_for_level_prefers_an_explicit_original_game_sid() -> None:
-    map_info = make_level_side(
-        file_path='Maps/1H-ForsakenCity.bin',
-        dialog_key='AREA_1',
-        sid='Celeste/1-ForsakenCity',
-        side='B',
-    )
-
-    assert sid_for_level(map_info[0]) == 'Celeste/1-ForsakenCity'
+def test_save_paths_follow_everest_filename_conventions(tmp_path: Path) -> None:
+    assert save_slot_path(tmp_path, 2) == tmp_path / '2.celeste'
+    assert mod_save_data_path(tmp_path, 2) == tmp_path / '2-modsavedata.celeste'
+    assert mod_save_path(tmp_path, 2, 'ExampleMod') == tmp_path / '2-modsave-ExampleMod.celeste'
+    assert save_slot_path(tmp_path, -1) == tmp_path / 'debug.celeste'
 
 
 def test_save_reader_reads_original_game_level_stats(tmp_path: Path) -> None:

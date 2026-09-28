@@ -1,6 +1,5 @@
 import pytest
-
-from pist.map_entrances import (
+from berries.map_entrances import (
     EntranceValue,
     MapEntranceRegion,
     MapEntranceRule,

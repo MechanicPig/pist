@@ -1,8 +1,9 @@
 from pathlib import Path
 from zipfile import ZipFile
 
+from berries.game.content import ContentEntry
+
 from pist.archive.loenn import LoennMod, load_loenn_registry
-from pist.game.content import ContentEntry
 
 
 def test_registry_reads_localized_entity_placement_from_zip_mod(tmp_path: Path) -> None:

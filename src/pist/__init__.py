@@ -1,1 +1,1 @@
-"""Tencent Docs Smart Sheet client for the Celeste first-playthrough tracker."""
+"""Personal Celeste map-recording application built on Berries."""

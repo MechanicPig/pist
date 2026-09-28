@@ -8,6 +8,7 @@ from .app import (
 )
 from .campaign_list import CampaignItem, CampaignList
 from .collab_list import CollabMapList
+from .diagnostics import BrowserWarningsScreen
 from .map_list import MapItem, MapList
 from .records import (
     AuthorSelectionScreen,
@@ -24,6 +25,7 @@ __all__ = (
     'DETAIL_SCROLL_ID',
     'MAP_DETAIL_ID',
     'AuthorSelectionScreen',
+    'BrowserWarningsScreen',
     'CampaignItem',
     'CampaignList',
     'CollabMapList',

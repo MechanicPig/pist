@@ -6,6 +6,7 @@ from enum import StrEnum
 from urllib.parse import urlparse
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
+from berries.models import ExternalModel, FrozenModel
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -14,7 +15,6 @@ from pydantic import (
     JsonValue,
 )
 
-from pist.models import ExternalModel, FrozenModel
 from pist.records import MANUAL_RECORD_FIELD_TITLES, MapRecord
 from pist.secrets import CredentialStore
 from pist.types import CellValue

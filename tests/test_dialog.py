@@ -1,9 +1,8 @@
 from dataclasses import dataclass
 
 import pytest
-
-from pist.game.content import ContentPath
-from pist.game.dialog import (
+from berries.game.content import ContentPath
+from berries.game.dialog import (
     campaign_dir_for_map_file,
     default_campaign_name,
     default_map_name,
@@ -62,6 +61,7 @@ def test_map_path_becomes_dialog_key() -> None:
     assert campaign_dir_for_map_file(ContentPath('Maps/Author/Pack/Map.bin')) == ContentPath(
         'Maps/Author/Pack'
     )
+    assert dialog_key_for_campaign_dir(ContentPath('Maps')) == ''
     assert dialog_key_for_campaign_dir(ContentPath('Maps/Author/Pack Name')) == 'Author_Pack_Name'
 
 

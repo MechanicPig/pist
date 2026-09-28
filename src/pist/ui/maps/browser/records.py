@@ -7,6 +7,9 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import ClassVar
 
+from berries.entities.classification import CollectedEntityRuleIssue, CollectedEntityRuleIssueStatus
+from berries.game.binmap import AttrValue
+from berries.gamebanana import GameBananaSubmission
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -16,9 +19,6 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
-from pist.entities.classification import CollectedEntityRuleIssue, CollectedEntityRuleIssueStatus
-from pist.game.binmap import AttrValue
-from pist.gamebanana import GameBananaSubmission
 from pist.records import MapRecord, MapRecordProgress
 from pist.sheet_report import ManualRecordField
 from pist.types import CellValue
@@ -633,14 +633,14 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         with Vertical(id='author-select'):
             yield Static('选择要记为作者的 Credits 条目：')
             with VerticalScroll(id='author-select-list'):
-                for index, (name, group, role) in enumerate(self._choices):
+                for i, (name, group, role) in enumerate(self._choices):
                     label = f'{name}  [{group}]'
                     if role:
                         label += f'  [{role}]'
                     yield Checkbox(
                         Text(label),
                         value=name in self._selected_authors,
-                        id=f'record-author-{index}',
+                        id=f'record-author-{i}',
                         compact=True,
                     )
             with Horizontal(id='author-select-actions'):
@@ -656,8 +656,8 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         authors = tuple(
             dict.fromkeys(
                 name
-                for index, (name, _, _) in enumerate(self._choices)
-                if self.query_one(f'#record-author-{index}', Checkbox).value
+                for i, (name, _, _) in enumerate(self._choices)
+                if self.query_one(f'#record-author-{i}', Checkbox).value
             )
         )
         self.dismiss(authors)
@@ -722,11 +722,11 @@ class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         await author_list.mount(
             *(
                 Horizontal(
-                    Input(author, id=f'dialog-author-{index}', compact=True),
-                    Button('×', id=f'dialog-author-remove-{index}', compact=True),
+                    Input(author, id=f'dialog-author-{i}', compact=True),
+                    Button('×', id=f'dialog-author-remove-{i}', compact=True),
                     classes='dialog-author-row',
                 )
-                for index, author in enumerate(self._authors)
+                for i, author in enumerate(self._authors)
             )
         )
 
@@ -735,8 +735,8 @@ class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         self._authors = list(
             dict.fromkeys(
                 value
-                for index in range(len(self._authors))
-                if index != skip_index
-                and (value := self.query_one(f'#dialog-author-{index}', Input).value.strip())
+                for i in range(len(self._authors))
+                if i != skip_index
+                if (value := self.query_one(f'#dialog-author-{i}', Input).value.strip())
             )
         )

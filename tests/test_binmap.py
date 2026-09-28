@@ -1,9 +1,8 @@
 from struct import pack
 
 import pytest
-
-from pist.game import binmap
-from pist.game.binmap import BadMapBin, parse_map_bin, parse_map_meta
+from berries.game import binmap
+from berries.game.binmap import BadMapBin, parse_map_bin, parse_map_meta
 
 
 def _varlen(value: int) -> bytes:
@@ -22,7 +21,7 @@ def _string(value: str) -> bytes:
 
 def test_parse_map_bin_decodes_nested_elements_and_all_value_types() -> None:
     lookup = ('Map', 'levels', 'level', 'entities', 'strawberry', 'moon', 'name', 'Map_1')
-    indices = {value: index for index, value in enumerate(lookup)}
+    indices = {value: i for i, value in enumerate(lookup)}
 
     def element(
         name: str,
@@ -73,7 +72,7 @@ def test_parse_map_bin_decodes_nested_elements_and_all_value_types() -> None:
 
 def test_parse_map_meta_skips_full_map_contents() -> None:
     lookup = ('Map', 'meta', 'levels', 'level', 'Icon', 'name', 'areas/Test/2-medium', 'start')
-    indices = {value: index for index, value in enumerate(lookup)}
+    indices = {value: i for i, value in enumerate(lookup)}
 
     def element(name: str, attrs: list[tuple[str, int, bytes]], children: list[bytes]) -> bytes:
         return b''.join(

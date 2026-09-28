@@ -3,9 +3,8 @@
 from pathlib import Path
 
 import pytest
-
-from pist.game.content import ContentPath
-from pist.game.map_hiders import (
+from berries.game.content import ContentPath
+from berries.game.map_hiders import (
     CHRONIA_HELPER,
     HELPER_TEST_MAP_HIDER,
     SCUG_HELPER,

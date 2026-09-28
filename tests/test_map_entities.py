@@ -1,46 +1,112 @@
 import pytest
-
-from pist.entities.classification import (
+from berries.entities.classification import (
     CollectedEntityRuleIssue,
     CollectedEntityRuleIssueStatus,
-    MapEntityStats,
     classify_map_entities,
     collected_entity_rule_issues,
-    map_entity_stats,
 )
-from pist.entities.map_entity_id import MapEntityID
-from pist.entities.rules import (
+from berries.entities.rules import (
     SHARED_ENTITIES_PATH,
     EntityKind,
     EntityRule,
     EntityRules,
     EntityRulesForId,
-    EntityStat,
-    EntityTableField,
     load_entity_rules,
 )
-from pist.game.binmap import BinElement, BinMap
+from berries.game.binmap import BinElement, BinMap
+from berries.map_entity_id import MapEntityID
+
+from pist.entity_stats import (
+    EntityStatAggregation,
+    EntityStatRule,
+    EntityStatRules,
+    MapEntityStats,
+    load_entity_stat_rules,
+    map_entity_stats,
+)
 
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
+STAT_RULES = load_entity_stat_rules(SHARED_RULES)
 
 
 def test_entity_record_values_include_absent_count_and_existence_kinds() -> None:
     stats = MapEntityStats(
-        counts={},
-        existing_kinds=frozenset(),
-        table_fields={
-            'strawberry': EntityTableField(table='主表', field='红草莓数'),
-            'cassette': EntityTableField(table='主表', field='磁带'),
-        },
-        stat_types={'strawberry': EntityStat.COUNT, 'cassette': EntityStat.EXIST},
+        rules=EntityStatRules(
+            stats={
+                'strawberry': EntityStatRule(
+                    kind='strawberry',
+                    aggregation=EntityStatAggregation.COUNT,
+                    table='主表',
+                    field='红草莓数',
+                ),
+                'cassette': EntityStatRule(
+                    kind='cassette',
+                    aggregation=EntityStatAggregation.EXIST,
+                    table='主表',
+                    field='磁带',
+                ),
+            }
+        )
     )
 
     assert stats.record_values == {'主表': {'红草莓数': 0, '磁带': False}}
 
 
-def test_map_entities_classifies_configured_entities_with_sources(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_personal_stat_rules_reject_removed_public_kind(tmp_path) -> None:
+    path = tmp_path / 'stats.toml'
+    path.write_text(
+        """
+[stats.missing]
+kind = 'removed_kind'
+aggregation = 'count'
+table = 'main'
+field = 'count'
+""".strip(),
+        encoding='utf-8',
+    )
+
+    with pytest.raises(ValueError, match='Invalid personal entity statistic rules'):
+        load_entity_stat_rules(SHARED_RULES, path)
+
+
+def test_personal_stat_rules_reject_duplicate_record_target() -> None:
+    with pytest.raises(ValueError, match='configured by both'):
+        EntityStatRules(
+            stats={
+                'first': EntityStatRule(
+                    kind='strawberry',
+                    aggregation=EntityStatAggregation.COUNT,
+                    table='main',
+                    field='value',
+                ),
+                'second': EntityStatRule(
+                    kind='cassette',
+                    aggregation=EntityStatAggregation.EXIST,
+                    table='main',
+                    field='value',
+                ),
+            }
+        )
+
+
+def test_personal_select_values_must_remain_inside_stat_kind_subtree() -> None:
+    rules = EntityStatRules(
+        stats={
+            'heart': EntityStatRule(
+                kind='heart',
+                aggregation=EntityStatAggregation.SELECT,
+                table='main',
+                field='heart',
+                values={'cassette': 'invalid'},
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match='outside the .* subtree'):
+        rules.validate_kinds(SHARED_RULES)
+
+
+def test_map_entities_classifies_configured_entities_with_sources() -> None:
     map_data = BinMap(
         package='Test/Map',
         root=BinElement(
@@ -100,22 +166,18 @@ def test_map_entities_classifies_configured_entities_with_sources(
     )
 
     entities = tuple(classify_map_entities(map_data, rule_set=SHARED_RULES))
-    monkeypatch.setattr(
-        'pist.entities.classification._classified_entity',
-        lambda *_args: pytest.fail('Statistics must not construct preview entities.'),
+    stats = map_entity_stats(
+        map_data,
+        entity_rules=SHARED_RULES,
+        stat_rules=STAT_RULES,
     )
-    monkeypatch.setattr(
-        'pist.entities.classification.rules.kind_sprite',
-        lambda *_args, **_kwargs: pytest.fail('Statistics must not resolve preview sprites.'),
-    )
-    stats = map_entity_stats(map_data, rule_set=SHARED_RULES)
 
     assert stats.count('strawberry') == 1
     assert stats.count('moonberry') == 1
     assert [entity.entity_id for entity in entities if entity.kind == 'goldenberry'] == [3]
     assert [entity.room for entity in entities if entity.kind == 'silverberry'] == ['first_room']
     assert stats.exists('cassette')
-    assert stats.has_stat_kind('heart')
+    assert stats.has_stat('heart')
     assert stats.record_values == {
         '主表': {'红草莓数': 1, '月莓数': 1, '磁带': True, '水晶之心': '通关收集'}
     }
@@ -341,17 +403,17 @@ def test_map_entities_marks_ambiguous_heart_outcomes_for_review() -> None:
     rules = SHARED_RULES.with_rule('heartGem', 'end_level_heart', {'endLevel': True}).with_rule(
         'heartGem', 'keep_going_heart', {'endLevel': False}
     )
-    stats = map_entity_stats(map_data, rule_set=rules)
+    stats = map_entity_stats(map_data, entity_rules=rules, stat_rules=STAT_RULES)
 
-    assert 'heart' in stats.selected_kinds
+    assert 'heart' in stats.selected_stats
     assert '水晶之心' not in stats.record_values['主表']
-    assert stats.select_conflicts[0].table_field.field == '水晶之心'
+    assert stats.select_conflicts[0].rule.field == '水晶之心'
     assert stats.select_conflicts[0].values == frozenset({'通关收集', '额外收集'})
 
 
 def test_map_entities_passes_map_metadata_to_rules() -> None:
     rules = EntityRules(
-        kinds={'heart': EntityKind(label='Heart', stat=EntityStat.EXIST)},
+        kinds={'heart': EntityKind(label='Heart')},
         entities={
             'Test/Heart': EntityRulesForId(
                 rules=(EntityRule(kind='heart', meta={'HeartIsEnd': True}),)
@@ -440,6 +502,10 @@ def test_unstatistical_entity_remains_available_to_map_preview() -> None:
     assert [(entity.kind, entity.sprite) for entity in entities] == [
         ('strawberry_seed', 'strawberry-seed.png')
     ]
-    stats = map_entity_stats(map_data, rule_set=rules)
+    stats = map_entity_stats(
+        map_data,
+        entity_rules=rules,
+        stat_rules=EntityStatRules(),
+    )
     assert stats.count('strawberry') == 0
     assert stats.count('moonberry') == 0

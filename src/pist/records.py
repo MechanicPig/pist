@@ -5,12 +5,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final, Literal
 
+from berries.game import dialog, levels, mods, saves
+from berries.gamebanana import GameBananaCredit, GameBananaSubmission
+from berries.models import FrozenModel
 from pydantic import Field, NonNegativeInt
 
-from pist.entities.classification import MapEntityStats
-from pist.game import dialog, levels, saves
-from pist.gamebanana import GameBananaCredit, GameBananaSubmission
-from pist.models import FrozenModel
+from pist.entity_stats import MapEntityStats
 from pist.types import CellValue, RecordValues
 
 MANUAL_RECORD_FIELD_TITLES = frozenset(
@@ -68,8 +68,8 @@ def map_record_progress(
         strawberries = entity_stats.count('strawberry') + entity_stats.count('moonberry')
         all_collected = (
             len(stats.collected_strawberries) >= strawberries
-            and (not entity_stats.has_stat_kind('cassette') or stats.cassette_collected)
-            and (not entity_stats.has_stat_kind('heart') or stats.heart_collected)
+            and (not entity_stats.has_stat('cassette') or stats.cassette_collected)
+            and (not entity_stats.has_stat('heart') or stats.heart_collected)
         )
         return (
             MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
@@ -108,6 +108,7 @@ def create_map_record(
     level: levels.Level,
     side: levels.LevelSide,
     *,
+    mod: mods.InstalledMod | None,
     save_slot: saves.SaveSlot,
     gamebanana: GameBananaSubmission | None = None,
     authors: tuple[str, ...] = (),
@@ -117,16 +118,14 @@ def create_map_record(
     now: datetime | None = None,
 ) -> MapRecord:
     """Build a local record from one selected Mod map."""
-    loaded_map = level.maps_by_side[side]
-    if not isinstance(loaded_map, levels.LoadedModMap):
+    if mod is None:
         raise TypeError('Cannot create a local record for a vanilla map.')
-    mod = loaded_map.mod
-    map_info = loaded_map.map_info
+    map_info = level[side].map_info
     stats = save_slot.get_map_stats(level, side)
     recorded_stats = stats if stats is not None and stats.is_recorded else None
     current_dialogs = {} if dialogs is None else dialogs
-    names = levels.map_names(level, side, current_dialogs)
-    fallback_name = levels.map_fallback_name(level, side)
+    names = level.localized_names(side, current_dialogs)
+    fallback_name = level.fallback_name(side)
     map_name = dialog.localized_name(names, languages) or fallback_name
     english_name = names.get('en') or fallback_name
     return MapRecord(
@@ -139,7 +138,7 @@ def create_map_record(
         map_name=map_name,
         map_english_name=english_name if english_name != map_name else None,
         map_file=map_info.file_path.as_posix(),
-        sid=saves.sid_for_level(level),
+        sid=level.sid,
         side=side.value,
         authors=authors,
         save_slot=save_slot.number,

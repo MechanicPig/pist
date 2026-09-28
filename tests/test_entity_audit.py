@@ -1,6 +1,13 @@
 import asyncio
 import json
 
+from berries.entities.rules import (
+    EntityKind,
+    EntityRuleLayer,
+    EntityRules,
+)
+from berries.game.map_source import MapSource
+from berries.map_layout import MapPreviewEntity
 from textual.app import App
 from textual.widgets import Button, Input, OptionList, Select, Tree
 
@@ -17,26 +24,14 @@ from pist.entities.audit import (
     RawEntityOccurrence,
     occurrences_for_variants,
 )
-from pist.entities.rules import (
-    EntityKind,
-    EntityRuleLayer,
-    EntityRules,
-    EntityStat,
-    EntityTableField,
-)
-from pist.game.map_source import MapSource
-from pist.game.routes import MapPreviewEntity
 from pist.ui.entities.audit import (
     ATTR_SELECT_ID,
     ATTR_STATUS_ID,
     ENTITY_LIST_ID,
     ENTITY_STATUS_ID,
     KIND_TREE_ID,
-    NEW_KIND_FIELD_ID,
     NEW_KIND_LABEL_ID,
     NEW_KIND_NAME_ID,
-    NEW_KIND_STAT_ID,
-    NEW_KIND_TABLE_ID,
     REVOKE_ENTITY_KIND_ID,
     VARIANT_SELECT_ID,
     VIEW_GROUP_OCCURRENCES_ID,
@@ -563,8 +558,6 @@ def test_kind_picker_context_edit_opens_the_existing_kind() -> None:
             'berry': EntityKind(
                 label='浆果',
                 sprite='berry.png',
-                stat=EntityStat.COUNT,
-                table_field=EntityTableField(table='主表', field='红草莓数'),
             )
         }
     )
@@ -586,9 +579,6 @@ def test_kind_picker_context_edit_opens_the_existing_kind() -> None:
             assert name.value == 'berry'
             assert not name.disabled
             assert screen.query_one(f'#{NEW_KIND_LABEL_ID}', Input).value == '浆果'
-            assert screen.query_one(f'#{NEW_KIND_STAT_ID}', Select).value == 'count'
-            assert screen.query_one(f'#{NEW_KIND_TABLE_ID}', Input).value == '主表'
-            assert screen.query_one(f'#{NEW_KIND_FIELD_ID}', Input).value == '红草莓数'
 
     asyncio.run(check())
 

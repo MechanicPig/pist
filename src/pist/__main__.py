@@ -8,13 +8,13 @@ from datetime import UTC, datetime
 from getpass import getpass
 from pathlib import Path
 
+from berries.game.enders_blender import EndersBlenderReader
+from berries.game.mods import DisabledMod, ModScanner, ModScanReport, ScannedMod
+from berries.game.saves import SaveReader
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
-from pist.game.mods import DisabledMod, ModScanner, ModScanReport, ScannedMod
-from pist.game.routes import EndersBlenderReader
-from pist.game.saves import SaveReader
-from pist.local_data import LocalDataStore
 from pist.paths import PIST_DIR
+from pist.record_store import RecordStore
 from pist.secrets import CredentialStore
 from pist.settings import PistSettings, SettingsStore
 from pist.sheet_report import field_coverage_report
@@ -119,6 +119,19 @@ def build_parser() -> argparse.ArgumentParser:
     browse.add_argument(
         '--save-slot', type=int, default=0, help='Show native stats from this save slot.'
     )
+
+    entities = subcommands.add_parser('entities', help='Inspect and maintain entity rules.')
+    entities_subcommands = entities.add_subparsers(dest='entities_command', required=True)
+    audit = entities_subcommands.add_parser('audit', help='Review entity audit evidence.')
+    audit.add_argument(
+        'input_path',
+        type=Path,
+        nargs='?',
+        help='Optional JSON entity audit report; defaults to the latest import.',
+    )
+    audit.add_argument(
+        '--game-dir', type=Path, help='Game installation directory for map progress sort.'
+    )
     for command in (scan, browse):
         command.add_argument(
             '--whitelist',
@@ -137,20 +150,6 @@ def build_parser() -> argparse.ArgumentParser:
             help='Match Everest WhitelistFullOverride behavior.',
         )
 
-    entities = subcommands.add_parser('entities', help='Manage map entity classification rules.')
-    entities_subcommands = entities.add_subparsers(dest='entities_command', required=True)
-    audit = entities_subcommands.add_parser(
-        'audit', help='Review one ignored entity audit report in a terminal UI.'
-    )
-    audit.add_argument(
-        'input_path',
-        type=Path,
-        nargs='?',
-        help='Optional JSON entity audit report; defaults to the latest import.',
-    )
-    audit.add_argument(
-        '--game-dir', type=Path, help='Game installation directory for map progress sort.'
-    )
     return parser
 
 
@@ -246,7 +245,7 @@ async def sync_saved_record(
     store: CredentialStore, source: str, record_id: int, *, update: bool
 ) -> None:
     """Synchronize one local record using an explicit add or update operation."""
-    record = LocalDataStore().load_record(record_id)
+    record = RecordStore().load(record_id)
     client = TencentSmartSheetClient(store)
     remote_record_id = await client.sync_record(extract_file_id(source), record, update=update)
     action = '更新' if update else '新增'
@@ -284,7 +283,7 @@ def mod_scan_summary(result: ModScanReport) -> dict[str, object]:
     }
 
 
-async def scan_mods(
+def scan_mods(
     game_dir: Path,
     output_dir: Path,
     *,
@@ -412,7 +411,7 @@ async def async_main(args: argparse.Namespace) -> None:
             update=args.update,
         )
     elif args.command == 'mods' and args.mods_command == 'scan':
-        await scan_mods(
+        scan_mods(
             default_game_dir(args.game_dir, settings_store.load()),
             args.output_dir,
             whitelist_path=args.whitelist,
@@ -431,8 +430,7 @@ async def async_main(args: argparse.Namespace) -> None:
             whitelist_full_override=args.whitelist_full_override,
         )
     elif args.command == 'entities' and args.entities_command == 'audit':
-        settings = settings_store.load()
-        game_dir = args.game_dir or settings.game_dir
+        game_dir = args.game_dir or settings_store.load().game_dir
         await review_entity_audit(
             args.input_path,
             save_reader=SaveReader(game_dir) if game_dir is not None else None,
