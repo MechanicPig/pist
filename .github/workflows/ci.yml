@@ -45,7 +45,10 @@ jobs:
         run: uv run pyright packages/berries/src src/pist tests
 
       - name: Test synthetic game and Mod fixtures
-        run: uv run pytest --basetemp .pist/pytest
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .pist | Out-Null
+          uv run pytest --basetemp .pist/pytest
 
       - name: Build distributions
         run: uv build --all-packages --out-dir .pist/build
