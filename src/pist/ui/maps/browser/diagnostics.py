@@ -23,7 +23,11 @@ class BrowserWarningsScreen(ModalScreen[None]):
             yield Static(f'警告（{len(self.warnings)}）', classes='dialog-title')
             with VerticalScroll(id='browser-warnings-content'):
                 for index, warning in enumerate(self.warnings, 1):
-                    yield Static(f'{index}. {warning}', classes='browser-warning-entry')
+                    yield Static(
+                        f'{index}. {warning}',
+                        classes='browser-warning-entry',
+                        markup=False,
+                    )
             with Horizontal(id='browser-warnings-actions'):
                 yield Button('关闭', id='browser-warnings-close', variant='primary')
 

@@ -341,7 +341,10 @@ def test_scanner_warns_but_keeps_a_disabled_mod_with_invalid_metadata(tmp_path: 
     assert len(report.warnings) == 1
     assert report.warnings[0].mod_filename == 'broken.zip'
     assert report.warnings[0].file_path == 'everest.yaml'
-    assert report.warnings[0].message.startswith('禁用 Mod 元数据无效：')
+    assert report.warnings[0].message == (
+        '禁用 Mod 元数据无效：0.Version：'
+        'must contain two to four dot-separated decimal integer components'
+    )
 
 
 def test_scanner_warns_and_crawls_an_enabled_mod_with_invalid_metadata(tmp_path: Path) -> None:
@@ -364,7 +367,10 @@ def test_scanner_warns_and_crawls_an_enabled_mod_with_invalid_metadata(tmp_path:
     assert len(report.warnings) == 1
     assert report.warnings[0].mod_filename == 'broken.zip'
     assert report.warnings[0].file_path == 'everest.yaml'
-    assert report.warnings[0].message.startswith('Mod 元数据无效：')
+    assert report.warnings[0].message == (
+        'Mod 元数据无效：0.Version：'
+        'must contain two to four dot-separated decimal integer components'
+    )
 
 
 def test_scanner_warns_and_ignores_an_undecodable_dialog(tmp_path: Path) -> None:

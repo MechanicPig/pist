@@ -256,6 +256,16 @@ def collab_journal_icon_fingerprint(mod: InstalledMod, maps: Iterable[MapInfo]) 
     return digest.hexdigest()
 
 
+def _validation_error_detail(error: ValidationError) -> str:
+    """Format boundary validation failures without Pydantic's developer metadata."""
+    details: list[str] = []
+    for issue in error.errors(include_url=False, include_context=False, include_input=False):
+        location = '.'.join(str(part) for part in issue['loc'])
+        message = issue['msg'].removeprefix('Value error, ')
+        details.append(f'{location}：{message}' if location else message)
+    return '；'.join(details)
+
+
 class ModScanner:
     """Read Everest metadata without changing the game's files."""
 
@@ -500,11 +510,14 @@ class ModScanner:
     ) -> None:
         """Record malformed manifest metadata without aborting the package scan."""
         prefix = '禁用 Mod 元数据无效' if disabled else 'Mod 元数据无效'
+        detail = (
+            _validation_error_detail(error) if isinstance(error, ValidationError) else str(error)
+        )
         self._warnings.append(
             ModScanWarning(
                 mod_filename=path.name,
                 file_path=manifest_path.at.as_posix(),
-                message=f'{prefix}：{error}',
+                message=f'{prefix}：{detail}',
             )
         )
 

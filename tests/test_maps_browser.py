@@ -163,7 +163,7 @@ def test_browser_consolidates_startup_warnings_behind_a_summary_button() -> None
                 ModScanWarning(
                     mod_filename='Broken.zip',
                     file_path='Dialog/English.txt',
-                    message='无法解码文本',
+                    message=("无法解码文本 [type=string_type, input_value='1', input_type=str]"),
                 )
             ],
             mods=[visible, unavailable],

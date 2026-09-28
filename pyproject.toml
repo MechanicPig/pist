@@ -1,6 +1,6 @@
 [project]
 name = "pist"
-version = "0.5.0"
+version = "0.5.1"
 description = "Celeste Mod map first-playthrough tracker for Tencent Docs Smart Sheets."
 readme = "README.md"
 requires-python = ">=3.14"
