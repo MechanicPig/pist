@@ -4,35 +4,6 @@
 
 完整变更请见[更新日志](CHANGELOG.md)。
 
-## 公共 Python 接口
-
-公共包名和导入命名空间均为 `berries`，个人记录应用继续使用 `pist`。第三方应用可以从
-`berries` 的稳定顶层入口
-扫描游戏和 Mod、遍历 Campaign/Level/Map、读取地图布局与实体分类，或打开基础只读预览，
-无需了解腾讯智能表格和个人记录模型：
-
-```sh
-pip install berries
-```
-
-```python
-from pathlib import Path
-
-from berries import GameInstallation, load_map_layout
-
-game = GameInstallation(Path(r'D:\Games\Celeste'))
-catalog = game.load_catalog()
-level, side = next(catalog.campaigns[0].iter_sides())
-layout = load_map_layout(level[side])
-print(level.sid, side, len(layout.rooms))
-```
-
-可运行的最小示例见 `examples/list_maps.py`。实体本地覆盖规则会针对当前安装版本重新校验；
-升级包后不保证旧覆盖仍兼容，冲突或无效引用会显式报错。
-
-`berries` 的基础安装不依赖 Textual、keyring 或 Pist 的个人应用模块；`pist` 作为 workspace
-中的应用项目显式依赖 `berries`。开发环境使用一次 `uv sync` 即可安装两个项目。
-
 ## 界面预览
 
 | 地图集与存档进度 | 合集大厅与投稿地图 |
