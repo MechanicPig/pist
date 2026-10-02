@@ -11,7 +11,7 @@ description: "审查实体审计无法定性的 Celeste 地图实体：通过本
 
 ## 工作流程
 
-1. 先查询当前类别树 `packages/berries/src/berries/data/kinds.toml`、共享规则 `packages/berries/src/berries/data/entities.toml` 和实体审计中的现有结论。规则与类别树是当前归类的唯一来源；本 Skill 的参考文档不重复维护完整实体清单。
+1. 先查询当前类别树 `berries/src/berries/data/kinds.toml`、共享规则 `berries/src/berries/data/entities.toml` 和实体审计中的现有结论。规则与类别树是当前归类的唯一来源；本 Skill 的参考文档不重复维护完整实体清单。
 2. 明确待审计的精确实体 ID、出现地图、房间、坐标、原始属性和相关地图元数据。必要时用 `berries.game.binmap.parse_map_bin` 读取指定 `.bin` 地图；保留“属性未写入”和“显式默认值”的差异。
 3. 读取 Mod 的 `everest.yaml` 与依赖。实体前缀只是标识，不能证明存在同名 Mod；从 Mod 压缩包及其声明依赖中定位实现 DLL。
 4. 静态读取 .NET 元数据，为精确实体 ID 查找 `CustomEntity` 注册，并记录程序集、实现类型和继承链。需要时在临时环境使用 `uv run --with dnfile`；不得修改 `pyproject.toml` 或 `uv.lock`。

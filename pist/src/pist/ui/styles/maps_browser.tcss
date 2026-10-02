@@ -1,0 +1,287 @@
+Horizontal {
+    height: 1fr;
+}
+
+#campaign-panel {
+    width: 40%;
+    border: round $primary;
+    background: transparent;
+}
+
+#campaign-list {
+    height: 1fr;
+}
+
+#campaign-list-header {
+    height: auto;
+    padding: 1 1;
+}
+
+#campaign-list-title {
+    width: 1fr;
+    color: #58d1eb;
+    text-style: bold;
+}
+
+#browser-warnings-button {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    margin-right: 1;
+    padding: 0 1;
+    border: none;
+}
+
+#campaign-list-title:light {
+    color: #0083b2;
+}
+
+.campaign-list-controls {
+    width: 4;
+    height: 1;
+}
+
+.campaign-list-toggle {
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    color: #58d1eb;
+    pointer: pointer;
+}
+
+.campaign-list-toggle:light {
+    color: #0083b2;
+}
+
+.campaign-list-toggle.-hidden {
+    visibility: hidden;
+}
+
+#campaign-list > ListItem {
+    padding: 1 1;
+}
+
+#detail-scroll {
+    width: 60%;
+    border: round $primary;
+}
+
+#detail {
+    padding: 1 2;
+}
+
+#map-detail {
+    padding: 0 2;
+}
+
+#detail, #map-detail {
+    height: auto;
+}
+
+.map-list {
+    height: auto;
+    background: transparent;
+}
+
+.side-map-item {
+    position: relative;
+}
+
+.map-side-controls {
+    dock: right;
+    width: 4;
+    height: 1;
+}
+
+.map-side-button {
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    pointer: pointer;
+}
+
+.map-side-button.-hidden {
+    visibility: hidden;
+}
+
+.lobby-map-item {
+    position: relative;
+    layers: content toggle;
+    height: auto;
+}
+
+.lobby-map-toggle {
+    position: absolute;
+    layer: toggle;
+    offset: 0 0;
+    width: 2;
+    height: 1;
+    content-align: center middle;
+    pointer: pointer;
+}
+
+.map-item-title,
+.lobby-map-toggle {
+    color: #58d1eb;
+}
+
+.map-item-title:light,
+.lobby-map-toggle:light {
+    color: #0083b2;
+}
+
+.lobby-map-item > .map-item-title,
+.lobby-map-item > .map-item-content,
+.lobby-map-item > .lobby-maps {
+    layer: content;
+}
+
+.lobby-map-item.-collapsed > .lobby-maps {
+    display: none;
+}
+
+.lobby-map-item > .lobby-maps {
+    height: auto;
+    padding-left: 3;
+}
+
+.lobby-map-item.-highlight > .lobby-maps {
+    background: $surface;
+    color: $foreground;
+    text-style: not bold;
+}
+
+.lobby-map-item.-highlight > .lobby-maps .map-list {
+    color: $foreground;
+    text-style: not bold;
+}
+
+.lobby-map-item > .lobby-maps .map-item-title,
+.lobby-map-item > .lobby-maps .map-item-content {
+    text-style: not bold;
+}
+
+.lobby-map-item > .lobby-maps .map-list:focus > ListItem.-highlight .map-item-title,
+.lobby-map-item > .lobby-maps .map-list:focus > ListItem.-highlight .map-item-content {
+    text-style: bold;
+}
+
+.collab-map-list {
+    height: auto;
+}
+
+.collab-map-list.is-loading {
+    height: 1;
+    layout: horizontal;
+    align: left middle;
+}
+
+.collab-map-list.is-loading LoadingIndicator {
+    width: 3;
+    height: 1;
+    margin-right: 1;
+}
+
+DatePickerScreen, RecordReferenceScreen, RecordEditorScreen, AuthorSelectionScreen,
+LobbyCampaignEditorScreen {
+    align: center middle;
+}
+
+#lobby-campaign-editor-dialog {
+    width: 75%;
+    height: 75%;
+    border: tall $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#lobby-campaign-editor-dialog > .dialog-title {
+    text-style: bold;
+}
+
+#lobby-campaign-selection {
+    height: 1fr;
+    margin-top: 1;
+    border: round $accent;
+}
+
+#lobby-campaign-editor-actions {
+    height: auto;
+    align: right middle;
+    padding-top: 1;
+}
+
+#lobby-campaign-editor-actions > Button {
+    margin-left: 1;
+}
+
+#date-picker {
+    width: 52;
+    height: auto;
+    border: tall $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#date-picker-header, #date-picker-actions, #record-sync-actions {
+    height: auto;
+    align: center middle;
+}
+
+#date-picker-header Button, #record-sync-actions Button {
+    margin: 0 1;
+}
+
+#date-picker-days {
+    grid-size: 7;
+    grid-gutter: 0;
+    height: auto;
+    margin-top: 1;
+}
+
+#date-picker-days Button { min-width: 0; width: 1fr; }
+#date-picker-actions, #record-sync-actions { padding-top: 1; }
+
+#record-reference-dialog {
+    width: 75%; height: 75%; border: tall $primary; padding: 1 2; background: $surface;
+}
+#record-reference-content { height: 1fr; }
+#collected-entity-rules { width: 70%; height: 70%; border: tall $warning; padding: 1 2; background: $surface; }
+#collected-entity-rules-content { height: 1fr; margin-top: 1; }
+#collected-entity-rules-actions { height: auto; align: right middle; padding-top: 1; }
+.collected-entity-rule-issue { margin-bottom: 1; color: $warning; }
+#record-reference-actions, #record-confirm-actions, #author-select-actions {
+    height: auto; align: right middle; padding-top: 1;
+}
+
+#record-confirm {
+    width: 70%; height: 90%; border: tall $primary; padding: 1 2; background: $surface;
+}
+#record-confirm-content { height: 1fr; }
+.record-reference-summary { margin-bottom: 1; }
+.record-field-label, .record-reference-title { text-style: bold; }
+#record-fields { grid-size: 4; grid-columns: 10 1fr 10 1fr; grid-rows: 1; grid-gutter: 0; height: auto; }
+#record-fields Input, #record-fields Select { width: 1fr; height: 1; }
+#record-fields > Horizontal { height: 1; layout: horizontal; align: left middle; }
+.record-wide-control { column-span: 3; }
+.record-date-control Input { width: 1fr; }
+.record-date-picker { width: auto; margin-left: 1; }
+.record-note-control { column-span: 3; height: 1; }
+.record-author-placeholder, .record-route-placeholder { color: $foreground 50%; }
+.record-field-warning { color: $warning; }
+#record-confirm-actions Button, #author-select-actions Button { margin-left: 1; }
+
+RecordSyncModeScreen, DialogAuthorSelectionScreen { align: center middle; }
+#record-sync-mode { width: 58; height: auto; border: tall $primary; padding: 1 2; background: $surface; }
+
+#author-select { width: 70%; height: 80%; border: round $primary; padding: 1 2; background: $surface; }
+#author-select-list { height: 1fr; }
+
+#dialog-author-select { width: 70%; height: 80%; border: round $primary; padding: 1 2; background: $surface; }
+#dialog-author-text, #dialog-author-text:focus { height: 3; border: round $primary; }
+#dialog-author-list { height: 1fr; min-height: 3; border: round $primary; padding: 0 1; overflow-y: auto; }
+.dialog-author-row { height: 1; }
+.dialog-author-row Input { width: 1fr; height: 1; }
+.dialog-author-row Button { width: auto; margin-left: 1; }
+#dialog-author-actions { height: 4; min-height: 4; align: right middle; padding-top: 1; }
+#dialog-author-actions Button { margin-left: 1; }

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      UV_NO_PROGRESS: '1'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.14'
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --all-packages --frozen
+
+      - name: Check formatting
+        run: uv run --all-packages ruff format --check berries pist tests examples
+
+      - name: Lint
+        run: uv run --all-packages ruff check berries pist tests examples
+
+      - name: Type check
+        run: uv run --all-packages pyright berries/src berries/tests pist/src/pist pist/tests tests
+
+      - name: Test synthetic game and Mod fixtures
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .pist | Out-Null
+          uv run --all-packages pytest --basetemp .pist/pytest
+
+      - name: Build distributions
+        run: uv build --all-packages --out-dir .pist/build
+
+      - name: Test Berries without application dependencies
+        env:
+          UV_PROJECT_ENVIRONMENT: .pist/berries-tests
+        run: |
+          uv sync --package berries --group dev --frozen
+          uv run --package berries --group dev python -c "from importlib.util import find_spec; assert find_spec('textual') is None; assert find_spec('keyring') is None; assert find_spec('pist.__main__') is None"
+          uv run --package berries --group dev pytest berries/tests --basetemp .pist/pytest-berries
+
+      - name: Verify minimal public installation
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem .pist/build/berries-*.whl).FullName
+          uv venv .pist/package-test
+          uv pip install --python .pist/package-test/Scripts/python.exe $wheel
+          .pist/package-test/Scripts/python.exe -c "from importlib.resources import files; from importlib.util import find_spec; import berries; assert find_spec('textual') is None; assert find_spec('keyring') is None; assert files('berries').joinpath('data/entities.toml').is_file(); assert files('berries.map_preview').joinpath('static/index.html').is_file()"
+
+      - name: Verify Pist installs against built Berries wheel
+        shell: pwsh
+        run: |
+          $berriesWheel = (Get-ChildItem .pist/build/berries-*.whl).FullName
+          $pistWheel = (Get-ChildItem .pist/build/pist-*.whl).FullName
+          uv venv .pist/app-package-test
+          uv pip install --python .pist/app-package-test/Scripts/python.exe $berriesWheel $pistWheel
+          .pist/app-package-test/Scripts/pist.exe --help

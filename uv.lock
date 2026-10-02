@@ -8,6 +8,13 @@ members = [
     "pist",
 ]
 
+[manifest.dependency-groups]
+dev = [
+    { name = "pyright", specifier = ">=1.1.411" },
+    { name = "pytest", specifier = ">=8.3.0" },
+    { name = "ruff", specifier = ">=0.11.0" },
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
@@ -117,7 +124,7 @@ wheels = [
 [[package]]
 name = "berries"
 version = "0.1.0"
-source = { editable = "packages/berries" }
+source = { editable = "berries" }
 dependencies = [
     { name = "aiohttp" },
     { name = "annotated-types" },
@@ -494,8 +501,8 @@ wheels = [
 
 [[package]]
 name = "pist"
-version = "0.5.1"
-source = { editable = "." }
+version = "0.5.2"
+source = { editable = "pist" }
 dependencies = [
     { name = "aiohttp" },
     { name = "berries" },
@@ -509,17 +516,10 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.0" },
-    { name = "berries", editable = "packages/berries" },
+    { name = "berries", editable = "berries" },
     { name = "keyring", specifier = ">=25.6.0" },
     { name = "luaparser", specifier = ">=4.1.0" },
     { name = "platformdirs", specifier = ">=4.11.7" },
@@ -528,13 +528,6 @@ requires-dist = [
     { name = "textual", specifier = ">=8.2.8" },
     { name = "tomlkit", specifier = ">=0.15.1" },
     { name = "typing-extensions", specifier = ">=4.16.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyright", specifier = ">=1.1.411" },
-    { name = "pytest", specifier = ">=8.3.0" },
-    { name = "ruff", specifier = ">=0.11.0" },
 ]
 
 [[package]]

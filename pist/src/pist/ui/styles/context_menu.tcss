@@ -1,0 +1,24 @@
+ContextMenuScreen {
+    align: left top;
+    background: transparent;
+}
+
+ContextMenuScreen .context-menu-dialog {
+    width: 28;
+    height: auto;
+    border: none;
+    outline: solid $primary;
+    padding: 0;
+    background: $surface;
+}
+
+ContextMenuScreen .context-menu-dialog > Button {
+    width: 100%;
+    min-width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+    text-align: left;
+    content-align: left middle;
+}

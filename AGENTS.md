@@ -9,32 +9,42 @@ Pist 用于扫描本地 Celeste 与已启用 Mod，辅助记录地图初见数�
 ## 工程约束
 
 - 使用 Python 3.14 及以上版本；依赖、虚拟环境和锁文件统一由 `uv` 管理。
-- 公共包 Berries 位于 `packages/berries/src/berries/`，个人应用 Pist 位于 `src/pist/`，测试位于 `tests/`；公共共享数据位于 `packages/berries/src/berries/data/`，应用数据位于 `src/pist/data/` 与 `src/pist/app_resources/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
+- 公共包 Berries 位于 `berries/src/berries/`，个人应用 Pist 位于 `pist/src/pist/`，两包测试分别位于 `berries/tests/` 与 `pist/tests/`，架构验证位于 `tests/test_arch.py`，共享测试工厂位于 `tests/test_support/`，扫描测试合成数据位于 `berries/tests/data/`；公共共享数据位于 `berries/src/berries/data/`，应用数据位于 `pist/src/pist/data/` 与 `pist/src/pist/app_resources/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
 - Pist 运行时本地数据位于名为 `.pist` 的目录：源码工作区使用仓库根目录，安装包使用 `platformdirs` 选择的平台用户数据目录；`PIST_DATA_DIR` 可覆盖其完整路径。Berries 单独安装时使用自己的平台用户数据目录和 `BERRIES_DATA_DIR`，在本仓库源码 workspace 中则与 Pist 共用根目录 `.pist/`。开发用检查报告、临时脚本、参考仓库及构建产物仍放在仓库内被忽略的 `.pist/`；其中 `local-data.sqlite3`、扫描报告和构建产物不得手工修改。
 - 仅面向内部开发的本地数据结构变更时，先确认没有进程占用对应的 `.pist/*.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
 - 变更 SQLite 的表、字段或其语义前，先向用户列出 schema diff 与当前本地数据迁移方案供审查；获确认后再实施，并删除旧 schema，不保留运行时兼容层。
 - 新增依赖前先确认标准库或既有依赖无法合理解决问题；通过 `uv add` 或 `uv add --group dev` 更新 `pyproject.toml` 与 `uv.lock`，不要手改锁文件。
 - 项目使用 Ruff 作为代码格式化与静态检查工具，行宽为 100，使用单引号；使用 Pyright 作为类型检查工具。
 - 模块和包名按职责语义命名：集合、规则或记录用复数，单一模型、协议或过程用单数；不为形式上的单复数一致性重命名。
+- 当同一概念同时存在“根据孤立输入得到的候选结果”和“结合完整集合的加载、覆盖或组合关系得到的最终结果”时，候选结果使用 `local_` 前缀，最终结果不加前缀。这里的 `local` 表示尚未全局整合，不表示宿主文件系统；只有确实存在这两个阶段时才使用。Manifest 声明、扫描路径、`InstalledMod.maps`、依赖列表等直接输入事实不加 `local_`；此类名称按声明或结果语义使用 `required`、`optional`、`loaded`、`resolved`、`satisfied` 等限定词。
 - 涉及路径、SID、Dialog key、扩展名等外部标识的比较或派生时，先查 `docs/path-identity-semantics.md`；按实现与平台证据选择 `Path`、`PurePosixPath` 或字符串匹配，`casefold()` 只能用于明确非身份语义。
 - 外部输入在边界处用 Pydantic 校验，内部代码保持精确类型，避免无必要的 `Any` 或 `object`。类型注解应表达接口与数据的意图：仅需要可挂载组件时标为 `Widget`，确实保证或区分具体类型时保留具体类型；不要为了满足 typing 而枚举偶然的实现分支。
 - Pydantic 模型放在拥有其外部协议、配置或持久化语义的模块；`types.py` 只保留不属于特定领域的共享值类型，不作为模型汇集处。
 - 新增或修改的文本文件统一使用 UTF-8。
 
+## 文档编写约定
+
+- 中文 Markdown 的每个自然段保持一行，使用编辑器软换行阅读，不按固定行宽或句子人为拆行，避免渲染时在中文之间引入空格。Python 的行宽限制不适用于 Markdown。
+- 用空行分隔自然段；列表项中的连续正文同样保持一行。标题、列表层级、表格、代码块等保留各自的结构；仅在确实需要显示换行时使用明确的 Markdown 换行语法。
+- 合并既有段落时保留原有措辞，以及中英文、行内代码等内容之间必要的空格，不将换行一律替换为空格。
+
 ## 常用命令
 
 ```sh
 # 安装锁定的开发环境
-uv sync --frozen
+uv sync --all-packages --frozen
 
 # 运行 CLI
-uv run pist --help
+uv run --package pist pist --help
 
 # 完整验证
-uv run pytest --basetemp .pist/pytest
-uv run ruff check packages/berries/src src/pist tests examples
-uv run ruff format --check packages/berries/src src/pist tests examples
-uv run pyright packages/berries/src src/pist tests
+uv run --all-packages pytest --basetemp .pist/pytest
+uv run --all-packages ruff check berries pist tests examples
+uv run --all-packages ruff format --check berries pist tests examples
+uv run --all-packages pyright berries/src berries/tests pist/src/pist pist/tests tests
+
+# 单独验证公共包（包含根目录开发依赖）
+uv run --package berries --group dev pytest berries/tests --basetemp .pist/pytest-berries
 
 # 验证打包产物
 uv build --all-packages --out-dir .pist/build
@@ -43,7 +53,7 @@ uv build --all-packages --out-dir .pist/build
 当环境不允许 pytest 写入系统临时目录时，测试必须统一复用项目内的临时根目录：
 
 ```sh
-uv run pytest --basetemp .pist/pytest
+uv run --all-packages pytest --basetemp .pist/pytest
 ```
 
 临时诊断、检查或全量扫描脚本放入 `.pist/scripts/`。需要拉取公开参考代码库时，统一浅克隆到 `.pist/references/`；该目录仅用于研究和对照，不纳入项目包或测试输入。
@@ -52,7 +62,7 @@ uv run pytest --basetemp .pist/pytest
 
 - 修改领域逻辑、解析、持久化或规则生成后，运行对应测试；影响面不明确或跨层时运行完整测试、Ruff 与 Pyright。
 - 修改 Textual UI 或 TCSS 后，至少运行相应 UI 测试；涉及布局、焦点或浏览器预览时还应人工验证关键交互。
-- Textual 的静态样式统一放在 `src/pist/ui/styles/*.tcss`，通过应用的 `CSS_PATH` 加载；不要在 Python 类中定义内联 `CSS`。地图预览的浏览器样式保留在其 `static/*.css` 中。
+- Textual 的静态样式统一放在 `pist/src/pist/ui/styles/*.tcss`，通过应用的 `CSS_PATH` 加载；不要在 Python 类中定义内联 `CSS`。地图预览的浏览器样式保留在其 `static/*.css` 中。
 - 修改 CLI 参数、命令语义或用户可见工作流后，同步更新 `README.md`；若改变了技能涵盖的工作流，也同步更新对应 `skills/*/SKILL.md`。
 - 每次新增一项完整能力后，主动检查它是否让现有模块混入新的稳定职责、让 `__init__.py` 承担实现细节，或使浏览器协议的两端失配；满足任一情况时，应在同一任务中拆分，或在交付时说明暂不拆分的原因与后续边界。
 - 不手改由 `uv`、测试、构建、扫描命令或 TUI 生成的文件。共享规则和模板数据是版本控制下的源数据，修改时应通过审查流程或配套测试验证。

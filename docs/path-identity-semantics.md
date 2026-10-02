@@ -36,6 +36,7 @@ Pist 同时处理宿主文件系统路径、ZIP 内的 Everest 虚拟资源路�
 
 - Everest 将 `\\` 规范为 `/`，随后以默认 `Dictionary<string, ModAsset>` 查表。
 - ZIP 内部条目使用 `PurePosixPath` 定位；目录条目使用宿主 `PurePath` 定位。两者进入地图、SID 或 Dialog 等领域模型时，显式转换为统一的 `ContentPath`。
+- `MapInfo` 的内部构造显式传入 `ContentPath`；外部映射或 JSON 中的字符串通过 `model_validate()` / `model_validate_json()` 校验。字段始终保持精确路径类型，不为接受外部字符串而放宽字段注解或手写仅用于类型检查的构造签名。
 - `ContentPath` 先规范分隔符，再按 `PurePosixPath` 结构拆分；不得折叠大小写。
 - 证据：`Everest.Content.cs` 的 `Crawl`（约 390–396 行）、`Map`（约 65 行）和 `TryGet`（约 510、558 行）。
 

@@ -16,10 +16,12 @@
 
 ## 开发环境
 
+仓库采用 monorepo 布局：`berries/` 是公共包，`pist/` 是个人应用，两者各自拥有 `pyproject.toml` 和 `src/`。根目录管理 uv workspace、统一锁文件与开发工具；两包测试分别位于 `berries/tests/`、`pist/tests/`，根目录 `tests/test_arch.py` 保存架构约束验证，`tests/test_support/` 保存两包复用的测试工厂；扫描测试的合成 Mod 数据位于 `berries/tests/data/`。文档和技能仍位于根目录；运行时数据仍统一保存在根目录 `.pist/`。
+
 ### 构建环境
 
 ```sh
-uv sync --frozen
+uv sync --all-packages --frozen
 ```
 
 然后激活项目虚拟环境。Bash 或 zsh：
@@ -34,7 +36,7 @@ PowerShell：
 .venv\Scripts\Activate.ps1
 ```
 
-激活后可直接运行下面的 `pist` 命令。若没有激活环境则需要在命令前加上 `uv run`，例如 `uv run pist --help`。
+激活后可直接运行下面的 `pist` 命令。若没有激活环境则通过 uv 选择应用，例如 `uv run --package pist pist --help`。
 
 ### 验证
 
@@ -73,9 +75,11 @@ pist maps browse [--game-dir <game-dir>] [--save-slot <save-slot>] [--whitelist 
 核心功能：
 
 - 浏览地图日志：显示地图的名称、死亡数、用时等基本信息
-- 预览地图：类 Debug Map，目前通过规则支持了一些常见的草莓、磁带与水晶之心的标注
+- 预览地图：类 Debug Map，目前通过规则支持了一些常见的草莓、磁带与水晶之心的标注；画布中的初见用时可在房间与累积用时之间切换
 - 地图跳转：预览界面支持从大厅地图跳转到小图（实际上不止大厅）
 - 编辑路线：用于统计地图的主房间数
+
+地图浏览顶部的“警告”入口按“Mod 加载”和“运行时”分页展示消息；右键消息卡片可选择“复制”，运行时消息右侧还提供单条“清除”按钮。地图浏览和实体审计 TUI 均可按 `F2` 打开此窗口。通知气泡关闭后，运行时消息仍保留到本次应用退出。
 
 ### 实体审计
 

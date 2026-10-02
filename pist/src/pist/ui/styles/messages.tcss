@@ -1,0 +1,68 @@
+MessagesScreen {
+    align: center middle;
+}
+
+#messages-dialog {
+    width: 90%;
+    height: 85%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#messages-title {
+    height: auto;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#messages-tabs, #loading-message-list, #runtime-message-list {
+    height: 1fr;
+}
+
+MessagesScreen TabPane {
+    height: 1fr;
+    padding: 0;
+}
+
+MessagesScreen .message-card {
+    height: auto;
+    min-height: 5;
+    border: round #e9a23b;
+    padding: 1;
+}
+
+MessagesScreen .message-error {
+    border: round #e05252;
+}
+
+MessagesScreen .message-text {
+    width: 1fr;
+    height: auto;
+}
+
+MessagesScreen .message-actions {
+    width: 10;
+    height: auto;
+    margin-left: 1;
+}
+
+MessagesScreen .message-actions Button {
+    width: 10;
+    min-width: 8;
+}
+
+MessagesScreen .message-empty, #runtime-messages-empty {
+    height: auto;
+    color: $text-muted;
+}
+
+#messages-actions {
+    height: auto;
+    align-horizontal: right;
+    margin-top: 1;
+}
+
+#messages-actions Button {
+    margin-left: 1;
+}

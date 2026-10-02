@@ -1,6 +1,6 @@
 # 非直观实体映射与特殊源码证据
 
-此处记录实体 ID 无法直接说明地图语义的高价值反例，以及需要源码分析才能建立的特殊证据；不重复维护完整规则表。当前类别、属性条件和排除规则仍以 `packages/berries/src/berries/data/kinds.toml`、`packages/berries/src/berries/data/entities.toml` 与实体审计为准。
+此处记录实体 ID 无法直接说明地图语义的高价值反例，以及需要源码分析才能建立的特殊证据；不重复维护完整规则表。当前类别、属性条件和排除规则仍以 `berries/src/berries/data/kinds.toml`、`berries/src/berries/data/entities.toml` 与实体审计为准。
 
 ## 非直观地图语义
 
