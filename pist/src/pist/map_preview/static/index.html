@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>地图预览</title>
 <link rel="stylesheet" href="assets/map_preview.css">
+<link rel="stylesheet" href="assets/object_info.css">
 </head>
 <body>
 <header>
@@ -38,14 +39,14 @@
   </aside>
 </main>
 <div id="status" hidden></div>
-<section id="map-object-info" hidden>
-  <div id="map-object-info-header">
-    <strong id="map-object-info-id"></strong>
-    <button id="map-object-info-close" class="secondary">关闭</button>
+<section id="map-object-info" class="object-info" hidden>
+  <div id="map-object-info-header" data-role="header">
+    <strong id="map-object-info-id" data-role="id"></strong>
+    <button id="map-object-info-close" data-role="close" class="secondary">关闭</button>
   </div>
-  <span id="map-object-info-source"></span>
-  <pre id="map-object-info-attrs"></pre>
-  <div id="map-object-info-actions"></div>
+  <span id="map-object-info-source" data-role="source"></span>
+  <pre id="map-object-info-attrs" data-role="attrs"></pre>
+  <div id="map-object-info-actions" data-role="actions"></div>
 </section>
 <script type="module" src="assets/map_preview.js"></script>
 </body>

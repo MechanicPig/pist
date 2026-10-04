@@ -120,21 +120,27 @@ def load_map_layout_from_path(path: Path, map_file: content.StrPath) -> MapLayou
 
 
 def load_map_data(map_file: levels.Map) -> binmap.BinMap:
-    """Decode one active Game or Mod map through its typed content source."""
+    """Decode one active map, reporting unavailable or invalid sources as ValueError."""
     try:
         with map_file.open_content() as root:
             return _load_map_bin_entry(root, map_file.file_path)
     except content.BadContentEntry as error:
         raise ValueError(f'Invalid content source for map: {map_file.file_path!r}') from error
+    except OSError as error:
+        raise ValueError(
+            f'Cannot read map {map_file.file_path!r} from {map_file.content.path!r}: {error}'
+        ) from error
 
 
 def load_map_data_from_path(path: Path, map_file: content.StrPath) -> binmap.BinMap:
-    """Read one map BIN from an archive, directory, or the Game Content directory."""
+    """Read one map BIN, reporting unavailable or invalid sources as ValueError."""
     try:
         with content.ContentEntry(path) as mod_path:
             map_data = _load_map_bin_entry(mod_path, map_file)
     except content.BadContentEntry as error:
         raise ValueError(f'Invalid map package path: {path!r}') from error
+    except OSError as error:
+        raise ValueError(f'Cannot read map {map_file!r} from {path!r}: {error}') from error
     return map_data
 
 

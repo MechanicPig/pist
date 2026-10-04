@@ -1,6 +1,8 @@
 from pathlib import Path
 from struct import pack
 
+import pytest
+
 from berries.entities.rules import EntityRules
 from berries.game.binmap import BinElement, BinMap
 from berries.game.content import ContentPath
@@ -11,9 +13,35 @@ from berries.map_layout import (
     MapEntrance,
     MapPreviewEntity,
     load_map_layout,
+    load_map_layout_from_path,
     map_layout,
 )
 from test_support.mod_factory import make_installed_mod
+
+
+@pytest.mark.parametrize('source', ('zip', 'directory'))
+@pytest.mark.parametrize('loader', ('active_map', 'path'))
+def test_map_layout_reports_uninstalled_mod(tmp_path: Path, source: str, loader: str) -> None:
+    mod_path = tmp_path / ('Removed.zip' if source == 'zip' else 'Removed')
+    map_info = MapInfo(file_path=ContentPath('Maps/Removed/Map.bin'))
+    mod = make_installed_mod(
+        source='zip' if source == 'zip' else 'directory',
+        filename=mod_path.name,
+        path=mod_path,
+        metadata_name='Removed',
+        metadata_version=None,
+        maps=[map_info],
+    )
+
+    with pytest.raises(ValueError) as caught:
+        if loader == 'active_map':
+            load_map_layout(Map(map_info, mod))
+        else:
+            load_map_layout_from_path(mod_path, map_info.file_path)
+
+    assert mod_path.name in str(caught.value)
+    if source == 'zip' and loader == 'active_map':
+        assert isinstance(caught.value.__cause__, FileNotFoundError)
 
 
 def _varlen(value: int) -> bytes:
@@ -251,7 +279,7 @@ def test_map_layout_extracts_collab_route_links() -> None:
     )
 
 
-def test_map_entrance_rules_allow_local_rule_overrides(tmp_path) -> None:
+def test_map_entrance_rules_allow_local_rule_overrides(tmp_path: Path) -> None:
     shared_path = tmp_path / 'shared.toml'
     shared_path.write_text(
         """[[rules]]

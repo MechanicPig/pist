@@ -1,50 +1,57 @@
 import { MapCanvas } from './canvas.js';
+import { CanvasInteraction, MapViewport } from './viewport.js';
+import { MapGeometry } from './geometry.js';
+import { PreviewClient } from './client.js';
+import { EditState } from './edit_state.js';
+import { MapOverlays } from './overlays.js';
+import { RoomList } from './room_list.js';
+import { ObjectInfoPanel } from './object_info.js';
 
 const base = location.pathname;
 const canvas = document.querySelector('#map');
 const renderer = new MapCanvas(canvas, base, draw);
-const ctx = renderer.ctx;
+const viewport = new MapViewport(canvas);
+const geometry = new MapGeometry();
+const client = new PreviewClient(base);
+const edit = new EditState();
+const overlays = new MapOverlays(renderer, viewport, geometry);
 const filter = document.querySelector('#filter');
-const roomsNode = document.querySelector('#rooms');
+const roomList = new RoomList(document.querySelector('#rooms'), filter, {
+  onToggle: (room, checked) => {
+    if (checked) edit.selected.add(room.name);
+    else edit.selected.delete(room.name);
+    canvasSelectedRoom = undefined;
+    update();
+  },
+  onCount: (room, count) => { edit.setRoomCount(room.name, count); update(); },
+  onSelect: (room, center) => {
+    highlightedRoom = center || highlightedRoom !== room.name ? room.name : undefined;
+    if (!center && canvasSelectedRoom === room.name) canvasSelectedRoom = undefined;
+    else { canvasSelectedRoom = room.name; selectedRoomToReveal = room.name; }
+    update();
+    if (center) centerRoom(room);
+  },
+});
 const count = document.querySelector('#count');
 const collectibleSummary = document.querySelector('#collectible-summary');
 const hint = document.querySelector('#hint');
-const mapObjectInfo = document.querySelector('#map-object-info');
-const mapObjectInfoHeader = document.querySelector('#map-object-info-header');
-const mapObjectInfoId = document.querySelector('#map-object-info-id');
-const mapObjectInfoSource = document.querySelector('#map-object-info-source');
-const mapObjectInfoAttrs = document.querySelector('#map-object-info-attrs');
-const mapObjectInfoActions = document.querySelector('#map-object-info-actions');
+const objectInfo = new ObjectInfoPanel(document.querySelector('#map-object-info'));
 const save = document.querySelector('#save');
 const showFirstClearRoute = document.querySelector('#show-first-clear-route');
 const showFirstClearTime = document.querySelector('#show-first-clear-time');
 const firstClearTimeMode = document.querySelector('#first-clear-time-mode');
-const selected = new Set();
-const roomCounts = new Map();
-const roomByName = new Map();
 let state;
 let mode = 'preview';
 let highlightedRoom;
-let scale = 1;
-let offsetX = 0;
-let offsetY = 0;
-let dragging;
 let selectionBox;
 let finished = false;
-let lastMiddleDown;
 let selectedRoomToReveal;
 let canvasSelectedRoom;
 let flashingRoom;
 let flashTimer;
-let excludedEntities = new Set();
-let savedEditState;
 let openingMap = false;
-let mapObjectInfoDrag;
 
 const MAP_MARGIN = 100;
-const FLOATING_WINDOW_MARGIN = 12;
-const DOUBLE_CLICK_DELAY = 350;
-const DRAG_THRESHOLD = 4;
 const spriteFiles = {
   strawberry: 'strawberry.png',
   moonberry: 'moonberry.png',
@@ -63,248 +70,18 @@ function resize() {
 }
 
 function setupView() {
-  ({ scale, offsetX, offsetY } = renderer.fit(state.rooms, MAP_MARGIN));
-}
-
-function drawEntity(entity, room) {
-  const x = room.x + entity.x;
-  const y = room.y + entity.y;
-  const excluded = entity.key && excludedEntities.has(entity.key);
-  if (excluded) ctx.globalAlpha = .25;
-  if (entity.kind === 'audit') {
-    ctx.strokeStyle = '#f25b9a';
-    ctx.lineWidth = 2 / scale;
-    ctx.strokeRect(x - 4 / scale, y - 4 / scale, 8 / scale, 8 / scale);
-    if (excluded) ctx.globalAlpha = 1;
-    return;
-  }
-  const legacyName = entity.kind === 'strawberry' || entity.kind === 'moonberry' || entity.kind === 'cassette'
-    ? entity.kind : entity.kind.includes('goldenberry') ? 'goldenberry' : entity.kind.includes('heart') ? 'heart' : undefined;
-  if (!renderer.drawSprite(entity.sprite ?? legacyName, x, y)) {
-    ctx.strokeStyle = '#f25b9a';
-    ctx.lineWidth = 2 / scale;
-    ctx.strokeRect(x - 4, y - 4, 8, 8);
-  }
-  if (excluded) ctx.globalAlpha = 1;
-}
-
-function drawEntrance(entrance, room) {
-  const box = renderer.entranceBox(entrance, room);
-  if (!box) return;
-  const x = box.x + box.width / 2;
-  const color = entrance.available ? '#ffad42' : '#775b37';
-  if (box.width || box.height) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5 / scale;
-    ctx.strokeRect(box.x, box.y, box.width, box.height);
-  }
-  if (mode !== 'preview') return;
-  ctx.font = `${12 / scale}px sans-serif`;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  const label = entrance.targetTitle;
-  const metrics = ctx.measureText(label);
-  const labelX = x - metrics.width / 2;
-  const labelY = box.y - 9 / scale;
-  drawOutlinedText(label, labelX, labelY, color);
-}
-
-function drawOutlinedText(text, x, y, color) {
-  ctx.lineWidth = 3 / scale;
-  ctx.strokeStyle = '#000';
-  ctx.strokeText(text, x, y);
-  ctx.fillStyle = color;
-  ctx.fillText(text, x, y);
+  viewport.fit(renderer.bounds(state.rooms, MAP_MARGIN));
 }
 
 function draw() {
-  if (!state) return;
-  const dpr = devicePixelRatio;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offsetX, dpr * offsetY);
-  const box = renderer.bounds(state.rooms, MAP_MARGIN);
-  ctx.fillStyle = '#101010';
-  ctx.fillRect(box.minX, box.minY, box.maxX - box.minX, box.maxY - box.minY);
-  for (const room of box.rooms) {
-    ctx.fillStyle = '#080808';
-    ctx.fillRect(room.x, room.y, room.width, room.height);
-    renderer.tileRows(room, room.background, '#303941');
-    renderer.tileRows(room, room.solids, '#bdc6cd');
-    if (!room.respawns.length) {
-      ctx.fillStyle = 'rgba(0, 0, 0, .48)';
-      ctx.fillRect(room.x, room.y, room.width, room.height);
-    }
-  }
-  const order = new Map();
-  if (showFirstClearRoute.checked) {
-    state.firstClearRooms.forEach((name, index) => { if (!order.has(name)) order.set(name, index + 1); });
-    ctx.strokeStyle = '#58d8ef';
-    ctx.lineWidth = 2 / scale;
-    ctx.setLineDash([5 / scale, 4 / scale]);
-    ctx.beginPath();
-    let started = false;
-    for (const name of state.firstClearRooms) {
-      const room = roomByName.get(name);
-      if (!room) continue;
-      const x = room.x + room.width / 2;
-      const y = room.y + room.height / 2;
-      if (started) ctx.lineTo(x, y);
-      else { ctx.moveTo(x, y); started = true; }
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  for (const room of box.rooms) {
-    const highlighted = highlightedRoom === room.name;
-    ctx.strokeStyle = highlighted ? '#f06464' : selected.has(room.name) ? '#75ee47' : '#65717d';
-    ctx.lineWidth = (highlighted || selected.has(room.name) ? 3 : 1) / scale;
-    ctx.strokeRect(room.x, room.y, room.width, room.height);
-    for (const entity of room.entities) drawEntity(entity, room);
-    for (const item of room.respawns) renderer.respawn(item, room);
-    for (const entrance of state.entrances) if (entrance.room === room.name) drawEntrance(entrance, room);
-    const index = order.get(room.name);
-    if (index) {
-      ctx.font = `${15 / scale}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      drawOutlinedText(String(index), room.x + room.width / 2, room.y + room.height / 2, '#58d8ef');
-    }
-    const firstClearTime = firstClearTimeMode.value === 'cumulative'
-      ? room.firstClearCumulativeTime
-      : room.firstClearTime;
-    if (showFirstClearTime.checked && Number.isFinite(firstClearTime)) {
-      ctx.font = `${12 / scale}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const y = room.y + room.height / 2 + (index ? 14 : 0) / scale;
-      drawOutlinedText(formatTime(firstClearTime), room.x + room.width / 2, y, '#d2d9de');
-    }
-  }
-  if (selectionBox) {
-    ctx.strokeStyle = '#54c6ff';
-    ctx.lineWidth = 1.5 / scale;
-    ctx.setLineDash([4 / scale, 3 / scale]);
-    ctx.strokeRect(selectionBox.x, selectionBox.y, selectionBox.width, selectionBox.height);
-    ctx.setLineDash([]);
-  }
+  overlays.draw({ state, mode, edit, highlightedRoom, selectionBox,
+    showRoute: showFirstClearRoute.checked, showTime: showFirstClearTime.checked,
+    timeMode: firstClearTimeMode.value });
 }
 
 function renderList() {
-  const query = filter.value.trim().toLocaleLowerCase();
-  roomsNode.replaceChildren();
-  for (const room of state.rooms) {
-    if (query && !room.name.toLocaleLowerCase().includes(query)) continue;
-    const row = document.createElement('div');
-    row.className = 'room';
-    row.classList.toggle('canvas-selected', room.name === canvasSelectedRoom);
-    row.classList.toggle('flash', room.name === flashingRoom);
-    const text = document.createElement('span');
-    text.className = 'room-name';
-    text.textContent = room.name || '(未命名房间)';
-    if (mode === 'edit_route') {
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.checked = selected.has(room.name);
-      input.addEventListener('click', event => event.stopPropagation());
-      input.addEventListener('dblclick', event => event.stopPropagation());
-      input.addEventListener('change', () => {
-        if (input.checked) selected.add(room.name);
-        else selected.delete(room.name);
-        canvasSelectedRoom = undefined;
-        update();
-      });
-      row.append(input);
-    }
-    const content = document.createElement('div');
-    content.className = 'room-content';
-    content.append(text);
-    if (mode === 'edit_route') {
-      const adjustment = document.createElement('div');
-      adjustment.className = 'room-adjustment';
-      const respawns = document.createElement('span');
-      respawns.className = 'respawn-count';
-      respawns.textContent = `检测到 ${room.respawnCount} 个存档点`;
-      const label = document.createElement('label');
-      label.textContent = '实际房间';
-      const decrement = document.createElement('button');
-      decrement.type = 'button';
-      decrement.className = 'room-count-button';
-      decrement.textContent = '−';
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.inputMode = 'numeric';
-      input.pattern = '[0-9]*';
-      input.value = String(roomCounts.get(room.name) ?? 1);
-      input.className = 'room-count-input';
-      const increment = document.createElement('button');
-      increment.type = 'button';
-      increment.className = 'room-count-button';
-      increment.textContent = '+';
-      const stop = event => event.stopPropagation();
-      for (const control of [decrement, input, increment]) {
-        control.addEventListener('click', stop);
-        control.addEventListener('dblclick', stop);
-      }
-      decrement.addEventListener('click', () => setRoomCount(room, (roomCounts.get(room.name) ?? 1) - 1));
-      increment.addEventListener('click', () => setRoomCount(room, (roomCounts.get(room.name) ?? 1) + 1));
-      input.addEventListener('change', () => setRoomCount(room, Number(input.value)));
-      label.append(decrement, input, increment);
-      adjustment.append(respawns, label);
-      content.append(adjustment);
-    }
-    const firstClear = firstClearData(room);
-    if (firstClear) {
-      const data = document.createElement('span');
-      data.className = 'room-data';
-      const time = document.createElement('span');
-      time.textContent = firstClear.time;
-      const death = document.createElement('span');
-      death.textContent = firstClear.death;
-      data.append(time, death);
-      content.append(data);
-    }
-    row.append(content);
-    row.addEventListener('click', () => {
-      highlightedRoom = highlightedRoom === room.name ? undefined : room.name;
-      if (canvasSelectedRoom === room.name) {
-        canvasSelectedRoom = undefined;
-      } else {
-        canvasSelectedRoom = room.name;
-        selectedRoomToReveal = room.name;
-      }
-      update();
-    });
-    row.addEventListener('dblclick', () => {
-      highlightedRoom = room.name;
-      canvasSelectedRoom = room.name;
-      selectedRoomToReveal = room.name;
-      update();
-      centerRoom(room);
-    });
-    roomsNode.append(row);
-    if (room.name === selectedRoomToReveal) {
-      roomsNode.scrollTop = Math.max(0, row.offsetTop - (roomsNode.clientHeight - row.offsetHeight) / 2);
-    }
-  }
+  roomList.render({ rooms: state.rooms, mode, edit, canvasSelectedRoom, flashingRoom, reveal: selectedRoomToReveal });
   selectedRoomToReveal = undefined;
-}
-
-function firstClearData(room) {
-  if (!Number.isFinite(room.firstClearTime) && !Number.isFinite(room.firstClearDeath)) return;
-  return {
-    time: Number.isFinite(room.firstClearTime) ? formatTime(room.firstClearTime) : '',
-    death: Number.isFinite(room.firstClearDeath) ? String(room.firstClearDeath) : '',
-  };
-}
-
-function formatTime(milliseconds) {
-  const totalSeconds = Math.floor(milliseconds / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor(totalSeconds % 3600 / 60);
-  const seconds = totalSeconds % 60;
-  return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function update() {
@@ -313,8 +90,8 @@ function update() {
   count.hidden = !editingRoute;
   save.hidden = readOnly;
   document.querySelector('#cancel').hidden = readOnly;
-  count.textContent = `已选择 ${selected.size} / ${state.rooms.length}（实际 ${selectedRoomCount()}）`;
-  const summary = collectibleSummaryText();
+  count.textContent = `已选择 ${edit.selected.size} / ${state.rooms.length}（实际 ${edit.roomCount}）`;
+  const summary = edit.collectibleSummaryText();
   collectibleSummary.textContent = summary;
   collectibleSummary.hidden = !summary;
   hint.textContent = editingRoute
@@ -330,59 +107,6 @@ function update() {
   draw();
 }
 
-function editableState() {
-  const rooms = state.rooms.filter(room => selected.has(room.name));
-  return JSON.stringify({
-    rooms: rooms.map(room => room.name),
-    roomCounts: Object.fromEntries(rooms.map(room => [room.name, roomCounts.get(room.name) ?? 1])),
-    excludedEntities: [...excludedEntities].sort(),
-  });
-}
-
-function hasUnsavedChanges() {
-  return state !== undefined && !state.readOnly && editableState() !== savedEditState;
-}
-
-function selectedRoomCount() {
-  return [...selected].reduce((total, name) => total + (roomCounts.get(name) ?? 1), 0);
-}
-
-function setRoomCount(room, count) {
-  const normalized = Number.isInteger(count) ? Math.max(1, count) : 1;
-  roomCounts.set(room.name, normalized);
-  update();
-}
-
-function collectibleSummaryText() {
-  const groups = new Map();
-  for (const room of state.rooms) {
-    for (const entity of room.entities) {
-      if (!entity.summary || !entity.key) continue;
-      const key = entity.summary.kind;
-      let group = groups.get(key);
-      if (!group) {
-        group = { ...entity.summary, total: 0, active: 0, values: new Set() };
-        groups.set(key, group);
-      }
-      group.total += 1;
-      if (!excludedEntities.has(entity.key)) {
-        group.active += 1;
-        if (entity.summary.stat === 'select' && entity.summary.value) {
-          group.values.add(entity.summary.value);
-        }
-      }
-    }
-  }
-  return [...groups.values()].map(group => {
-    if (group.stat === 'count') return `${group.label} ${group.active}/${group.total}`;
-    if (group.stat === 'exist') return `${group.label} ${group.active ? '有' : '无'}（${group.active}/${group.total}）`;
-    const values = [...group.values];
-    if (values.length === 0) return `${group.label} 无`;
-    if (values.length === 1) return `${group.label} ${values[0]}（${group.active}/${group.total}）`;
-    return `${group.label} 冲突（${values.join(' / ')}）`;
-  }).join(' · ');
-}
-
 function revealRoom(name) {
   selectedRoomToReveal = name;
   flashingRoom = name;
@@ -395,8 +119,7 @@ function revealRoom(name) {
 }
 
 function centerRoom(room) {
-  offsetX = canvas.clientWidth / 2 - (room.x + room.width / 2) * scale;
-  offsetY = canvas.clientHeight / 2 - (room.y + room.height / 2) * scale;
+  viewport.center(room);
   draw();
 }
 
@@ -407,115 +130,43 @@ function selectPreviewRoom(room) {
   update();
 }
 
-function roomAt(point) {
-  return [...renderer.bounds(state.rooms).rooms].reverse().find(room =>
-    point.x >= room.x && point.x < room.x + room.width && point.y >= room.y && point.y < room.y + room.height
-  );
-}
-
-function nearestEntrance(point) {
-  const maximumDistance = 16 / scale;
-  return state.entrances
-    .map(entrance => ({ entrance, box: renderer.entranceBox(entrance, roomByName.get(entrance.room)) }))
-    .filter(item => item.box)
-    .map(item => ({
-      ...item,
-      distance: Math.hypot(
-        point.x - (item.box.x + item.box.width / 2),
-        point.y - (item.box.y + item.box.height / 2),
-      ),
-      contains: point.x >= item.box.x && point.x <= item.box.x + item.box.width
-        && point.y >= item.box.y && point.y <= item.box.y + item.box.height,
-    }))
-    .filter(item => item.contains || item.distance <= maximumDistance)
-    .sort((left, right) => left.distance - right.distance)[0]?.entrance;
-}
-
-function nearestInspectableEntity(point) {
-  const maximumDistance = 12 / scale;
-  return state.rooms
-    .flatMap(room => room.entities.map(entity => ({ room, entity })))
-    .filter(item => item.entity.entityId)
-    .map(item => ({
-      ...item,
-      distance: Math.hypot(
-        point.x - (item.room.x + item.entity.x),
-        point.y - (item.room.y + item.entity.y),
-      ),
-    }))
-    .filter(item => item.distance <= maximumDistance)
-    .sort((left, right) => left.distance - right.distance)[0];
-}
-
-function moveMapObjectInfo(left, top) {
-  const rect = mapObjectInfo.getBoundingClientRect();
-  const maximumLeft = Math.max(FLOATING_WINDOW_MARGIN, innerWidth - rect.width - FLOATING_WINDOW_MARGIN);
-  const maximumTop = Math.max(FLOATING_WINDOW_MARGIN, innerHeight - rect.height - FLOATING_WINDOW_MARGIN);
-  mapObjectInfo.style.left = `${Math.min(Math.max(left, FLOATING_WINDOW_MARGIN), maximumLeft)}px`;
-  mapObjectInfo.style.top = `${Math.min(Math.max(top, FLOATING_WINDOW_MARGIN), maximumTop)}px`;
-}
-
-function positionMapObjectInfo(event) {
-  mapObjectInfo.hidden = false;
-  moveMapObjectInfo(event.clientX + FLOATING_WINDOW_MARGIN, event.clientY + FLOATING_WINDOW_MARGIN);
-}
-
-function addMapObjectAction(label, action, disabled = false) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  button.disabled = disabled;
-  button.addEventListener('click', action);
-  mapObjectInfoActions.append(button);
-  return button;
-}
-
 function showInspectableEntity(item, event) {
   const entity = item.entity;
-  mapObjectInfoId.textContent = entity.entityId;
-  mapObjectInfoSource.textContent = `${entity.kind} · ${item.room.name}`;
-  mapObjectInfoAttrs.textContent = JSON.stringify(entity.attrs, null, 2);
-  mapObjectInfoActions.replaceChildren();
+  objectInfo.show({ id: entity.entityId, source: `${entity.kind} · ${item.room.name}`, attrs: entity.attrs }, event);
   if (!state.readOnly && mode === 'preview' && entity.key && entity.summary) {
     const updateAction = button => {
-      button.textContent = excludedEntities.has(entity.key) ? '取消屏蔽' : '屏蔽收集品';
+      button.textContent = edit.excludedEntities.has(entity.key) ? '取消屏蔽' : '屏蔽收集品';
     };
-    const action = addMapObjectAction('', event => {
-      if (excludedEntities.has(entity.key)) excludedEntities.delete(entity.key);
-      else excludedEntities.add(entity.key);
+    const action = objectInfo.addAction('', event => {
+      edit.toggleEntity(entity.key);
       updateAction(event.currentTarget);
       update();
     });
     updateAction(action);
   }
-  positionMapObjectInfo(event);
 }
 
 function showEntranceInfo(entrance, event) {
   const source = entrance.source === 'trigger'
     ? 'Trigger'
     : entrance.source === 'entity' ? 'Entity' : '地图入口';
-  mapObjectInfoId.textContent = entrance.entityId ?? '地图入口';
-  mapObjectInfoSource.textContent = `${source} · ${entrance.room} → ${entrance.targetTitle}`;
-  mapObjectInfoAttrs.textContent = JSON.stringify(entrance.attrs ?? {}, null, 2);
-  mapObjectInfoActions.replaceChildren();
+  objectInfo.show({ id: entrance.entityId ?? '地图入口',
+    source: `${source} · ${entrance.room} → ${entrance.targetTitle}`, attrs: entrance.attrs }, event);
   if (!state.readOnly && mode === 'preview') {
-    addMapObjectAction(
+    objectInfo.addAction(
       entrance.available ? '进入地图' : '目标地图不可用',
       () => {
-        mapObjectInfo.hidden = true;
+        objectInfo.hide();
         openMap(entrance.targetSid);
       },
       !entrance.available,
     );
   }
-  positionMapObjectInfo(event);
 }
 
 function toggleRoom(room) {
   if (mode === 'edit_route') {
-    if (selected.has(room.name)) selected.delete(room.name);
-    else selected.add(room.name);
+    edit.toggleRoom(room.name);
     revealRoom(room.name);
     return;
   }
@@ -528,168 +179,41 @@ function toggleRoom(room) {
   selectPreviewRoom(room);
 }
 
-function updateSelectionBox(point) {
-  const start = dragging.start;
-  selectionBox = {
-    x: Math.min(start.x, point.x),
-    y: Math.min(start.y, point.y),
-    width: Math.abs(point.x - start.x),
-    height: Math.abs(point.y - start.y),
-  };
-}
-
-function applySelectionBox(event) {
-  if (!selectionBox) return;
-  const rooms = renderer.bounds(state.rooms).rooms.filter(room =>
-    room.x < selectionBox.x + selectionBox.width
-    && room.x + room.width > selectionBox.x
-    && room.y < selectionBox.y + selectionBox.height
-    && room.y + room.height > selectionBox.y,
-  );
-  for (const room of rooms) {
-    if (event.ctrlKey && event.shiftKey) {
-      if (selected.has(room.name)) selected.delete(room.name);
-      else selected.add(room.name);
-    } else if (event.ctrlKey) {
-      selected.delete(room.name);
-    } else {
-      selected.add(room.name);
-    }
-  }
-}
-
-function world(event) {
-  const rect = canvas.getBoundingClientRect();
-  return { x: (event.clientX - rect.left - offsetX) / scale, y: (event.clientY - rect.top - offsetY) / scale };
-}
-
-canvas.addEventListener('mousedown', event => {
-  if (event.button === 1) {
-    event.preventDefault();
-    if (lastMiddleDown !== undefined && event.timeStamp - lastMiddleDown <= DOUBLE_CLICK_DELAY) {
-      lastMiddleDown = undefined;
-      setupView();
-      draw();
-      return;
-    }
-    lastMiddleDown = event.timeStamp;
-    dragging = { button: event.button, x: event.clientX, y: event.clientY, moved: false };
-    canvas.classList.add('panning');
-    return;
-  }
-  if (event.button === 2) {
-    event.preventDefault();
-    dragging = { button: event.button, x: event.clientX, y: event.clientY, moved: false };
-    canvas.classList.add('panning');
-    return;
-  }
-  if (event.button !== 0) return;
-  const point = world(event);
-  dragging = {
-    button: event.button,
-    x: event.clientX,
-    y: event.clientY,
-    start: point,
-    startsInRoom: roomAt(point) !== undefined,
-    moved: false,
-  };
-});
-addEventListener('mouseup', event => {
-  if (!dragging || event.button !== dragging.button) return;
-  const drag = dragging;
-  dragging = undefined;
-  canvas.classList.remove('panning');
-  if (drag.button === 1) return;
-  if (drag.button === 2) {
-    if (drag.moved) return;
-    const point = world(event);
-    const inspectable = nearestInspectableEntity(point);
-    const entrance = nearestEntrance(point);
-    if (inspectable) showInspectableEntity(inspectable, event);
-    else if (entrance) showEntranceInfo(entrance, event);
-    return;
-  }
-  if (selectionBox) {
-    applySelectionBox(event);
+let selectionStartsInRoom = false;
+const interaction = new CanvasInteraction(viewport, {
+  redraw: draw,
+  reset: () => { if (state) { setupView(); draw(); } },
+  zoomFactor: event => event.deltaY < 0 ? 1.15 : 1 / 1.15,
+  dragStart: point => { selectionStartsInRoom = state && geometry.roomAt(point) !== undefined; },
+  dragMove: (start, point) => {
+    if (mode !== 'edit_route' || selectionStartsInRoom || !state) return;
+    selectionBox = { x: Math.min(start.x, point.x), y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x), height: Math.abs(point.y - start.y) };
+  },
+  dragEnd: event => {
+    if (!selectionBox) return;
+    edit.selectRooms(geometry.roomsIntersecting(selectionBox), event);
     selectionBox = undefined;
     update();
-  } else if (!drag.moved) {
-    const hit = roomAt(world(event));
-    if (hit) toggleRoom(hit);
-  }
-});
-canvas.addEventListener('mousemove', event => {
-  if (!dragging) return;
-  const dx = event.clientX - dragging.x;
-  const dy = event.clientY - dragging.y;
-  if (!dragging.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-  dragging.moved = true;
-  if (dragging.button === 1 || dragging.button === 2) {
-    offsetX += dx;
-    offsetY += dy;
-  } else if (mode === 'edit_route' && !dragging.startsInRoom) {
-    updateSelectionBox(world(event));
-  }
-  dragging.x = event.clientX;
-  dragging.y = event.clientY;
-  if (dragging.button === 1) lastMiddleDown = undefined;
-  draw();
-});
-canvas.addEventListener('wheel', event => {
-  event.preventDefault();
-  const before = world(event);
-  const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-  scale = Math.min(8, Math.max(.02, scale * factor));
-  const rect = canvas.getBoundingClientRect();
-  offsetX = event.clientX - rect.left - before.x * scale;
-  offsetY = event.clientY - rect.top - before.y * scale;
-  draw();
-}, { passive: false });
-canvas.addEventListener('auxclick', event => {
-  if (event.button === 1) event.preventDefault();
-});
-canvas.addEventListener('contextmenu', event => event.preventDefault());
-canvas.addEventListener('dblclick', event => {
-  if (event.button !== 0 || mode !== 'preview') return;
-  const room = roomAt(world(event));
-  if (!room) return;
-  selectPreviewRoom(room);
-  centerRoom(room);
-});
-document.querySelector('#map-object-info-close').addEventListener('click', () => {
-  mapObjectInfo.hidden = true;
-});
-mapObjectInfoHeader.addEventListener('pointerdown', event => {
-  if (event.button !== 1) return;
-  const rect = mapObjectInfo.getBoundingClientRect();
-  mapObjectInfoDrag = {
-    pointerId: event.pointerId,
-    offsetX: event.clientX - rect.left,
-    offsetY: event.clientY - rect.top,
-  };
-  mapObjectInfo.classList.add('dragging');
-  mapObjectInfoHeader.setPointerCapture(event.pointerId);
-  event.preventDefault();
-});
-mapObjectInfoHeader.addEventListener('pointermove', event => {
-  if (mapObjectInfoDrag?.pointerId !== event.pointerId) return;
-  moveMapObjectInfo(
-    event.clientX - mapObjectInfoDrag.offsetX,
-    event.clientY - mapObjectInfoDrag.offsetY,
-  );
-});
-function finishMapObjectInfoDrag(event) {
-  if (mapObjectInfoDrag?.pointerId !== event.pointerId) return;
-  mapObjectInfoDrag = undefined;
-  mapObjectInfo.classList.remove('dragging');
-  if (mapObjectInfoHeader.hasPointerCapture(event.pointerId)) {
-    mapObjectInfoHeader.releasePointerCapture(event.pointerId);
-  }
-}
-mapObjectInfoHeader.addEventListener('pointerup', finishMapObjectInfoDrag);
-mapObjectInfoHeader.addEventListener('pointercancel', finishMapObjectInfoDrag);
-mapObjectInfoHeader.addEventListener('auxclick', event => {
-  if (event.button === 1) event.preventDefault();
+  },
+  dragCancel: () => { selectionBox = undefined; draw(); },
+  click: (point, event) => {
+    if (!state) return;
+    if (event.button === 2) {
+      const item = geometry.entityAt(point, { radius: 12 / viewport.scale, nearest: true, filter: entity => Boolean(entity.entityId) });
+      const entrance = geometry.entranceAt(point, { radius: 16 / viewport.scale, nearest: true });
+      if (item) showInspectableEntity(item, event);
+      else if (entrance) showEntranceInfo(entrance, event);
+    } else if (event.button === 0) {
+      const room = geometry.roomAt(point);
+      if (room) toggleRoom(room);
+    }
+  },
+  doubleClick: (point, event) => {
+    if (!state || event.button !== 0 || mode !== 'preview') return;
+    const room = geometry.roomAt(point);
+    if (room) { selectPreviewRoom(room); centerRoom(room); }
+  },
 });
 
 function loadState(next, preserveCanvas = false) {
@@ -697,25 +221,17 @@ function loadState(next, preserveCanvas = false) {
   state = next;
   if (initial) mode = state.initialMode;
   if (state.readOnly) mode = 'preview';
-  selected.clear();
-  roomCounts.clear();
-  excludedEntities = new Set(
-    state.rooms.flatMap(room => room.entities.filter(entity => entity.excluded).map(entity => entity.key)),
-  );
-  roomByName.clear();
+  edit.load(state);
+  geometry.load(state.rooms, state.entrances);
+  interaction.cancel();
+  selectionBox = undefined;
   if (!preserveCanvas) {
     highlightedRoom = undefined;
     canvasSelectedRoom = undefined;
   }
-  mapObjectInfo.hidden = true;
-  state.rooms.forEach(room => {
-    roomByName.set(room.name, room);
-    roomCounts.set(room.name, room.roomCount ?? 1);
-  });
-  if (highlightedRoom && !roomByName.has(highlightedRoom)) highlightedRoom = undefined;
-  if (canvasSelectedRoom && !roomByName.has(canvasSelectedRoom)) canvasSelectedRoom = undefined;
-  state.selected.forEach(name => selected.add(name));
-  savedEditState = editableState();
+  objectInfo.hide();
+  if (highlightedRoom && !geometry.roomByName.has(highlightedRoom)) highlightedRoom = undefined;
+  if (canvasSelectedRoom && !geometry.roomByName.has(canvasSelectedRoom)) canvasSelectedRoom = undefined;
   document.title = `地图预览：${state.title}`;
   document.querySelector('#title').textContent = state.title;
   document.querySelector('#mode').hidden = state.readOnly;
@@ -733,14 +249,9 @@ async function openMap(targetSid) {
   if (!await confirmLeavingEdits()) return;
   openingMap = true;
   try {
-    const response = await fetch(`${base}/open`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targetSid }),
-    });
-    const data = await response.json();
-    if (!response.ok) { showError(data.error); return; }
-    loadState(data);
+    loadState(await client.request('open', { targetSid }));
+  } catch (error) {
+    showError(error.message);
   } finally {
     openingMap = false;
   }
@@ -748,11 +259,11 @@ async function openMap(targetSid) {
 
 async function navigate(action) {
   if (!await confirmLeavingEdits()) return;
-  const response = await fetch(`${base}/${action}`, { method: 'POST' });
-  const data = await response.json();
-  if (data.closed) { finishPage('已返回，可关闭此页面。'); return; }
-  if (!response.ok) { showError(data.error); return; }
-  loadState(data);
+  try {
+    const data = await client.request(action);
+    if (data.closed) { finishPage('已返回，可关闭此页面。'); return; }
+    loadState(data);
+  } catch (error) { showError(error.message); }
 }
 
 function showError(message) {
@@ -773,16 +284,17 @@ function finishPage(message) {
 }
 
 async function saveRoute() {
-  const response = await fetch(`${base}/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rooms: [...selected], roomCounts: Object.fromEntries([...selected].map(name => [name, roomCounts.get(name) ?? 1])), excludedEntities: [...excludedEntities] }) });
-  if (!response.ok) { showError((await response.json()).error); return; }
-  savedEditState = editableState();
-  update();
-  showStatus('已保存。');
-  return true;
+  try {
+    await client.request('save', edit.payload());
+    edit.markSaved();
+    update();
+    showStatus('已保存。');
+    return true;
+  } catch (error) { showError(error.message); return false; }
 }
 
 async function confirmLeavingEdits() {
-  if (!hasUnsavedChanges()) return true;
+  if (!edit.dirty) return true;
   if (confirm('当前地图有未保存的修改。是否保存后继续？')) {
     return await saveRoute() === true;
   }
@@ -790,11 +302,10 @@ async function confirmLeavingEdits() {
 }
 
 async function cancel() {
-  const response = await fetch(`${base}/cancel`, { method: 'POST' });
-  const data = await response.json();
-  if (!response.ok) { showError(data.error); return; }
-  loadState(data, true);
-  showStatus('已还原到上次保存的结果。');
+  try {
+    loadState(await client.request('cancel'), true);
+    showStatus('已还原到上次保存的结果。');
+  } catch (error) { showError(error.message); }
 }
 
 document.querySelectorAll('input[name="mode"]').forEach(input => {
@@ -822,26 +333,24 @@ addEventListener('mousedown', event => {
   if (action) {
     event.preventDefault();
     event.stopPropagation();
-    if ((action !== 'back' || state.canBack) && (action !== 'forward' || state.canForward)) {
+    if (state && (action !== 'back' || state.canBack) && (action !== 'forward' || state.canForward)) {
       navigate(action);
     }
   }
 }, { capture: true });
 addEventListener('resize', () => {
   resize();
-  if (!mapObjectInfo.hidden) {
-    const rect = mapObjectInfo.getBoundingClientRect();
-    moveMapObjectInfo(rect.left, rect.top);
-  }
+  objectInfo.constrain();
 });
 new ResizeObserver(resize).observe(canvas);
 addEventListener('pagehide', () => {
-  if (!finished) fetch(`${base}/abandon`, { method: 'POST', keepalive: true });
+  interaction.dispose();
+  if (!finished) client.leave('abandon');
 });
 addEventListener('beforeunload', event => {
-  if (!finished && hasUnsavedChanges()) {
+  if (!finished && edit.dirty) {
     event.preventDefault();
     event.returnValue = '';
   }
 });
-(async () => { loadState(await (await fetch(`${base}/state`)).json()); })();
+client.request('state').then(loadState).catch(error => showError(error.message));

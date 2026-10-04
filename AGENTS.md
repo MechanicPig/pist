@@ -14,7 +14,7 @@ Pist 用于扫描本地 Celeste 与已启用 Mod，辅助记录地图初见数�
 - 仅面向内部开发的本地数据结构变更时，先确认没有进程占用对应的 `.pist/*.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
 - 变更 SQLite 的表、字段或其语义前，先向用户列出 schema diff 与当前本地数据迁移方案供审查；获确认后再实施，并删除旧 schema，不保留运行时兼容层。
 - 新增依赖前先确认标准库或既有依赖无法合理解决问题；通过 `uv add` 或 `uv add --group dev` 更新 `pyproject.toml` 与 `uv.lock`，不要手改锁文件。
-- 项目使用 Ruff 作为代码格式化与静态检查工具，行宽为 100，使用单引号；使用 Pyright 作为类型检查工具。
+- 项目使用 Ruff 作为代码格式化与静态检查工具，行宽为 100，使用单引号，并启用 ANN 检查源码与测试的函数类型注解；使用 Pyright 作为类型检查工具。
 - 模块和包名按职责语义命名：集合、规则或记录用复数，单一模型、协议或过程用单数；不为形式上的单复数一致性重命名。
 - 当同一概念同时存在“根据孤立输入得到的候选结果”和“结合完整集合的加载、覆盖或组合关系得到的最终结果”时，候选结果使用 `local_` 前缀，最终结果不加前缀。这里的 `local` 表示尚未全局整合，不表示宿主文件系统；只有确实存在这两个阶段时才使用。Manifest 声明、扫描路径、`InstalledMod.maps`、依赖列表等直接输入事实不加 `local_`；此类名称按声明或结果语义使用 `required`、`optional`、`loaded`、`resolved`、`satisfied` 等限定词。
 - 涉及路径、SID、Dialog key、扩展名等外部标识的比较或派生时，先查 `docs/path-identity-semantics.md`；按实现与平台证据选择 `Path`、`PurePosixPath` 或字符串匹配，`casefold()` 只能用于明确非身份语义。
@@ -41,7 +41,7 @@ uv run --package pist pist --help
 uv run --all-packages pytest --basetemp .pist/pytest
 uv run --all-packages ruff check berries pist tests examples
 uv run --all-packages ruff format --check berries pist tests examples
-uv run --all-packages pyright berries/src berries/tests pist/src/pist pist/tests tests
+uv run --all-packages pyright
 
 # 单独验证公共包（包含根目录开发依赖）
 uv run --package berries --group dev pytest berries/tests --basetemp .pist/pytest-berries
@@ -94,7 +94,7 @@ uv run --all-packages pytest --basetemp .pist/pytest
 
 ### Sentinel
 
-项目使用 Pyright 1.1.411 的实验性 Sentinel 支持。在包含 Sentinel 的递归类型别名中，未显式标注的容器字面量会重新展开并推断值类型，因而产生不必要的类型错误。
+项目使用 Pyright 的实验性 Sentinel 支持。以下问题在 1.1.411 和 1.1.414 中均已复现：在包含 Sentinel 的递归类型别名中，未显式标注的容器字面量会重新展开并推断值类型，因而产生不必要的类型错误。
 
 以下述类型为例：
 

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>地图预览</title>
 <link rel="stylesheet" href="assets/map_preview.css">
+<link rel="stylesheet" href="assets/object_info.css">
 </head>
 <body>
 <header>
@@ -22,11 +23,11 @@
     <div id="hint">滚轮缩放，中键或右键拖动画布；双击房间以定位。</div>
   </aside>
 </main>
-<section id="object-info" hidden>
-  <div><strong id="object-id"></strong><button id="object-close">关闭</button></div>
-  <span id="object-source"></span>
-  <pre id="object-attrs"></pre>
-  <button id="object-open" hidden>打开目标地图</button>
+<section id="object-info" class="object-info" hidden>
+  <div data-role="header"><strong id="object-id" data-role="id"></strong><button id="object-close" data-role="close" class="secondary">关闭</button></div>
+  <span id="object-source" data-role="source"></span>
+  <pre id="object-attrs" data-role="attrs"></pre>
+  <div data-role="actions"></div>
 </section>
 <div id="status" hidden></div>
 <script type="module" src="assets/map_preview.js"></script>

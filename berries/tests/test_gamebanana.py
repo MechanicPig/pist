@@ -3,6 +3,8 @@ import json
 from collections.abc import Callable
 from typing import Self
 
+import pytest
+
 from berries.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSearchResp
 
 
@@ -37,11 +39,15 @@ class _Session:
         return _Response(self._handler(path, params))
 
 
-def _mock_session(monkeypatch, handler: Callable[[str, dict[str, object]], object]) -> None:
+def _mock_session(
+    monkeypatch: pytest.MonkeyPatch, handler: Callable[[str, dict[str, object]], object]
+) -> None:
     monkeypatch.setattr('berries.gamebanana.ClientSession', lambda **_: _Session(handler))
 
 
-def test_lookup_selects_submission_containing_exact_metadata_name(monkeypatch) -> None:
+def test_lookup_selects_submission_containing_exact_metadata_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         'data': {
             'content': [
@@ -116,7 +122,7 @@ def test_submission_preserves_raw_credit_groups_for_author_selection() -> None:
     )
 
 
-def test_lookup_rejects_multiple_exact_matches(monkeypatch) -> None:
+def test_lookup_rejects_multiple_exact_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         'data': {
             'content': [

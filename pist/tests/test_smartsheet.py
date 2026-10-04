@@ -83,7 +83,7 @@ def test_page_options_rejects_limit_outside_the_api_range(limit: int) -> None:
         PageOptions(offset=0, limit=limit)
 
 
-def test_record_pagination_reads_all_pages(monkeypatch) -> None:
+def test_record_pagination_reads_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     client = TencentSmartSheetClient(cast(CredentialStore, _Store()))
     calls: list[PageOptions] = []
 
@@ -170,7 +170,9 @@ def test_field_value_encoding_rejects_incompatible_types(value: object, field_ty
         _encode_field_value(cast(SmartSheetSourceValue, value), field_type)
 
 
-def test_inspect_uses_one_aiohttp_session_for_all_smart_sheet_operations(monkeypatch) -> None:
+def test_inspect_uses_one_aiohttp_session_for_all_smart_sheet_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = _Session()
 
     def session_factory(*, base_url: str, headers: dict[str, str], timeout: object) -> _Session:

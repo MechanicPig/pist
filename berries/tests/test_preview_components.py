@@ -55,7 +55,9 @@ def test_nested_local_sprite_overrides_builtins(tmp_path: Path) -> None:
     assert assets.sprite('silverberry.png') is not None
 
 
-def test_session_releases_its_listener_when_the_browser_cannot_open(monkeypatch) -> None:
+def test_session_releases_its_listener_when_the_browser_cannot_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     urls: list[str] = []
     monkeypatch.setattr(
         'berries.map_preview.session.webbrowser.open', lambda url: urls.append(url) and False
@@ -73,7 +75,7 @@ def test_session_releases_its_listener_when_the_browser_cannot_open(monkeypatch)
     asyncio.run(check())
 
 
-def test_session_releases_its_listener_on_cancellation(monkeypatch) -> None:
+def test_session_releases_its_listener_on_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     urls: list[str] = []
     monkeypatch.setattr(
         'berries.map_preview.session.webbrowser.open', lambda url: urls.append(url) or True

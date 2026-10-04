@@ -1,0 +1,9 @@
+.object-info { position: fixed; z-index: 2; box-sizing: border-box; max-width: min(32rem, calc(100vw - 1.5rem)); max-height: min(70vh, 38rem); overflow: auto; padding: .8rem; border: 1px solid #a778d5; background: #1e1e1e; box-shadow: 0 .25rem 1rem #0008; font-family: inherit; }
+.object-info[hidden] { display: none; }
+.object-info [data-role="header"] { display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between; }
+.object-info.dragging { cursor: grabbing; user-select: none; }
+.object-info [data-role="close"] { flex: none; padding: .2rem .55rem; }
+.object-info [data-role="id"] { display: block; color: #e7c8ff; }
+.object-info [data-role="source"] { display: block; margin-top: .3rem; color: #aaa; }
+.object-info [data-role="attrs"] { margin: .65rem 0 0; white-space: pre-wrap; font-family: inherit; }
+.object-info [data-role="actions"] { display: flex; justify-content: flex-end; gap: .5rem; }

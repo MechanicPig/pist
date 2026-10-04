@@ -26,18 +26,6 @@ export class MapCanvas {
     this.canvas.height = Math.round(rect.height * devicePixelRatio);
   }
 
-  fit(rooms, margin = 100) {
-    const box = this.bounds(rooms, margin);
-    const width = this.canvas.clientWidth;
-    const height = this.canvas.clientHeight;
-    const scale = Math.min(width / Math.max(box.maxX - box.minX, 1), height / Math.max(box.maxY - box.minY, 1));
-    return {
-      scale,
-      offsetX: (width - (box.maxX - box.minX) * scale) / 2 - box.minX * scale,
-      offsetY: (height - (box.maxY - box.minY) * scale) / 2 - box.minY * scale,
-    };
-  }
-
   tileRows(room, rows, color) {
     this.ctx.fillStyle = color;
     rows.forEach((row, y) => {
@@ -77,15 +65,5 @@ export class MapCanvas {
     const y = room.y + item.y;
     this.ctx.fillStyle = '#c43d3d';
     this.ctx.fillRect(Math.floor(x / 8) * 8, Math.floor((y - 8) / 8) * 8, 8, 8);
-  }
-
-  entranceBox(entrance, room) {
-    if (!room || !Number.isFinite(entrance.x) || !Number.isFinite(entrance.y)) return;
-    return {
-      x: room.x + entrance.x,
-      y: room.y + entrance.y,
-      width: Number.isFinite(entrance.width) ? entrance.width : 0,
-      height: Number.isFinite(entrance.height) ? entrance.height : 0,
-    };
   }
 }

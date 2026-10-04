@@ -3,12 +3,14 @@ import json
 from typing import cast
 from urllib.parse import urlsplit
 
+import pytest
 from aiohttp import ClientSession, web
 
 from berries.game.content import ContentPath
 from berries.game.maps import MapInfo
 from berries.map_layout import MapEntrance, MapLayout, MapPreviewEntity, MapRoom
 from berries.map_preview import MapPreview
+from test_support.browser import load_browser_modules
 from test_support.preview import preview_url
 
 
@@ -99,7 +101,9 @@ def test_public_preview_rejects_unavailable_map_entry() -> None:
     assert response.status == 400
 
 
-def test_public_preview_serves_loopback_state_and_cleans_up(monkeypatch) -> None:
+def test_public_preview_serves_loopback_state_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     preview = MapPreview(
         MapInfo(file_path=ContentPath('Maps/Test.bin')),
         MapLayout((MapRoom('room', 0, 0, 8, 8),)),
@@ -122,6 +126,20 @@ def test_public_preview_serves_loopback_state_and_cleans_up(monkeypatch) -> None
                 assert 'export class MapCanvas' in await response.text()
             async with session.get(f'{url}/state') as response:
                 assert (await response.json())['rooms'][0]['name'] == 'room'
+            modules = await load_browser_modules(session, url)
+            assert {
+                'canvas.js',
+                'viewport.js',
+                'geometry.js',
+                'client.js',
+                'object_info.js',
+            } <= modules
+            async with session.get(f'{url}/assets/object_info.css') as response:
+                assert response.status == 200
+                assert response.content_type == 'text/css'
+            for name in ('edit_state.js', 'room_list.js', 'index.html'):
+                async with session.get(f'{url}/assets/{name}') as response:
+                    assert response.status == 404
             async with session.post(f'{url}/close') as response:
                 assert response.status == 200
             await task

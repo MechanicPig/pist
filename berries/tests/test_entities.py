@@ -1,4 +1,5 @@
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,9 @@ SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
         lambda: EntityRule(missing_meta=('',)),
     ),
 )
-def test_entity_rule_configuration_rejects_blank_required_names(model) -> None:
+def test_entity_rule_configuration_rejects_blank_required_names(
+    model: Callable[[], EntityRule],
+) -> None:
     with pytest.raises(ValueError):
         model()
 
@@ -88,7 +91,7 @@ def test_heart_kind_uses_configured_attribute_rules_and_default() -> None:
     assert rules.entity_kind('fakeHeart', {'endLevel': True}) is None
 
 
-def test_entity_rules_can_be_loaded_from_custom_config(tmp_path) -> None:
+def test_entity_rules_can_be_loaded_from_custom_config(tmp_path: Path) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.berry]
@@ -110,7 +113,7 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
     assert rules.entity_kind('TestHelper/Berry', {'moon': False}) is None
 
 
-def test_entity_rules_rejects_kind_definitions_in_an_entity_rule_file(tmp_path) -> None:
+def test_entity_rules_rejects_kind_definitions_in_an_entity_rule_file(tmp_path: Path) -> None:
     kinds_path = tmp_path / 'kinds.toml'
     kinds_path.write_text("[kinds.berry]\nlabel = 'Berry'\n", encoding='utf-8')
     entities_path = tmp_path / 'entities.toml'
@@ -128,7 +131,9 @@ rules = [{ kind = 'berry' }]
         load_entity_rules(entities_path, kinds_path=kinds_path)
 
 
-def test_entity_rules_support_metadata_conditions_and_terminal_non_collectibles(tmp_path) -> None:
+def test_entity_rules_support_metadata_conditions_and_terminal_non_collectibles(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.heart]
@@ -176,7 +181,7 @@ def test_entity_rules_reject_overlapping_value_and_missing_conditions() -> None:
         EntityRule(when={'moon': False}, missing=('moon',))
 
 
-def test_more_specific_rules_precede_defaults_regardless_of_write_order(tmp_path) -> None:
+def test_more_specific_rules_precede_defaults_regardless_of_write_order(tmp_path: Path) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.strawberry]
@@ -225,7 +230,7 @@ rules = [{ kind = 'test' }]
     assert message in str(caught.value.__cause__)
 
 
-def test_entity_rules_allow_non_leaf_rule_kind(tmp_path) -> None:
+def test_entity_rules_allow_non_leaf_rule_kind(tmp_path: Path) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.berry]
@@ -260,7 +265,7 @@ def test_adding_a_child_preserves_rules_targeting_its_new_parent() -> None:
     assert 'moonberry' not in updated.leaf_kind_names
 
 
-def test_entity_rules_can_add_a_kind_under_an_existing_parent(tmp_path) -> None:
+def test_entity_rules_can_add_a_kind_under_an_existing_parent(tmp_path: Path) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.berry]
@@ -354,7 +359,7 @@ def test_entity_rules_can_delete_a_kind_and_fall_back_to_its_parent() -> None:
         deleted.with_deleted_kind('berry')
 
 
-def test_entity_config_store_renames_kinds_in_all_rule_layers(tmp_path) -> None:
+def test_entity_config_store_renames_kinds_in_all_rule_layers(tmp_path: Path) -> None:
     kinds_path = tmp_path / 'kinds.toml'
     shared_path = tmp_path / 'shared.toml'
     local_path = tmp_path / 'local.toml'
@@ -413,7 +418,7 @@ rules = [{ kind = 'strawberry' }]
     assert loaded.entity_kind('Local/Collectible', {}) == 'berry'
 
 
-def test_entity_rules_reject_sprite_paths_outside_sprite_directories(tmp_path) -> None:
+def test_entity_rules_reject_sprite_paths_outside_sprite_directories(tmp_path: Path) -> None:
     config_path = tmp_path / 'entities.toml'
     config_path.write_text(
         """[kinds.berry]
@@ -461,7 +466,7 @@ label = 'Berry'
     ]
 
 
-def test_rule_store_updates_a_template_condition_without_duplicate(tmp_path) -> None:
+def test_rule_store_updates_a_template_condition_without_duplicate(tmp_path: Path) -> None:
     source_path = tmp_path / 'entities.toml'
     source_path.write_text(
         """[kinds.berry]
@@ -490,7 +495,7 @@ rules = [{ kind = 'strawberry' }]
     assert len(updated.entities['TestHelper/Berry'].rules) == 2
 
 
-def test_local_rule_layer_adds_conditions_without_copying_shared_rules(tmp_path) -> None:
+def test_local_rule_layer_adds_conditions_without_copying_shared_rules(tmp_path: Path) -> None:
     shared_path = tmp_path / 'shared.toml'
     shared_path.write_text(
         """[kinds.berry]
@@ -529,7 +534,7 @@ rules = [{ kind = 'moonberry', when = { moon = true } }]
     assert '[kinds.strawberry]' not in local_path.read_text(encoding='utf-8')
 
 
-def test_local_entity_layer_rejects_kind_definitions(tmp_path) -> None:
+def test_local_entity_layer_rejects_kind_definitions(tmp_path: Path) -> None:
     shared_path = tmp_path / 'shared.toml'
     shared_path.write_text(
         """[kinds.heart]
@@ -554,7 +559,7 @@ parent = 'collectible'
         load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
 
 
-def test_local_rule_layer_reports_conflicting_shared_rule_overrides(tmp_path) -> None:
+def test_local_rule_layer_reports_conflicting_shared_rule_overrides(tmp_path: Path) -> None:
     shared_path = tmp_path / 'shared.toml'
     shared_path.write_text(
         """[kinds.berry]
@@ -595,7 +600,7 @@ rules = [{ kind = 'moonberry' }]
     assert conflict.local_kind == 'moonberry'
 
 
-def test_shared_kind_library_is_not_written_into_shared_entity_rules(tmp_path) -> None:
+def test_shared_kind_library_is_not_written_into_shared_entity_rules(tmp_path: Path) -> None:
     kinds_path = tmp_path / 'kinds.toml'
     kinds_path.write_text(
         """[kinds.berry]
@@ -620,7 +625,7 @@ parent = 'berry'
     }
 
 
-def test_entity_config_store_publishes_generated_rules_to_shared_library(tmp_path) -> None:
+def test_entity_config_store_publishes_generated_rules_to_shared_library(tmp_path: Path) -> None:
     kinds_path = tmp_path / 'kinds.toml'
     kinds_path.write_text(
         """[kinds.berry]

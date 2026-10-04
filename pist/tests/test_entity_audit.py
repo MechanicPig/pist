@@ -1,6 +1,8 @@
 import asyncio
 import json
+from pathlib import Path
 
+import pytest
 from textual.app import App
 from textual.widgets import Button, Input, OptionList, Select, Tree
 
@@ -90,7 +92,7 @@ def test_confirmed_default_input_distinguishes_json_null_from_blank() -> None:
     assert _default_value('false') is False
 
 
-def test_selecting_an_unreviewed_entity_opens_its_attribute_review(tmp_path) -> None:
+def test_selecting_an_unreviewed_entity_opens_its_attribute_review(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -127,7 +129,7 @@ def test_selecting_an_unreviewed_entity_opens_its_attribute_review(tmp_path) -> 
     asyncio.run(check())
 
 
-def test_selecting_entity_calculates_deferred_unreviewed_variant_count(tmp_path) -> None:
+def test_selecting_entity_calculates_deferred_unreviewed_variant_count(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -185,7 +187,7 @@ def test_selecting_entity_calculates_deferred_unreviewed_variant_count(tmp_path)
     asyncio.run(check())
 
 
-def test_saving_attr_knowledge_refreshes_attr_options(tmp_path) -> None:
+def test_saving_attr_knowledge_refreshes_attr_options(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -231,7 +233,9 @@ def test_saving_attr_knowledge_refreshes_attr_options(tmp_path) -> None:
     asyncio.run(check())
 
 
-def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch) -> None:
+def test_saving_entity_reuses_loaded_navigation_summaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -288,7 +292,7 @@ def test_saving_entity_reuses_loaded_navigation_summaries(tmp_path, monkeypatch)
     asyncio.run(check())
 
 
-def test_saving_entity_rebuilds_virtual_navigation(tmp_path) -> None:
+def test_saving_entity_rebuilds_virtual_navigation(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -335,7 +339,7 @@ def test_saving_entity_rebuilds_virtual_navigation(tmp_path) -> None:
     asyncio.run(check())
 
 
-def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path) -> None:
+def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -403,7 +407,7 @@ def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path) -> N
     asyncio.run(check())
 
 
-def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_path) -> None:
+def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -615,7 +619,9 @@ def test_kind_picker_toggles_with_one_click_and_selects_with_two() -> None:
     assert selected == ['berry']
 
 
-def test_entity_list_groups_statuses_and_prioritizes_map_progress(tmp_path, monkeypatch) -> None:
+def test_entity_list_groups_statuses_and_prioritizes_map_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     names = ('SingleRun', 'Completed', 'Entered', 'Unvisited', 'Candidate', 'Ignored')
     report_path = tmp_path / 'report.json'
     report_path.write_text(
@@ -678,7 +684,9 @@ def test_entity_list_groups_statuses_and_prioritizes_map_progress(tmp_path, monk
     assert calls == {map_file: 1 for map_file in progress}
 
 
-def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(tmp_path) -> None:
+def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(
+    tmp_path: Path,
+) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(

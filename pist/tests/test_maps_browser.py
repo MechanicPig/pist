@@ -203,6 +203,46 @@ def test_browser_consolidates_startup_warnings_behind_a_summary_button() -> None
     asyncio.run(check())
 
 
+@pytest.mark.parametrize('action', ('preview', 'edit_route', 'record'))
+def test_browser_retains_warning_when_accessing_uninstalled_mod(
+    tmp_path: Path, action: str
+) -> None:
+    mod_path = tmp_path / 'Removed.zip'
+    map_info = MapInfo(file_path=ContentPath('Maps/Removed/Map.bin'))
+    mod = make_installed_mod(
+        source='zip',
+        filename=mod_path.name,
+        path=mod_path,
+        metadata_name='Removed',
+        metadata_version=None,
+        maps=[map_info],
+    )
+    report = ModScanReport(mods_dir=str(tmp_path), disabled_filenames=[], mods=[mod])
+    level, side = _map_ref(mod, map_info)
+    app = MapBrowserApp(report, data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3'))
+
+    async def check() -> None:
+        async with app.run_test() as pilot:
+            if action == 'record':
+                assert app._record_source(level, side) is None
+            else:
+                await app._preview_map(
+                    level,
+                    side,
+                    initial_mode=(
+                        MapPreviewMode.PREVIEW if action == 'preview' else MapPreviewMode.EDIT_ROUTE
+                    ),
+                )
+            await pilot.pause()
+            assert app.diagnostic_count == 1
+            app.action_show_messages()
+            await pilot.pause()
+            card = app.screen.query_one('#runtime-message-list MessageCard', MessageCard)
+            assert mod_path.name in card.text
+
+    asyncio.run(check())
+
+
 def test_gamebanana_html_description_is_rendered_as_plain_text() -> None:
     assert _plain_html('<p>适合初学者。<br>有进阶&nbsp;路线。</p>') == '适合初学者。\n有进阶 路线。'
 
@@ -1732,7 +1772,7 @@ def test_map_preview_starts_in_preview_mode_without_implicit_save(
         def __init__(self, *_: object, **options: object) -> None:
             preview_options.append(options)
 
-        async def preview(self):
+        async def preview(self) -> None:
             started.set()
             await finish.wait()
 

@@ -1,8 +1,10 @@
 import asyncio
 import json
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+import pytest
 from aiohttp import ClientSession, web
 
 from berries.entities.rules import SHARED_ENTITIES_PATH, load_entity_rules
@@ -18,6 +20,7 @@ from pist.entity_stats import load_entity_stat_rules
 from pist.map_preview import MapPreview, MapPreviewMode
 from pist.route_store import RouteStore
 from pist.routes import MapRoute
+from test_support.browser import load_browser_modules
 from test_support.mod_factory import make_installed_mod
 from test_support.preview import preview_url
 
@@ -188,7 +191,7 @@ def test_map_preview_state_exposes_configured_marker_sprite() -> None:
     ]
 
 
-def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path) -> None:
+def test_map_preview_persists_entity_exclusions_with_the_route(tmp_path: Path) -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Test.bin'))
     local_data = RouteStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
@@ -355,7 +358,7 @@ def test_preview_mode_exposes_routes_and_can_save_edits() -> None:
     assert save_status == 200
 
 
-def test_map_preview_save_validates_rooms_and_persists_layout_order(tmp_path) -> None:
+def test_map_preview_save_validates_rooms_and_persists_layout_order(tmp_path: Path) -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin'))
     local_data = RouteStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
@@ -377,7 +380,7 @@ def test_map_preview_save_validates_rooms_and_persists_layout_order(tmp_path) ->
     assert route == MapRoute(map_file=map_info.file_path.as_posix(), rooms=('start', 'goal'))
 
 
-def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
+def test_map_preview_saves_explicit_in_game_room_counts(tmp_path: Path) -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin'))
     local_data = RouteStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
@@ -406,7 +409,7 @@ def test_map_preview_saves_explicit_in_game_room_counts(tmp_path) -> None:
     assert route.room_count == 3
 
 
-def test_map_preview_rejects_non_positive_explicit_room_count(tmp_path) -> None:
+def test_map_preview_rejects_non_positive_explicit_room_count(tmp_path: Path) -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin'))
     preview = MapPreview(
         map_info,
@@ -438,7 +441,7 @@ def test_map_preview_serves_any_existing_safe_packaged_sprite() -> None:
     assert PreviewAssets('pist.map_preview').sprite('silverberry.png') is not None
 
 
-def test_map_preview_serves_only_safe_local_configured_sprites(tmp_path) -> None:
+def test_map_preview_serves_only_safe_local_configured_sprites(tmp_path: Path) -> None:
     sprites = tmp_path / 'sprites'
     sprites.mkdir()
     (sprites / 'seed.png').write_bytes(b'png')
@@ -448,7 +451,9 @@ def test_map_preview_serves_only_safe_local_configured_sprites(tmp_path) -> None
     assert assets.sprite('../seed.png') is None
 
 
-def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, monkeypatch) -> None:
+def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = MapInfo(file_path=ContentPath('Maps/Author/Pack/Source.bin'))
     target = MapInfo(file_path=ContentPath('Maps/Author/Pack/Target.bin'))
     source_mod = make_installed_mod(
@@ -532,7 +537,9 @@ def test_map_preview_opens_only_a_linked_map_and_keeps_page_history(tmp_path, mo
     assert all(loaded_target.content is target_mod for loaded_target in loaded_targets)
 
 
-def test_map_preview_uses_runtime_level_key_for_linked_isolated_side(tmp_path, monkeypatch) -> None:
+def test_map_preview_uses_runtime_level_key_for_linked_isolated_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = MapInfo(file_path=ContentPath('Maps/Author/Pack/Source.bin'))
     target = MapInfo(file_path=ContentPath('Maps/Author/Pack/Target-B.bin'))
     source_mod = make_installed_mod(
@@ -589,7 +596,9 @@ def test_map_preview_uses_runtime_level_key_for_linked_isolated_side(tmp_path, m
     assert opened['rooms'][0]['firstClearTime'] == 2500
 
 
-def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, monkeypatch) -> None:
+def test_map_preview_serves_loopback_state_and_persists_saved_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin'))
     local_data = RouteStore(tmp_path / 'local-data.sqlite3')
     preview = MapPreview(
@@ -622,6 +631,21 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(tmp_path, mo
             async with session.get(f'{url}/assets/map_preview.js') as response:
                 assert response.content_type == 'text/javascript'
                 assert await response.text()
+            modules = await load_browser_modules(session, url)
+            assert {
+                'viewport.js',
+                'geometry.js',
+                'client.js',
+                'edit_state.js',
+                'overlays.js',
+                'object_info.js',
+                'room_list.js',
+            } <= modules
+            async with session.get(f'{url}/assets/unregistered.js') as response:
+                assert response.status == 404
+            async with session.get(f'{url}/assets/object_info.css') as response:
+                assert response.status == 200
+                assert response.content_type == 'text/css'
             async with session.post(f'{url}/save', json={'rooms': ['goal']}) as response:
                 assert response.status == 200
             async with session.post(f'{url}/abandon') as response:

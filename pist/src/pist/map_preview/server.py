@@ -193,7 +193,11 @@ class MapPreview:
         self._classification_rules = classification_rules
         self._statistic_rules = statistic_rules
         self._session = PreviewSession(
-            PreviewAssets('pist.map_preview', sprite_dir=PIST_DIR / 'sprites')
+            PreviewAssets(
+                'pist.map_preview',
+                sprite_dir=PIST_DIR / 'sprites',
+                scripts=('edit_state.js', 'overlays.js', 'room_list.js'),
+            )
         )
 
     async def preview(self) -> None:

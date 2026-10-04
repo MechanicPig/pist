@@ -1,6 +1,6 @@
 [dependency-groups]
 dev = [
-    "pyright>=1.1.411",
+    "pyright>=1.1.414",
     "pytest>=8.3.0",
     "ruff>=0.11.0",
 ]
@@ -16,6 +16,12 @@ testpaths = ["berries/tests", "pist/tests", "tests"]
 pythonpath = ["tests"]
 
 [tool.pyright]
+include = ["berries/src", "berries/tests", "pist/src/pist", "pist/tests", "tests", "examples"]
+exclude = [".pist", ".venv"]
+typeCheckingMode = "standard"
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
 enableExperimentalFeatures = true
 extraPaths = ["tests"]
 
@@ -25,7 +31,7 @@ line-length = 100
 target-version = "py314"
 
 [tool.ruff.lint]
-extend-select = ["UP010"]
+extend-select = ["UP010", "ANN"]
 
 [tool.ruff.format]
 quote-style = "single"

@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import pytest
 
@@ -28,7 +29,7 @@ def test_variant_key_rejects_unknown_persisted_fields() -> None:
         VariantKey.model_validate({'attrs': {}, 'meta': {}, 'unexpected': True})
 
 
-def test_audit_store_preserves_raw_attributes_and_attribute_missingness(tmp_path) -> None:
+def test_audit_store_preserves_raw_attributes_and_attribute_missingness(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -132,7 +133,7 @@ def test_attribute_json_rejects_values_outside_the_entity_attribute_domain(value
         _attrs(value)
 
 
-def test_audit_store_scopes_knowledge_to_one_entity_and_attribute(tmp_path) -> None:
+def test_audit_store_scopes_knowledge_to_one_entity_and_attribute(tmp_path: Path) -> None:
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
     store.save_entity_knowledge(
         'Example/Berry',
@@ -157,7 +158,7 @@ def test_audit_store_scopes_knowledge_to_one_entity_and_attribute(tmp_path) -> N
 
 
 def test_generated_rule_layer_contains_only_complete_candidate_entities(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
@@ -252,7 +253,9 @@ def test_generated_rule_layer_contains_only_complete_candidate_entities(
     assert 'Example/Incomplete' not in layer.entities
 
 
-def test_confirm_entity_kind_preserves_raw_variants_and_suggests_default_rule(tmp_path) -> None:
+def test_confirm_entity_kind_preserves_raw_variants_and_suggests_default_rule(
+    tmp_path: Path,
+) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -333,7 +336,7 @@ def test_confirm_entity_kind_preserves_raw_variants_and_suggests_default_rule(tm
 
 
 def test_audit_report_marks_new_classification_variants_after_terminal_review(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     initial_path = tmp_path / 'initial.json'
     initial_path.write_text(
@@ -472,7 +475,7 @@ def test_audit_report_marks_new_classification_variants_after_terminal_review(
 
 
 def test_unreviewed_variant_count_deduplicates_location_only_variants(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
     initial_path = tmp_path / 'initial.json'
@@ -544,7 +547,7 @@ def test_unreviewed_variant_count_deduplicates_location_only_variants(
 
 
 def test_empty_variant_review_checker_skips_database(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = EntityAuditStore(tmp_path / 'entity-audit.sqlite3')
     monkeypatch.setattr(
@@ -555,7 +558,7 @@ def test_empty_variant_review_checker_skips_database(
 
 
 def test_needs_variant_review_scopes_its_snapshot(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = EntityAuditStore(tmp_path / 'entity-audit.sqlite3')
     queried_names: list[set[str]] = []
@@ -571,7 +574,7 @@ def test_needs_variant_review_scopes_its_snapshot(
     assert queried_names == [{'Example/Berry'}]
 
 
-def test_audit_store_renames_saved_kind_references(tmp_path) -> None:
+def test_audit_store_renames_saved_kind_references(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -608,7 +611,7 @@ def test_audit_store_renames_saved_kind_references(tmp_path) -> None:
     assert detail.variants[0].observations[0].kind == 'redberry'
 
 
-def test_non_collectible_variant_is_a_negative_rule_candidate_example(tmp_path) -> None:
+def test_non_collectible_variant_is_a_negative_rule_candidate_example(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -681,7 +684,7 @@ def test_non_collectible_variant_is_a_negative_rule_candidate_example(tmp_path) 
     )
 
 
-def test_rule_candidates_keep_affecting_attributes_without_competing_kinds(tmp_path) -> None:
+def test_rule_candidates_keep_affecting_attributes_without_competing_kinds(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -750,7 +753,7 @@ def test_rule_candidates_keep_affecting_attributes_without_competing_kinds(tmp_p
     )
 
 
-def test_rule_candidates_do_not_broaden_default_when_missing_is_confirmed(tmp_path) -> None:
+def test_rule_candidates_do_not_broaden_default_when_missing_is_confirmed(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -822,7 +825,7 @@ def test_rule_candidates_do_not_broaden_default_when_missing_is_confirmed(tmp_pa
     )
 
 
-def test_map_metadata_is_preserved_and_can_distinguish_rule_candidates(tmp_path) -> None:
+def test_map_metadata_is_preserved_and_can_distinguish_rule_candidates(tmp_path: Path) -> None:
     report_path = tmp_path / 'report.json'
     report_path.write_text(
         json.dumps(
@@ -888,7 +891,7 @@ def test_map_metadata_is_preserved_and_can_distinguish_rule_candidates(tmp_path)
     )
 
 
-def test_attr_default_value_is_saved_separately_from_missing_raw_values(tmp_path) -> None:
+def test_attr_default_value_is_saved_separately_from_missing_raw_values(tmp_path: Path) -> None:
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_path = tmp_path / 'report.json'
     report_path.write_text(
@@ -940,7 +943,7 @@ def test_attr_default_value_is_saved_separately_from_missing_raw_values(tmp_path
     assert detail.attr_summaries[0].evidence == '源码分析'
 
 
-def test_attr_default_can_be_confirmed_as_json_null(tmp_path) -> None:
+def test_attr_default_can_be_confirmed_as_json_null(tmp_path: Path) -> None:
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_path = tmp_path / 'report.json'
     report_path.write_text(

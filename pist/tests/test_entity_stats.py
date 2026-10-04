@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from berries.entities.classification import (
@@ -48,7 +50,7 @@ def test_entity_record_values_include_absent_count_and_existence_kinds() -> None
     assert stats.record_values == {'主表': {'红草莓数': 0, '磁带': False}}
 
 
-def test_personal_stat_rules_reject_removed_public_kind(tmp_path) -> None:
+def test_personal_stat_rules_reject_removed_public_kind(tmp_path: Path) -> None:
     path = tmp_path / 'stats.toml'
     path.write_text(
         """

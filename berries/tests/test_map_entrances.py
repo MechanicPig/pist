@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pytest
 
 from berries.map_entrances import (
@@ -29,6 +31,8 @@ def _region() -> MapEntranceRegion:
         ),
     ),
 )
-def test_map_entrance_rules_reject_blank_attribute_and_entity_names(model) -> None:
+def test_map_entrance_rules_reject_blank_attribute_and_entity_names(
+    model: Callable[[], EntranceValue | MapEntranceRule],
+) -> None:
     with pytest.raises(ValueError):
         model()
