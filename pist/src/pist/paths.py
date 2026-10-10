@@ -6,29 +6,26 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-SHARED_DATA_DIR = PACKAGE_DIR / 'data'
+PKG_DIR = Path(__file__).resolve().parent
+SHARED_DATA_DIR = PKG_DIR / 'data'
 
 
-def source_root(package_dir: Path = PACKAGE_DIR) -> Path | None:
+def source_root(pkg_dir: Path = PKG_DIR) -> Path | None:
     """Return the repository root when Pist is running from a source checkout."""
-    candidate = package_dir.parent.parent.parent
-    if (
-        package_dir == candidate / 'pist' / 'src' / 'pist'
-        and (candidate / 'pyproject.toml').is_file()
-    ):
+    candidate = pkg_dir.parent.parent.parent
+    if pkg_dir == candidate / 'pist' / 'src' / 'pist' and (candidate / 'pyproject.toml').is_file():
         return candidate
     return None
 
 
 def pist_dir(
-    package_dir: Path = PACKAGE_DIR,
+    pkg_dir: Path = PKG_DIR,
     environment: Mapping[str, str] = environ,
 ) -> Path:
     """Return the writable ``.pist`` directory for this installation."""
     if configured := environment.get('PIST_DATA_DIR'):
         return Path(configured).expanduser().resolve()
-    if root := source_root(package_dir):
+    if root := source_root(pkg_dir):
         return root / '.pist'
     return user_data_path('.pist', appauthor=False)
 

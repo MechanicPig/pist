@@ -11,10 +11,10 @@ from textual.widgets import ListItem, ListView, Static
 from berries.game import maps as backend
 from berries.game.levels import Level, LevelSide, Map
 from berries.game.saves import SaveSlot
+from pist.ui.mouse import LEFT_MOUSE_BUTTON
 
 from .catalog import map_detail_lines, map_title
 
-LEFT_MOUSE_BUTTON = 1
 type SideGroup = tuple[LevelSide, *tuple[LevelSide, ...]]
 
 type MapItemFactory = Callable[

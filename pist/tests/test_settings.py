@@ -3,7 +3,40 @@ from pathlib import Path
 import pytest
 
 from pist.__main__ import default_game_dir, default_sheet_source, set_default_setting
-from pist.settings import PistSettings, SettingsStore
+from pist.settings import PistSettings, RecordListMaxWidths, SettingsStore
+
+
+@pytest.mark.parametrize('width', (0, -1, True, '20', 1.5))
+def test_record_list_widths_require_positive_integers(width: object) -> None:
+    with pytest.raises(ValueError):
+        RecordListMaxWidths.model_validate({'map_name': width})
+
+
+def test_record_list_widths_persist_and_default_missing_fields(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / 'settings.json')
+    assert store.load().record_list_max_widths.map_name == 40
+    settings = PistSettings.model_validate({'record_list_max_widths': {'map_name': 24}})
+    store.save(settings)
+    assert store.load() == settings
+    assert store.load().record_list_max_widths.mod_name == 32
+
+
+def test_failed_settings_replace_preserves_previous_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / 'settings.json'
+    store = SettingsStore(path)
+    original = PistSettings(theme='textual-light')
+    store.save(original)
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise OSError('replacement blocked')
+
+    monkeypatch.setattr(Path, 'replace', fail_replace)
+    with pytest.raises(OSError, match='replacement blocked'):
+        store.save(PistSettings(record_list_max_widths=RecordListMaxWidths(map_name=20)))
+    assert store.load() == original
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_settings_reject_empty_dialog_language_order() -> None:

@@ -1,11 +1,9 @@
 """Build personal record statistics from public map classification results."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from berries import map_layout
 from berries.entities import classification, rules
-from berries.game import binmap, content, levels
+from berries.game import binmap, levels, map_data
 from berries.map_entity_id import MapEntityID
 from pist import entity_stats
 from pist.paths import PIST_DIR
@@ -71,21 +69,6 @@ class MapEntityRecordSource:
         )
 
 
-def load_map_entity_record_source_from_path(
-    path: Path,
-    map_file: content.StrPath,
-    collected: frozenset[MapEntityID],
-    *,
-    excluded_entities: frozenset[str] = frozenset(),
-) -> MapEntityRecordSource:
-    """Read one map once, retaining inputs needed for rule refreshes."""
-    return MapEntityRecordSource(
-        map_layout.load_map_data_from_path(path, map_file),
-        collected,
-        excluded_entities,
-    )
-
-
 def load_map_entity_record_source(
     map_file: levels.Map,
     collected: frozenset[MapEntityID],
@@ -94,7 +77,7 @@ def load_map_entity_record_source(
 ) -> MapEntityRecordSource:
     """Read one active map once, retaining inputs needed for rule refreshes."""
     return MapEntityRecordSource(
-        map_layout.load_map_data(map_file),
+        map_data.load_map_data(map_file),
         collected,
         excluded_entities,
     )

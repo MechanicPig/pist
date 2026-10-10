@@ -13,35 +13,8 @@ from berries.entities.rules import (
 )
 from berries.game.map_source import MapSource
 from berries.map_layout import MapPreviewEntity
-from pist.entities.audit import (
-    UNKNOWN,
-    AttrAuditStatus,
-    AuditMapOccurrences,
-    AuditSource,
-    EntityAuditStatus,
-    EntityAuditStore,
-    EntityAuditSummary,
-    ObservationQuestion,
-    ObservationStatus,
-    RawEntityOccurrence,
-    occurrences_for_variants,
-)
-from pist.ui.entities.audit import (
-    ATTR_SELECT_ID,
-    ATTR_STATUS_ID,
-    ENTITY_LIST_ID,
-    ENTITY_STATUS_ID,
-    KIND_TREE_ID,
-    NEW_KIND_LABEL_ID,
-    NEW_KIND_NAME_ID,
-    REVOKE_ENTITY_KIND_ID,
-    VARIANT_SELECT_ID,
-    VIEW_GROUP_OCCURRENCES_ID,
-    EntityAuditApp,
-    KindContextScreen,
-    KindEditorScreen,
-    KindPickerScreen,
-)
+from pist.entities import audit as backend
+from pist.ui.entities import audit as audit_ui
 from pist.ui.entities.audit.app import _classification_groups, _default_value
 from pist.ui.entities.audit.rules_refresh import audit_layer_diff
 from pist.ui.entities.kinds import KindTree, add_kind_nodes
@@ -87,7 +60,7 @@ def test_audit_rule_diff_groups_changes_by_entity() -> None:
 
 
 def test_confirmed_default_input_distinguishes_json_null_from_blank() -> None:
-    assert _default_value('') is UNKNOWN
+    assert _default_value('') is backend.UNKNOWN
     assert _default_value('null') is None
     assert _default_value('false') is False
 
@@ -117,14 +90,14 @@ def test_selecting_an_unreviewed_entity_opens_its_attribute_review(tmp_path: Pat
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
-    app = EntityAuditApp(store, store.import_report(report_path))
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
+    app = audit_ui.EntityAuditApp(store, store.import_report(report_path))
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.query_one(f'#{ENTITY_LIST_ID}', OptionList).action_select()
+            app.query_one(f'#{audit_ui.ENTITY_LIST_ID}', OptionList).action_select()
             await pilot.pause()
-            assert app.query_one(f'#{ENTITY_STATUS_ID}', Select).value == 'unknown'
+            assert app.query_one(f'#{audit_ui.ENTITY_STATUS_ID}', Select).value == 'unknown'
 
     asyncio.run(check())
 
@@ -163,16 +136,16 @@ def test_selecting_entity_calculates_deferred_unreviewed_variant_count(tmp_path:
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
     store.save_observation(
         'Example/Berry',
         {'moon': False},
-        ObservationQuestion.ENTITY_CLASSIFICATION,
-        ObservationStatus.CONFIRMED,
+        backend.ObservationQuestion.ENTITY_CLASSIFICATION,
+        backend.ObservationStatus.CONFIRMED,
         kind='strawberry',
     )
-    app = EntityAuditApp(store, report_id)
+    app = audit_ui.EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test():
@@ -212,18 +185,18 @@ def test_saving_attr_knowledge_refreshes_attr_options(tmp_path: Path) -> None:
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
-    app = EntityAuditApp(store, store.import_report(report_path))
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
+    app = audit_ui.EntityAuditApp(store, store.import_report(report_path))
 
     async def check() -> None:
         async with app.run_test() as pilot:
             app._select_entity('Example/Berry')
-            attributes = app.query_one(f'#{ATTR_SELECT_ID}', Select)
+            attributes = app.query_one(f'#{audit_ui.ATTR_SELECT_ID}', Select)
             attributes.value = 'moon'
             await pilot.pause()
             app.query_one(
-                f'#{ATTR_STATUS_ID}', Select
-            ).value = AttrAuditStatus.DOES_NOT_AFFECT_KIND.value
+                f'#{audit_ui.ATTR_STATUS_ID}', Select
+            ).value = backend.AttrAuditStatus.DOES_NOT_AFFECT_KIND.value
             app.save_attr()
 
             assert attributes.value == 'moon'
@@ -260,18 +233,18 @@ def test_saving_entity_reuses_loaded_navigation_summaries(
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
     calls = 0
     original = store.entity_summaries
 
-    def summaries(report_id: int | None = None) -> tuple[EntityAuditSummary, ...]:
+    def summaries(report_id: int | None = None) -> tuple[backend.EntityAuditSummary, ...]:
         nonlocal calls
         calls += 1
         return original(report_id)
 
     monkeypatch.setattr(store, 'entity_summaries', summaries)
-    app = EntityAuditApp(store, report_id)
+    app = audit_ui.EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -280,14 +253,14 @@ def test_saving_entity_reuses_loaded_navigation_summaries(
             entity_filter.value = 'Other'
             await pilot.pause()
             app.query_one(
-                f'#{ENTITY_STATUS_ID}', Select
-            ).value = EntityAuditStatus.ENTITY_CANDIDATE.value
+                f'#{audit_ui.ENTITY_STATUS_ID}', Select
+            ).value = backend.EntityAuditStatus.ENTITY_CANDIDATE.value
             app.save_entity()
             await pilot.pause()
             assert calls == 1
             assert entity_filter.value == 'Other'
-            assert app._summaries[0].status is EntityAuditStatus.ENTITY_CANDIDATE
-            assert app.query_one(f'#{ENTITY_LIST_ID}', OptionList).option_count == 0
+            assert app._summaries[0].status is backend.EntityAuditStatus.ENTITY_CANDIDATE
+            assert app.query_one(f'#{audit_ui.ENTITY_LIST_ID}', OptionList).option_count == 0
 
     asyncio.run(check())
 
@@ -318,22 +291,22 @@ def test_saving_entity_rebuilds_virtual_navigation(tmp_path: Path) -> None:
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
-    app = EntityAuditApp(store, report_id)
+    app = audit_ui.EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            entities = app.query_one(f'#{ENTITY_LIST_ID}', OptionList)
+            entities = app.query_one(f'#{audit_ui.ENTITY_LIST_ID}', OptionList)
             app._select_entity('First')
             app.query_one(
-                f'#{ENTITY_STATUS_ID}', Select
-            ).value = EntityAuditStatus.ENTITY_CANDIDATE.value
+                f'#{audit_ui.ENTITY_STATUS_ID}', Select
+            ).value = backend.EntityAuditStatus.ENTITY_CANDIDATE.value
             app.save_entity()
             await pilot.pause()
 
             summaries = {summary.entity_name: summary for summary in app._summaries}
-            assert summaries['First'].status is EntityAuditStatus.ENTITY_CANDIDATE
+            assert summaries['First'].status is backend.EntityAuditStatus.ENTITY_CANDIDATE
             assert [option.id for option in entities.options if option.disabled] == [None, None]
 
     asyncio.run(check())
@@ -378,16 +351,16 @@ def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path: Path
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
     store.confirm_entity_kind('Example/Heart', report_id, 'heart')
-    app = EntityAuditApp(store, report_id)
+    app = audit_ui.EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test() as pilot:
             app._select_entity('Example/Heart')
             assert not app.query_one('#audit-attribute-review').display
-            assert not app.query_one(f'#{REVOKE_ENTITY_KIND_ID}', Button).disabled
+            assert not app.query_one(f'#{audit_ui.REVOKE_ENTITY_KIND_ID}', Button).disabled
 
             app._select_entity('Example/Unreviewed')
             await pilot.pause()
@@ -395,14 +368,14 @@ def test_whole_entity_kind_is_reloaded_and_hides_attribute_review(tmp_path: Path
             review = app.query_one('#audit-attribute-review')
             assert review.display
             assert review.region.height > 1
-            assert app.query_one(f'#{ATTR_SELECT_ID}', Select).disabled is False
+            assert app.query_one(f'#{audit_ui.ATTR_SELECT_ID}', Select).disabled is False
 
             app._select_entity('Example/Heart')
             app.revoke_entity_kind()
 
             assert app.query_one('#audit-attribute-review').display
-            assert app.query_one(f'#{ATTR_SELECT_ID}', Select).disabled is False
-            assert app.query_one(f'#{REVOKE_ENTITY_KIND_ID}', Button).disabled
+            assert app.query_one(f'#{audit_ui.ATTR_SELECT_ID}', Select).disabled is False
+            assert app.query_one(f'#{audit_ui.REVOKE_ENTITY_KIND_ID}', Button).disabled
 
     asyncio.run(check())
 
@@ -441,7 +414,7 @@ def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_pa
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
 
     detail = store.entity_detail('Example/Berry', report_id)
@@ -450,27 +423,29 @@ def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_pa
         {'moon': True, 'tempo': 2},
     ]
 
-    store.save_attr_knowledge('Example/Berry', 'tempo', AttrAuditStatus.LIKELY_NOT_AFFECT_KIND)
+    store.save_attr_knowledge(
+        'Example/Berry', 'tempo', backend.AttrAuditStatus.LIKELY_NOT_AFFECT_KIND
+    )
 
     groups = _classification_groups(store.entity_detail('Example/Berry', report_id))
     assert [group.attrs for group in groups] == [{'moon': True}]
     assert len(groups[0].variants) == 2
     assert {
         occurrence.source.map_file
-        for occurrence in occurrences_for_variants(
+        for occurrence in backend.occurrences_for_variants(
             store.occurrences('Example/Berry', report_id), groups[0].variants
         )
     } == {'Maps/First.bin', 'Maps/Second.bin'}
 
-    app = EntityAuditApp(store, report_id)
+    app = audit_ui.EntityAuditApp(store, report_id)
 
     async def check() -> None:
         async with app.run_test() as pilot:
             app._select_entity('Example/Berry')
-            variants = app.query_one(f'#{VARIANT_SELECT_ID}', Select)
+            variants = app.query_one(f'#{audit_ui.VARIANT_SELECT_ID}', Select)
             variants.value = '0'
             await pilot.pause()
-            assert not app.query_one(f'#{VIEW_GROUP_OCCURRENCES_ID}', Button).disabled
+            assert not app.query_one(f'#{audit_ui.VIEW_GROUP_OCCURRENCES_ID}', Button).disabled
             app.view_group_occurrences()
             await asyncio.sleep(0.05)
             await pilot.pause()
@@ -484,15 +459,15 @@ def test_classification_groups_merge_only_confirmed_irrelevant_attributes(tmp_pa
 
 
 def test_double_clicking_an_occurrence_requests_a_map_preview() -> None:
-    occurrence = RawEntityOccurrence(
+    occurrence = backend.RawEntityOccurrence(
         entity_name='Example/Berry',
         attrs={'x': 8, 'y': 16},
-        source=AuditSource(scope=MapSource.MOD, map_file='Maps/Test.bin', map_name='Test'),
+        source=backend.AuditSource(scope=MapSource.MOD, map_file='Maps/Test.bin', map_name='Test'),
         room='a',
         entity_id=1,
     )
-    map_data = AuditMapOccurrences(occurrence.source, ((occurrence.room, 1),))
-    requested: list[AuditMapOccurrences] = []
+    map_data = backend.AuditMapOccurrences(occurrence.source, ((occurrence.room, 1),))
+    requested: list[backend.AuditMapOccurrences] = []
     app = App()
 
     async def check() -> None:
@@ -537,21 +512,21 @@ def test_kind_picker_context_click_offers_edit_and_child_creation() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(KindPickerScreen(rules, save_kind=lambda _, __: rules))
+            app.push_screen(audit_ui.KindPickerScreen(rules, save_kind=lambda _, __: rules))
             await pilot.pause()
-            tree = app.screen.query_one(f'#{KIND_TREE_ID}', KindTree)
+            tree = app.screen.query_one(f'#{audit_ui.KIND_TREE_ID}', KindTree)
             assert tree.get_style_at(2, 0).meta['line'] == 0
             await pilot.click(tree, offset=(2, 0), button=3)
             await pilot.pause()
 
             screen = app.screen
-            assert isinstance(screen, KindContextScreen)
+            assert isinstance(screen, audit_ui.KindContextScreen)
             await pilot.click('#kind-context-add')
             await pilot.pause()
 
             screen = app.screen
-            assert isinstance(screen, KindEditorScreen)
-            assert screen.query_one(f'#{NEW_KIND_NAME_ID}', Input).value == ''
+            assert isinstance(screen, audit_ui.KindEditorScreen)
+            assert screen.query_one(f'#{audit_ui.NEW_KIND_NAME_ID}', Input).value == ''
 
     asyncio.run(check())
 
@@ -569,20 +544,20 @@ def test_kind_picker_context_edit_opens_the_existing_kind() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(KindPickerScreen(rules, save_kind=lambda _, __: rules))
+            app.push_screen(audit_ui.KindPickerScreen(rules, save_kind=lambda _, __: rules))
             await pilot.pause()
-            tree = app.screen.query_one(f'#{KIND_TREE_ID}', KindTree)
+            tree = app.screen.query_one(f'#{audit_ui.KIND_TREE_ID}', KindTree)
             await pilot.click(tree, offset=(2, 0), button=3)
             await pilot.pause()
             await pilot.click('#kind-context-edit')
             await pilot.pause()
 
             screen = app.screen
-            assert isinstance(screen, KindEditorScreen)
-            name = screen.query_one(f'#{NEW_KIND_NAME_ID}', Input)
+            assert isinstance(screen, audit_ui.KindEditorScreen)
+            name = screen.query_one(f'#{audit_ui.NEW_KIND_NAME_ID}', Input)
             assert name.value == 'berry'
             assert not name.disabled
-            assert screen.query_one(f'#{NEW_KIND_LABEL_ID}', Input).value == '浆果'
+            assert screen.query_one(f'#{audit_ui.NEW_KIND_LABEL_ID}', Input).value == '浆果'
 
     asyncio.run(check())
 
@@ -599,10 +574,10 @@ def test_kind_picker_toggles_with_one_click_and_selects_with_two() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            picker = KindPickerScreen(rules)
+            picker = audit_ui.KindPickerScreen(rules)
             app.push_screen(picker, selected.append)
             await pilot.pause()
-            tree = app.screen.query_one(f'#{KIND_TREE_ID}', KindTree)
+            tree = app.screen.query_one(f'#{audit_ui.KIND_TREE_ID}', KindTree)
             assert tree.root.children[0].is_expanded
             await pilot.click(tree, offset=(2, 0))
             await pilot.pause()
@@ -648,11 +623,11 @@ def test_entity_list_groups_statuses_and_prioritizes_map_progress(
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
-    store.save_entity_knowledge('Candidate', EntityAuditStatus.ENTITY_CANDIDATE)
-    store.save_entity_knowledge('Ignored', EntityAuditStatus.IGNORED)
-    app = EntityAuditApp(store, report_id)
+    store.save_entity_knowledge('Candidate', backend.EntityAuditStatus.ENTITY_CANDIDATE)
+    store.save_entity_knowledge('Ignored', backend.EntityAuditStatus.IGNORED)
+    app = audit_ui.EntityAuditApp(store, report_id)
     progress = {
         'Maps/SingleRun.bin': 0,
         'Maps/Completed.bin': 1,
@@ -684,7 +659,7 @@ def test_entity_list_groups_statuses_and_prioritizes_map_progress(
     assert calls == {map_file: 1 for map_file in progress}
 
 
-def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(
+def test_occurrence_preview_groups_one_pkg_and_marks_its_entity_positions(
     tmp_path: Path,
 ) -> None:
     report_path = tmp_path / 'report.json'
@@ -722,7 +697,7 @@ def test_occurrence_preview_groups_one_package_and_marks_its_entity_positions(
         ),
         encoding='utf-8',
     )
-    store = EntityAuditStore(tmp_path / 'audit.sqlite3')
+    store = backend.EntityAuditStore(tmp_path / 'audit.sqlite3')
     report_id = store.import_report(report_path)
     maps = store.occurrence_maps('Example/Berry', report_id)
 

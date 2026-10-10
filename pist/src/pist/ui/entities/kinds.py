@@ -10,6 +10,7 @@ from textual.widgets import Tree
 from textual.widgets._tree import NodeID, TreeNode
 
 from berries.entities.rules import EntityRules
+from pist.ui.mouse import DOUBLE_CLICK_COUNT, LEFT_MOUSE_BUTTON, RIGHT_MOUSE_BUTTON
 
 
 class KindTree(Tree[str]):
@@ -51,7 +52,7 @@ class KindTree(Tree[str]):
         return self.get_node_at_line(line) if isinstance(line, int) else None
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button == 3:
+        if event.button == RIGHT_MOUSE_BUTTON:
             node = self._context_node_for(event)
             parent = None if node is None else node.data
             self.post_message(self.ContextRequested(parent))
@@ -61,14 +62,14 @@ class KindTree(Tree[str]):
         await super()._on_mouse_down(event)
 
     async def _on_click(self, event: events.Click) -> None:
-        if event.button == 3:
+        if event.button == RIGHT_MOUSE_BUTTON:
             event.prevent_default()
             event.stop()
             return
-        if event.button == 1:
+        if event.button == LEFT_MOUSE_BUTTON:
             node = self._click_node_for(event)
             if node is not None:
-                if event.chain >= 2 and node.data is not None:
+                if event.chain >= DOUBLE_CLICK_COUNT and node.data is not None:
                     self.post_message(self.KindConfirmed(node.data))
                 else:
                     self._toggle_node(node)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from pist.routes import MapRoute
+from pist.routes.models import MapRoute
 from pist.sqlite_store import LOCAL_DATA_PATH, SQLiteStore
 
 

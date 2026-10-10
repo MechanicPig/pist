@@ -12,8 +12,9 @@ from textual.widgets import ListItem, LoadingIndicator, Static
 
 from berries.game.levels import Level, LevelSide, Map
 from berries.game.saves import SaveSlot
+from pist.ui.mouse import LEFT_MOUSE_BUTTON
 
-from .map_list import LEFT_MOUSE_BUTTON, MapItem, MapSideButton, SideGroup
+from .map_list import MapItem, MapSideButton, SideGroup
 
 
 class CollabMapList(Vertical):

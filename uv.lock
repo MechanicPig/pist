@@ -123,7 +123,7 @@ wheels = [
 
 [[package]]
 name = "berries"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "berries" }
 dependencies = [
     { name = "aiohttp" },
@@ -501,7 +501,7 @@ wheels = [
 
 [[package]]
 name = "pist"
-version = "0.5.3"
+version = "0.6.0"
 source = { editable = "pist" }
 dependencies = [
     { name = "aiohttp" },

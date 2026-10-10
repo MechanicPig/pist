@@ -3,11 +3,12 @@ from pydantic import ValidationError
 
 from pist import __doc__
 from pist.__main__ import build_parser
-from pist.secrets import TencentDocsCredentials
-from pist.smartsheet import FieldsResult, TencentApiResp, extract_file_id
+from pist.credentials.store import TencentDocsCredentials
+from pist.smartsheet.client import extract_file_id
+from pist.smartsheet.models import FieldsResult, TencentApiResp
 
 
-def test_package_loads() -> None:
+def test_pkg_loads() -> None:
     assert __doc__
 
 
@@ -31,16 +32,22 @@ def test_map_browse_defaults_to_save_slot_zero() -> None:
         parser.parse_args(['mods', 'browse'])
 
 
-def test_saved_record_sync_requires_an_explicit_write_mode() -> None:
+def test_saved_record_sync_uses_association_instead_of_a_write_mode() -> None:
     parser = build_parser()
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(['record', 'sync', '1'])
-
-    args = parser.parse_args(['record', 'sync', '42', '--update'])
+    args = parser.parse_args(['records', 'sync', '42'])
 
     assert args.record_id == 42
-    assert args.update is True
+    for flag in ('--add', '--update'):
+        with pytest.raises(SystemExit):
+            parser.parse_args(['records', 'sync', '42', flag])
+
+
+def test_records_browse_requires_no_game_or_save_configuration() -> None:
+    args = build_parser().parse_args(['records', 'browse'])
+    assert args.command == 'records'
+    assert args.records_command == 'browse'
+    assert not hasattr(args, 'game_dir')
 
 
 def test_extract_smart_sheet_file_id_from_url() -> None:

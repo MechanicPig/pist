@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from berries.game.levels import LevelSide
-from pist.collab_lobbies import (
+from pist.lobby_overrides import (
     CollabLobbyOverrideStore,
     load_collab_lobby_override_layers,
     load_collab_lobby_overrides,

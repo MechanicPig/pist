@@ -1,4 +1,6 @@
 // Objective map rendering shared by the read-only viewer and application overlays.
+const TILE_SIZE = 8;
+
 export class MapCanvas {
   constructor(canvas, base, redraw) {
     this.canvas = canvas;
@@ -34,7 +36,7 @@ export class MapCanvas {
         if (x < row.length && row[x] !== '0') {
           if (begin < 0) begin = x;
         } else if (begin >= 0) {
-          this.ctx.fillRect(room.x + begin * 8, room.y + y * 8, (x - begin) * 8, 8);
+          this.ctx.fillRect(room.x + begin * TILE_SIZE, room.y + y * TILE_SIZE, (x - begin) * TILE_SIZE, TILE_SIZE);
           begin = -1;
         }
       }
@@ -64,6 +66,6 @@ export class MapCanvas {
     const x = room.x + item.x;
     const y = room.y + item.y;
     this.ctx.fillStyle = '#c43d3d';
-    this.ctx.fillRect(Math.floor(x / 8) * 8, Math.floor((y - 8) / 8) * 8, 8, 8);
+    this.ctx.fillRect(Math.floor(x / TILE_SIZE) * TILE_SIZE, Math.floor((y - TILE_SIZE) / TILE_SIZE) * TILE_SIZE, TILE_SIZE, TILE_SIZE);
   }
 }

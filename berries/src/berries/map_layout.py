@@ -1,4 +1,4 @@
-"""Interpret decoded maps as Pist preview layouts and entity record sources."""
+"""Interpret decoded maps as reusable preview layouts."""
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from berries.entities import classification, rules
 from berries.game import binmap, content, levels
+from berries.game import map_data as source
 from berries.map_entrances import (
     DEFAULT_MAP_ENTRANCE_RULES,
     MapEntranceRules,
@@ -111,44 +112,12 @@ def map_layout(
 
 def load_map_layout(map_file: levels.Map) -> MapLayout:
     """Read one active Game or Mod map through its typed content source."""
-    return map_layout(load_map_data(map_file))
+    return map_layout(source.load_map_data(map_file))
 
 
 def load_map_layout_from_path(path: Path, map_file: content.StrPath) -> MapLayout:
     """Read one map layout from a Mod archive, Mod directory, or Game Content directory."""
-    return map_layout(load_map_data_from_path(path, map_file))
-
-
-def load_map_data(map_file: levels.Map) -> binmap.BinMap:
-    """Decode one active map, reporting unavailable or invalid sources as ValueError."""
-    try:
-        with map_file.open_content() as root:
-            return _load_map_bin_entry(root, map_file.file_path)
-    except content.BadContentEntry as error:
-        raise ValueError(f'Invalid content source for map: {map_file.file_path!r}') from error
-    except OSError as error:
-        raise ValueError(
-            f'Cannot read map {map_file.file_path!r} from {map_file.content.path!r}: {error}'
-        ) from error
-
-
-def load_map_data_from_path(path: Path, map_file: content.StrPath) -> binmap.BinMap:
-    """Read one map BIN, reporting unavailable or invalid sources as ValueError."""
-    try:
-        with content.ContentEntry(path) as mod_path:
-            map_data = _load_map_bin_entry(mod_path, map_file)
-    except content.BadContentEntry as error:
-        raise ValueError(f'Invalid map package path: {path!r}') from error
-    except OSError as error:
-        raise ValueError(f'Cannot read map {map_file!r} from {path!r}: {error}') from error
-    return map_data
-
-
-def _load_map_bin_entry(root: content.ContentEntry, map_file: content.StrPath) -> binmap.BinMap:
-    map_path = root.joinpath(map_file)
-    if not map_path.is_file():
-        raise ValueError(f'Map file does not exist in {root.root!r}: {map_file!r}')
-    return binmap.parse_map_bin(map_path.read_bytes(), allow_trailing=True)
+    return map_layout(source.load_map_data_from_path(path, map_file))
 
 
 def _map_room(room: binmap.BinElement, entities: tuple[MapPreviewEntity, ...]) -> MapRoom:

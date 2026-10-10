@@ -4,6 +4,19 @@ import { CanvasInteraction, MapViewport } from '../../src/berries/map_preview/st
 import { MapGeometry } from '../../src/berries/map_preview/static/geometry.js';
 import { PreviewClient } from '../../src/berries/map_preview/static/client.js';
 import { ObjectInfoPanel } from '../../src/berries/map_preview/static/object_info.js';
+import { MapCanvas } from '../../src/berries/map_preview/static/canvas.js';
+
+test('tiles and respawns use world-space tile bounds at non-aligned room origins', () => {
+  const rectangles = [];
+  const ctx = { fillRect: (...bounds) => rectangles.push(bounds) };
+  const renderer = new MapCanvas({ getContext: () => ctx }, '', () => {});
+  const room = { x: -3, y: 5 };
+  renderer.tileRows(room, ['1101', '0010'], '#fff');
+  assert.deepEqual(rectangles, [[-3, 5, 16, 8], [21, 5, 8, 8], [13, 13, 8, 8]]);
+  rectangles.length = 0;
+  renderer.respawn({ x: 1, y: 2 }, room);
+  assert.deepEqual(rectangles, [[-8, -8, 8, 8]]);
+});
 
 class Canvas extends EventTarget {
   clientWidth = 800;
@@ -131,6 +144,19 @@ test('middle double click resets, drag cancels double click, blur and disposal c
   assert.equal(viewport.offsetX, offset);
   assert.ok(cancelled >= 2);
 });
+
+for (const interval of [350, 351]) {
+  test(`middle-click reset respects the time window at ${interval} ms`, () => {
+    const { canvas, viewport } = scene();
+    let resets = 0;
+    const interaction = new CanvasInteraction(viewport, { redraw() {}, reset: () => resets++ });
+    mouse(canvas, 'mousedown', { button: 1, timeStamp: 100 });
+    mouse(window, 'mouseup', { button: 1 });
+    mouse(canvas, 'mousedown', { button: 1, timeStamp: 100 + interval });
+    assert.equal(resets, interval === 350 ? 1 : 0);
+    interaction.dispose();
+  });
+}
 
 test('room queries preserve stacking, half-open edges and strict box intersection', () => {
   const geometry = new MapGeometry();

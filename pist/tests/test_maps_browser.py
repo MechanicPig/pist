@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from struct import pack
 from typing import Literal
@@ -15,8 +16,10 @@ from berries.entities.classification import (
     CollectedEntityRuleIssueStatus,
     VariantReviewLoader,
 )
+from berries.entities.rules import SHARED_ENTITIES_PATH, load_entity_rules
 from berries.game import collab as game_collab
 from berries.game import dialog
+from berries.game.binmap import BinElement, BinMap
 from berries.game.content import ContentPath
 from berries.game.duration import Duration
 from berries.game.everest import Dependency, Version
@@ -34,47 +37,69 @@ from berries.gamebanana import GameBananaClient, GameBananaSubmission
 from berries.map_entity_id import MapEntityID
 from berries.map_layout import MapLayout, MapRoom
 from pist.app_data import AppDataStores
-from pist.collab_lobbies import (
-    CollabLobbyOverride,
-    CollabLobbyOverrides,
-    CollabLobbyOverrideStore,
-)
+from pist.lobby_overrides import CollabLobbyOverride, CollabLobbyOverrides, CollabLobbyOverrideStore
 from pist.map_preview import MapPreviewMode
-from pist.records import MapRecord, MapRecordProgress
-from pist.routes import MapRoute
+from pist.records.entities import MapEntityRecordSource
+from pist.records.fields import RECORD_ATTRIBUTES
+from pist.records.lock import record_writer_lock
+from pist.records.models import MapRecord, MapRecordProgress
+from pist.routes.models import MapRoute
 from pist.settings import PistSettings, SettingsStore
-from pist.sheet_report import ManualRecordField
+from pist.smartsheet.report import ManualRecordField
 from pist.types import RecordValues
-from pist.ui.maps.browser import (
-    DETAIL_SCROLL_ID,
-    AuthorSelectionScreen,
-    CampaignItem,
-    CampaignList,
-    CollabMapList,
-    CollectedEntityRulesScreen,
-    DatePickerScreen,
-    DialogAuthorSelectionScreen,
-    MapBrowserApp,
-    MapItem,
-    MapList,
-    RecordAuthorField,
-    RecordEditorScreen,
-    RecordReferenceScreen,
-    RecordRouteField,
-)
-from pist.ui.maps.browser.app import (
-    _plain_html,
-    browse_maps,
-)
+from pist.ui.maps import browser
+from pist.ui.maps.browser.app import _plain_html, browse_maps
 from pist.ui.maps.browser.campaign_list import CampaignListToggle
 from pist.ui.maps.browser.collab_list import LobbyMapItem, SideLobbyMapItem
 from pist.ui.maps.browser.collab_order import maps_by_campaign_icon_order, maps_by_progress
 from pist.ui.maps.browser.map_list import MapSideButton, SideMapItem, _map_side_groups
-from pist.ui.maps.browser.records import _reference_summary
 from pist.ui.messages import MessageCard, MessagesScreen
+from pist.ui.records.editor import _reference_summary
 from test_support.mod_factory import make_installed_mod
 
 type LevelSelection = tuple[Level, LevelSide]
+
+
+@pytest.mark.parametrize('other_id', (1, 2))
+def test_record_editor_retains_warning_for_duplicate_map_entity_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_id: int
+) -> None:
+    entities = BinElement(
+        'entities',
+        {},
+        (
+            BinElement('strawberry', {'id': 1}, ()),
+            BinElement('strawberry', {'id': other_id, 'moon': True}, ()),
+        ),
+    )
+    room = BinElement('level', {'name': 'room'}, (entities,))
+    map_data = BinMap('Test/Map', BinElement('Map', {}, (BinElement('levels', {}, (room,)),)))
+    rules = load_entity_rules(SHARED_ENTITIES_PATH)
+    monkeypatch.setattr(
+        'pist.records.entities.rules.load_entity_rule_layers', lambda **kwargs: rules
+    )
+    source = MapEntityRecordSource(map_data, frozenset())
+    report = ModScanReport(mods_dir=str(tmp_path), disabled_filenames=[], mods=[])
+    app = browser.MapBrowserApp(
+        report, data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3')
+    )
+
+    async def check() -> None:
+        async with app.run_test() as pilot:
+            review, _, _ = app._record_fields(source, None)
+            assert review.stats.count('strawberry') == review.stats.count('moonberry') == 1
+            await pilot.pause()
+            if other_id != 1:
+                assert app.diagnostic_count == 0
+                return
+            assert app.diagnostic_count == 1
+            await app.action_show_messages()
+            await pilot.pause()
+            card = app.screen.query_one('#runtime-message-list MessageCard', MessageCard)
+            assert 'Test/Map' in card.text
+            assert 'room:1' in card.text
+
+    asyncio.run(check())
 
 
 def _map_ref(mod: InstalledMod, map_info: MapInfo) -> tuple[Level, LevelSide]:
@@ -95,6 +120,14 @@ def _map_infos(maps: Iterable[tuple[Level, LevelSide]]) -> tuple[MapInfo, ...]:
 class StubMapEntityStats:
     record_values: RecordValues
     select_conflicts: tuple[object, ...] = ()
+    duplicate_instance_ids: frozenset[MapEntityID] = frozenset()
+
+    @property
+    def record_fields(self) -> dict[str, int | bool | str | tuple[str, ...]]:
+        return {
+            RECORD_ATTRIBUTES[title]: value
+            for title, value in self.record_values.get('主表', {}).items()
+        }
 
     def count(self, _kind: str) -> int:
         return 0
@@ -165,7 +198,7 @@ def test_browser_consolidates_startup_warnings_behind_a_summary_button() -> None
         metadata_version='1.0.0',
         dependencies=[Dependency(name='Missing', version=Version.parse('1.0.0'))],
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods',
             disabled_filenames=[],
@@ -219,7 +252,9 @@ def test_browser_retains_warning_when_accessing_uninstalled_mod(
     )
     report = ModScanReport(mods_dir=str(tmp_path), disabled_filenames=[], mods=[mod])
     level, side = _map_ref(mod, map_info)
-    app = MapBrowserApp(report, data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3'))
+    app = browser.MapBrowserApp(
+        report, data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3')
+    )
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -235,7 +270,7 @@ def test_browser_retains_warning_when_accessing_uninstalled_mod(
                 )
             await pilot.pause()
             assert app.diagnostic_count == 1
-            app.action_show_messages()
+            await app.action_show_messages()
             await pilot.pause()
             card = app.screen.query_one('#runtime-message-list MessageCard', MessageCard)
             assert mod_path.name in card.text
@@ -254,7 +289,7 @@ def test_reference_summary_normalizes_all_whitespace() -> None:
     )
 
 
-def test_record_reference_and_collab_tags_are_shown_in_their_own_fields() -> None:
+def test_record_ref_and_collab_tags_are_shown_in_their_own_fields() -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/Example/Map.bin'))
     collab_mod = make_installed_mod(
         source='zip',
@@ -274,18 +309,18 @@ def test_record_reference_and_collab_tags_are_shown_in_their_own_fields() -> Non
             'description': '<p>Ignored for collabs.</p>',
         }
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods',
             disabled_filenames=[],
             mods=[collab_mod],
         )
     )
-    assert app._record_reference(map_info, gamebanana) == ('简介', 'Ignored for collabs.')
+    assert app._record_ref(map_info, gamebanana) == ('简介', 'Ignored for collabs.')
     assert app._collab_tags(_map_ref(collab_mod, map_info)[0]) == 'Beginner'
 
 
-def test_record_reference_opens_full_text_on_double_click() -> None:
+def test_record_ref_opens_full_text_on_double_click() -> None:
     record = MapRecord.model_validate(
         {
             'created_at': '2026-09-04T12:00:00Z',
@@ -297,14 +332,16 @@ def test_record_reference_opens_full_text_on_double_click() -> None:
             'save_slot': 0,
         }
     )
-    app = MapBrowserApp(ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[]))
+    app = browser.MapBrowserApp(
+        ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[])
+    )
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(RecordEditorScreen(record, reference=('简介', '完整介绍')))
+            app.push_screen(browser.RecordEditorScreen(record, reference=('简介', '完整介绍')))
             await pilot.pause()
-            await pilot.double_click('#record-reference-summary')
-            assert isinstance(app.screen, RecordReferenceScreen)
+            await pilot.double_click('#record-ref-summary')
+            assert isinstance(app.screen, browser.RecordRefScreen)
 
     asyncio.run(check())
 
@@ -330,14 +367,16 @@ def test_record_author_value_reopens_its_source_selector() -> None:
             'credits': [{'groupName': 'Creator', 'authors': [{'name': 'Alice'}]}],
         }
     )
-    app = MapBrowserApp(ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[]))
+    app = browser.MapBrowserApp(
+        ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[])
+    )
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(RecordEditorScreen(record, author_source=submission))
+            app.push_screen(browser.RecordEditorScreen(record, author_source=submission))
             await pilot.pause()
-            await pilot.click(app.screen.query_one(RecordAuthorField))
-            assert isinstance(app.screen, AuthorSelectionScreen)
+            await pilot.click(app.screen.query_one(browser.RecordAuthorField))
+            assert isinstance(app.screen, browser.AuthorSelectionScreen)
             assert app.screen.query_one('#record-author-0', Checkbox).value
 
     asyncio.run(check())
@@ -359,12 +398,16 @@ def test_record_main_room_field_opens_route_editor() -> None:
     opened: list[None] = []
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test() as pilot:
-            app.push_screen(RecordEditorScreen(record, edit_route=lambda: opened.append(None)))
+            app.push_screen(
+                browser.RecordEditorScreen(record, edit_route=lambda: opened.append(None))
+            )
             await pilot.pause()
-            route_field = app.screen.query_one(RecordRouteField)
+            route_field = app.screen.query_one(browser.RecordRouteField)
             assert route_field.render() == '单击编辑路线'
+            route_field.scroll_visible(animate=False, force=True)
+            await pilot.pause()
             await pilot.click(route_field)
 
     asyncio.run(check())
@@ -381,14 +424,10 @@ def test_record_confirmation_prefills_saved_manual_values() -> None:
             'sid': 'Example/Map',
             'side': 'A',
             'save_slot': 0,
-            'record_values': {
-                '主表': {
-                    '标注难度': '专家',
-                    '起始日期': '2026-09-01',
-                    '评分': 8,
-                    '备注': '好图',
-                }
-            },
+            'rated_difficulty': '专家',
+            'started_at': datetime.fromisoformat('2026-09-01').replace(tzinfo=UTC).date(),
+            'rating': 8,
+            'notes': '好图',
         }
     )
     manual_fields = (
@@ -397,16 +436,20 @@ def test_record_confirmation_prefills_saved_manual_values() -> None:
         ManualRecordField('评分', 2),
         ManualRecordField('备注', 1),
     )
-    app = MapBrowserApp(ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[]))
+    app = browser.MapBrowserApp(
+        ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[])
+    )
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.push_screen(RecordEditorScreen(record, manual_fields=manual_fields))
+            app.push_screen(browser.RecordEditorScreen(record, manual_fields=manual_fields))
             await pilot.pause()
-            assert app.screen.query_one('#record-manual-0', Select).value == '专家'
-            assert app.screen.query_one('#record-manual-1', Input).value == '2026-09-01'
-            assert app.screen.query_one('#record-manual-2', Input).value == '8'
-            assert app.screen.query_one('#record-manual-3', Input).value == '好图'
+            assert isinstance(app.screen, browser.RecordEditorScreen)
+            ids = [f'#{app.screen._manual_field_id(field)}' for field in manual_fields]
+            assert app.screen.query_one(ids[0], Select).value == '专家'
+            assert app.screen.query_one(ids[1], Input).value == '2026-09-01'
+            assert app.screen.query_one(ids[2], Input).value == '8'
+            assert app.screen.query_one(ids[3], Input).value == '好图'
 
     asyncio.run(check())
 
@@ -419,9 +462,9 @@ def test_campaign_list_contains_one_item_per_campaign() -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test():
-            assert list(app.query_one(CampaignList).query(CampaignItem)) == []
+            assert list(app.query_one(browser.CampaignList).query(browser.CampaignItem)) == []
 
     asyncio.run(check())
 
@@ -448,10 +491,10 @@ def test_campaign_list_merges_maps_from_multiple_mod_sources() -> None:
     report = ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[first, second])
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test():
-            assert len(app.query_one(CampaignList).query(CampaignItem)) == 1
-            active_maps = [item.map for item in app.query(MapItem)]
+            assert len(app.query_one(browser.CampaignList).query(browser.CampaignItem)) == 1
+            active_maps = [item.map for item in app.query(browser.MapItem)]
             assert all(isinstance(active_map, Map) for active_map in active_maps)
             assert [app._campaign_catalog.mod_for(active_map) for active_map in active_maps] == [
                 first,
@@ -487,7 +530,7 @@ def test_browser_groups_helper_hidden_campaigns_in_a_collapsible() -> None:
         metadata_name='HelperTestMapHider',
         metadata_version='1.0.0',
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods',
             disabled_filenames=[],
@@ -497,9 +540,10 @@ def test_browser_groups_helper_hidden_campaigns_in_a_collapsible() -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            campaign_list = app.query_one(CampaignList)
+            campaign_list = app.query_one(browser.CampaignList)
             assert [
-                item.campaign.directory.as_posix() for item in campaign_list.query(CampaignItem)
+                item.campaign.directory.as_posix()
+                for item in campaign_list.query(browser.CampaignItem)
             ] == ['Maps/Visible']
             buttons = {button.direction: button for button in app.query(CampaignListToggle)}
             assert buttons[-1].has_class('-hidden')
@@ -512,10 +556,10 @@ def test_browser_groups_helper_hidden_campaigns_in_a_collapsible() -> None:
                     app._selected_campaign is app._hidden_campaigns[0]
                     and [
                         item.campaign.directory.as_posix()
-                        for item in campaign_list.query(CampaignItem)
+                        for item in campaign_list.query(browser.CampaignItem)
                     ]
                     == ['Maps/Helper']
-                    and _map_infos(app.query_one(MapList).maps) == (helper_map,)
+                    and _map_infos(app.query_one(browser.MapList).maps) == (helper_map,)
                     and campaign_list.has_focus
                     and campaign_list.highlighted_child is not None
                     and campaign_list.highlighted_child.highlighted
@@ -533,10 +577,10 @@ def test_browser_groups_helper_hidden_campaigns_in_a_collapsible() -> None:
                     app._selected_campaign is app._campaigns[0]
                     and [
                         item.campaign.directory.as_posix()
-                        for item in campaign_list.query(CampaignItem)
+                        for item in campaign_list.query(browser.CampaignItem)
                     ]
                     == ['Maps/Visible']
-                    and _map_infos(app.query_one(MapList).maps) == (visible_map,)
+                    and _map_infos(app.query_one(browser.MapList).maps) == (visible_map,)
                 ):
                     break
             else:
@@ -562,7 +606,7 @@ def test_browser_keeps_an_only_hidden_campaign_browsable() -> None:
         metadata_name='HelperTestMapHider',
         metadata_version='1.0.0',
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods',
             disabled_filenames=[],
@@ -574,7 +618,7 @@ def test_browser_keeps_an_only_hidden_campaign_browsable() -> None:
         async with app.run_test():
             assert app._campaigns == ()
             assert app._selected_campaign is app._hidden_campaigns[0]
-            assert _map_infos(app.query_one(MapList).maps) == (helper_map,)
+            assert _map_infos(app.query_one(browser.MapList).maps) == (helper_map,)
 
     asyncio.run(check())
 
@@ -599,7 +643,7 @@ def test_browser_renders_hidden_collab_group_as_its_direct_map_list() -> None:
         metadata_name='CollabUtils2',
         metadata_version='1.0.0',
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[collab, collab_utils]
         )
@@ -618,7 +662,7 @@ def test_browser_renders_hidden_collab_group_as_its_direct_map_list() -> None:
                 pytest.fail('未切换到隐藏的 Collab 地图组')
             hidden_item = next(
                 item
-                for item in app.query_one(CampaignList).query(CampaignItem)
+                for item in app.query_one(browser.CampaignList).query(browser.CampaignItem)
                 if item.campaign.directory.as_posix() == 'Maps/Example/1-Submissions'
             )
             await pilot.click(hidden_item)
@@ -628,14 +672,14 @@ def test_browser_renders_hidden_collab_group_as_its_direct_map_list() -> None:
                     break
             else:
                 pytest.fail('未选中指定的隐藏 Collab 地图组')
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
                     break
             else:
                 pytest.fail('隐藏的 Collab 地图组未完成日志图标读取')
-            assert _map_infos(collab_list.query_one(MapList).maps) == (hidden_map,)
+            assert _map_infos(collab_list.query_one(browser.MapList).maps) == (hidden_map,)
 
     asyncio.run(check())
 
@@ -667,7 +711,7 @@ def test_browser_selects_a_visible_campaign_before_hidden_campaigns() -> None:
         metadata_version='1.0.0',
     )
 
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(
             mods_dir='C:/Celeste/Mods',
             disabled_filenames=[],
@@ -698,7 +742,7 @@ def test_browser_separates_vanilla_and_ungrouped_mod_maps(tmp_path: Path) -> Non
     )
     report = ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[loose_mod])
 
-    app = MapBrowserApp(report)
+    app = browser.MapBrowserApp(report)
 
     assert [campaign.fallback_name for campaign in app._campaigns] == ['官图', '未分类']
     assert [
@@ -736,7 +780,7 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
     shared_lobbies = tmp_path / 'shared-collab-lobbies.toml'
     shared_lobbies.write_text('', encoding='utf-8')
     lobby_store = CollabLobbyOverrideStore(shared_lobbies, tmp_path / 'local-collab-lobbies.toml')
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[mod, collab_utils]),
         data_stores=AppDataStores(tmp_path / 'local-data.sqlite3'),
         collab_lobby_overrides=lobby_store.load(),
@@ -775,7 +819,7 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
                 ).iter_sides()
             ) == (gym,)
             assert record_previewed == []
-            map_lists = list(app.query(MapList))
+            map_lists = list(app.query(browser.MapList))
             assert _map_infos(map_lists[0].maps) == (prologue, lobby)
             assert lobby_item.collapsed
             assert lobby_item.submission_maps.styles.display == 'none'
@@ -787,17 +831,18 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
             assert map_lists[0].highlighted_child is highlighted_lobby
             for _ in range(20):
                 await pilot.pause(0.05)
-                if child_lists := list(lobby_item.query(MapList)):
+                if child_lists := list(lobby_item.query(browser.MapList)):
                     break
             else:
                 pytest.fail('Lobby submission map list did not finish loading.')
             await app._refresh_save_stats()
-            assert list(lobby_item.query(MapList)) == child_lists
-            child_lists = list(lobby_item.query(MapList))
+            assert list(lobby_item.query(browser.MapList)) == child_lists
+            child_lists = list(lobby_item.query(browser.MapList))
             assert all(
-                not map_list.has_class('is-loading') for map_list in app.query(CollabMapList)
+                not map_list.has_class('is-loading')
+                for map_list in app.query(browser.CollabMapList)
             )
-            assert [map_list.maps for map_list in app.query(CollabMapList)] == [
+            assert [map_list.maps for map_list in app.query(browser.CollabMapList)] == [
                 tuple(
                     next(
                         campaign
@@ -807,19 +852,19 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
                 ),
             ]
             map_lists[0].index = 0
-            await pilot.click(child_lists[0].query_one(MapItem), offset=(3, 0))
-            assert isinstance(app.focused, MapList)
+            await pilot.click(child_lists[0].query_one(browser.MapItem), offset=(3, 0))
+            assert isinstance(app.focused, browser.MapList)
             assert app.focused is not map_lists[0]
             assert map_lists[0].index == 0
             lobby_item.post_message(
-                MapItem.Clicked(lobby_item, button=1, chain=2, screen_x=0, screen_y=0)
+                browser.MapItem.Clicked(lobby_item, button=1, chain=2, screen_x=0, screen_y=0)
             )
             await pilot.pause()
             assert record_previewed == [(lobby_item.level, lobby_item.side)]
             menu_x = 10
             menu_y = 2
             lobby_item.post_message(
-                MapItem.Clicked(
+                browser.MapItem.Clicked(
                     lobby_item,
                     button=3,
                     chain=1,
@@ -846,7 +891,7 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
             assert record_previewed == [(lobby_item.level, lobby_item.side)]
             assert lobby_item.collapsed
             lobby_item.post_message(
-                MapItem.Clicked(lobby_item, button=3, chain=1, screen_x=0, screen_y=0)
+                browser.MapItem.Clicked(lobby_item, button=3, chain=1, screen_x=0, screen_y=0)
             )
             await pilot.pause()
             await pilot.click('#map-action-edit-lobby')
@@ -869,7 +914,7 @@ def test_collab_campaign_expands_lobby_from_journal_reference(
                 *map_lists[0].maps,
                 *(
                     loaded_map
-                    for loaded_list in app.query(CollabMapList)
+                    for loaded_list in app.query(browser.CollabMapList)
                     for loaded_map in loaded_list.maps
                 ),
             )
@@ -907,8 +952,8 @@ def test_lobby_journal_refs_reuse_cache_across_browser_instances(
     )
     monkeypatch.setattr('pist.ui.maps.browser.app.collab.journal_references', journal_references)
 
-    first = MapBrowserApp(report, data_stores=local_data)
-    second = MapBrowserApp(report, data_stores=local_data)
+    first = browser.MapBrowserApp(report, data_stores=local_data)
+    second = browser.MapBrowserApp(report, data_stores=local_data)
     assert first._load_lobby_journal_refs(loaded_map).campaign_refs == ('Example/1-Easy',)
     assert second._load_lobby_journal_refs(loaded_map).campaign_refs == ('Example/1-Easy',)
     assert calls == 1
@@ -945,7 +990,7 @@ def test_collab_lobby_override_replaces_journal_lookup(
             ),
         )
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir=str(tmp_path), disabled_filenames=[], mods=[mod, collab_utils]),
         data_stores=AppDataStores(tmp_path / 'local-data.sqlite3'),
         collab_lobby_overrides=overrides,
@@ -964,7 +1009,7 @@ def test_collab_lobby_override_replaces_journal_lookup(
             await pilot.click(lobby_item, offset=(0, 0))
             for _ in range(20):
                 await pilot.pause(0.05)
-                if child_lists := list(lobby_item.query(MapList)):
+                if child_lists := list(lobby_item.query(browser.MapList)):
                     break
             else:
                 pytest.fail('Configured Lobby map list did not finish loading.')
@@ -1040,26 +1085,27 @@ def test_collab_lobby_orders_journal_maps_from_multiple_source_mods(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data)
+        app = browser.MapBrowserApp(report, data_stores=local_data)
         submission_campaign = next(
             campaign
             for campaign in app._hidden_campaigns
             if campaign.directory.as_posix() == 'Maps/Example/1-Easy'
         )
         assert any(
-            isinstance(widget, CollabMapList) for widget in app._map_widgets(submission_campaign)
+            isinstance(widget, browser.CollabMapList)
+            for widget in app._map_widgets(submission_campaign)
         )
         async with app.run_test(size=(100, 40)) as pilot:
             lobby_item = app.query_one(LobbyMapItem)
             await pilot.click(lobby_item, offset=(0, 0))
             for _ in range(20):
                 await pilot.pause(0.05)
-                child_lists = list(lobby_item.query(MapList))
+                child_lists = list(lobby_item.query(browser.MapList))
                 if child_lists:
                     break
             else:
                 pytest.fail('Lobby journal maps from multiple Mods did not finish loading.')
-            assert [item.map_info for item in child_lists[0].query(MapItem)] == [
+            assert [item.map_info for item in child_lists[0].query(browser.MapItem)] == [
                 addon_map,
                 base_map,
             ]
@@ -1108,7 +1154,7 @@ def test_collab_lobby_sides_resolve_their_own_journal_references(
         'pist.ui.maps.browser.app.collab.journal_fingerprint',
         lambda loaded_map: loaded_map.map_info.file_path.as_posix(),
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[mod, collab_utils]),
         data_stores=AppDataStores(tmp_path / 'local-data.sqlite3'),
     )
@@ -1120,7 +1166,7 @@ def test_collab_lobby_sides_resolve_their_own_journal_references(
 
             for _ in range(20):
                 await pilot.pause(0.05)
-                child_lists = list(lobby_item.query(MapList))
+                child_lists = list(lobby_item.query(browser.MapList))
                 if child_lists and _map_infos(child_lists[0].maps) == (easy_map,):
                     break
             else:
@@ -1132,7 +1178,7 @@ def test_collab_lobby_sides_resolve_their_own_journal_references(
             await pilot.click(next_button)
             for _ in range(20):
                 await pilot.pause(0.05)
-                child_lists = list(lobby_item.query(MapList))
+                child_lists = list(lobby_item.query(browser.MapList))
                 if child_lists and _map_infos(child_lists[0].maps) == (hard_map,):
                     break
             else:
@@ -1144,7 +1190,7 @@ def test_collab_lobby_sides_resolve_their_own_journal_references(
             await pilot.click(previous_button)
             for _ in range(20):
                 await pilot.pause(0.05)
-                child_lists = list(lobby_item.query(MapList))
+                child_lists = list(lobby_item.query(browser.MapList))
                 if child_lists and _map_infos(child_lists[0].maps) == (easy_map,):
                     break
             else:
@@ -1172,7 +1218,7 @@ def test_campaign_detail_exposes_only_overrides_of_its_active_maps() -> None:
         metadata_version='1.0.0',
         maps=[MapInfo(file_path=ContentPath('Maps/Pack/Map.bin'))],
     )
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir='C:/Celeste/Mods', disabled_filenames=[], mods=[first, second])
     )
     campaign = app._campaigns[0]
@@ -1198,9 +1244,9 @@ def test_detail_pane_scrolls_with_shortcut() -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test(size=(80, 24)) as pilot:
-            detail_scroll = app.query_one(f'#{DETAIL_SCROLL_ID}', VerticalScroll)
+            detail_scroll = app.query_one(f'#{browser.DETAIL_SCROLL_ID}', VerticalScroll)
             await pilot.press('j')
             assert detail_scroll.scroll_y > 0
 
@@ -1229,13 +1275,13 @@ def test_save_slot_shortcuts_redraw_selected_slot(tmp_path: Path) -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_reader=reader, save_slot=reader.load(0))
+        app = browser.MapBrowserApp(report, save_reader=reader, save_slot=reader.load(0))
         async with app.run_test() as pilot:
-            map_list = app.query_one(MapList)
+            map_list = app.query_one(browser.MapList)
             await pilot.press(']')
             assert app._save_slot is not None
             assert app._save_slot.number == 2
-            assert app.query_one(MapList) is map_list
+            assert app.query_one(browser.MapList) is map_list
             await pilot.press('[')
             assert app._save_slot.number == 0
 
@@ -1265,11 +1311,11 @@ def test_save_slot_switch_keeps_selected_campaign_list(tmp_path: Path) -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_reader=reader, save_slot=reader.load(0))
+        app = browser.MapBrowserApp(report, save_reader=reader, save_slot=reader.load(0))
         async with app.run_test() as pilot:
-            map_list = app.query_one(MapList)
+            map_list = app.query_one(browser.MapList)
             await pilot.press(']')
-            assert app.query_one(MapList) is map_list
+            assert app.query_one(browser.MapList) is map_list
 
     asyncio.run(check())
 
@@ -1309,16 +1355,28 @@ def test_ordinary_campaign_maps_keep_path_order_when_switching_save_slots() -> N
     third_slot = SaveSlot(2, {('Test/Third', 0): MapStats(Duration.from_milliseconds(1_000), 1)})
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, save_slot=first_slot)
         async with app.run_test():
-            map_list = app.query_one(MapList)
-            assert [item.map_info for item in map_list.query(MapItem)] == [first, second, third]
+            map_list = app.query_one(browser.MapList)
+            assert [item.map_info for item in map_list.query(browser.MapItem)] == [
+                first,
+                second,
+                third,
+            ]
             app._save_slot = second_slot
             await app._refresh_save_stats()
-            assert [item.map_info for item in map_list.query(MapItem)] == [first, second, third]
+            assert [item.map_info for item in map_list.query(browser.MapItem)] == [
+                first,
+                second,
+                third,
+            ]
             app._save_slot = third_slot
             await app._refresh_save_stats()
-            assert [item.map_info for item in map_list.query(MapItem)] == [first, second, third]
+            assert [item.map_info for item in map_list.query(browser.MapItem)] == [
+                first,
+                second,
+                third,
+            ]
 
     asyncio.run(check())
 
@@ -1357,17 +1415,17 @@ def test_save_slot_switch_restores_highlight_when_selected_map_keeps_its_index()
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, save_slot=first_slot)
         async with app.run_test() as pilot:
-            map_list = app.query_one(MapList)
-            first_item = map_list.query_one(MapItem)
+            map_list = app.query_one(browser.MapList)
+            first_item = map_list.query_one(browser.MapItem)
             assert map_list.highlighted_child is first_item
             assert first_item.highlighted
 
             app._save_slot = second_slot
             await app._refresh_save_stats()
 
-            selected_item = map_list.query_one(MapItem)
+            selected_item = map_list.query_one(browser.MapItem)
             assert selected_item.map_info is first
             assert map_list.highlighted_child is selected_item
             assert selected_item.highlighted
@@ -1405,9 +1463,9 @@ def test_save_slot_switch_preserves_selected_b_side_and_its_save_slot() -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, save_slot=first_slot)
         async with app.run_test():
-            map_list = app.query_one(MapList)
+            map_list = app.query_one(browser.MapList)
             side_item = next(item for item in map_list.map_items if isinstance(item, SideMapItem))
             map_list.index = map_list.map_items.index(side_item)
             side_item.switch_side(MapSideButton.Clicked(1))
@@ -1510,16 +1568,16 @@ def test_map_selection_requires_right_click_to_write_record(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
+        app = browser.MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
         async with app.run_test() as pilot:
-            map_list = app.query_one(MapList)
+            map_list = app.query_one(browser.MapList)
             map_list.focus()
             await pilot.press('enter')
             with pytest.raises(ValueError, match='No saved local record'):
                 local_data.records.load(1)
-            await pilot.double_click(map_list.query_one(MapItem))
+            await pilot.double_click(map_list.query_one(browser.MapItem))
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
+            assert isinstance(app.screen, browser.RecordEditorScreen)
             assert app.screen._progress is MapRecordProgress.RAN_BEFORE
             await pilot.click('#record-confirm-save')
 
@@ -1527,7 +1585,7 @@ def test_map_selection_requires_right_click_to_write_record(
     record = local_data.records.load(1)
     assert record.map_name == 'Example Map'
     assert record.mod_metadata_name == 'Example'
-    assert record.record_values == {'主表': {'红草莓数': 2}}
+    assert record.model_dump(include={'n_strawberries'}) == {'n_strawberries': 2}
 
 
 @pytest.mark.parametrize(
@@ -1595,23 +1653,23 @@ def test_collected_entity_rule_review_controls_record_editing(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(
+        app = browser.MapBrowserApp(
             report,
             data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3'),
             save_slot=save_slot,
         )
         async with app.run_test() as pilot:
-            map_item = app.query_one(MapItem)
+            map_item = app.query_one(browser.MapItem)
             await pilot.double_click(map_item)
-            assert isinstance(app.screen, CollectedEntityRulesScreen) is blocks_record
+            assert isinstance(app.screen, browser.CollectedEntityRulesScreen) is blocks_record
             if blocks_record:
                 await pilot.click('#collected-entity-rules-refresh')
                 await pilot.pause()
-                assert isinstance(app.screen, CollectedEntityRulesScreen)
+                assert isinstance(app.screen, browser.CollectedEntityRulesScreen)
                 assert source_load_count == 1
                 assert review_count == 2
             else:
-                assert isinstance(app.screen, RecordEditorScreen)
+                assert isinstance(app.screen, browser.RecordEditorScreen)
                 assert source_load_count == 1
                 assert review_count == 1
             assert sources[0].variant_review_loaders == [app._variant_review_checker] * review_count
@@ -1677,17 +1735,17 @@ def test_refreshing_collected_entity_rules_resumes_record_editing(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(
+        app = browser.MapBrowserApp(
             report,
             data_stores=AppDataStores(tmp_path / '.pist/local-data.sqlite3'),
             save_slot=save_slot,
         )
         async with app.run_test() as pilot:
-            await pilot.double_click(app.query_one(MapItem))
-            assert isinstance(app.screen, CollectedEntityRulesScreen)
+            await pilot.double_click(app.query_one(browser.MapItem))
+            assert isinstance(app.screen, browser.CollectedEntityRulesScreen)
             await pilot.click('#collected-entity-rules-refresh')
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
+            assert isinstance(app.screen, browser.RecordEditorScreen)
             assert source_load_count == 1
             assert review_count == 2
 
@@ -1724,7 +1782,7 @@ def test_record_includes_saved_main_room_count(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(
+        app = browser.MapBrowserApp(
             report,
             data_stores=local_data,
             save_slot=SaveSlot(
@@ -1732,14 +1790,17 @@ def test_record_includes_saved_main_room_count(
             ),
         )
         async with app.run_test() as pilot:
-            await pilot.double_click(app.query_one(MapItem))
+            await pilot.double_click(app.query_one(browser.MapItem))
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
+            assert isinstance(app.screen, browser.RecordEditorScreen)
             await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
     record = local_data.records.load(1)
-    assert record.record_values == {'主表': {'红草莓数': 2, '主房间数': 3}}
+    assert record.model_dump(include={'n_strawberries', 'n_main_rooms'}) == {
+        'n_strawberries': 2,
+        'n_main_rooms': 3,
+    }
 
 
 @pytest.mark.parametrize('trigger', ('shortcut', 'context_menu'))
@@ -1779,9 +1840,9 @@ def test_map_preview_starts_in_preview_mode_without_implicit_save(
     monkeypatch.setattr('pist.ui.maps.browser.app.MapPreview', Preview)
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data)
+        app = browser.MapBrowserApp(report, data_stores=local_data)
         async with app.run_test() as pilot:
-            map_item = app.query_one(MapItem)
+            map_item = app.query_one(browser.MapItem)
             if trigger == 'shortcut':
                 await pilot.click(map_item)
                 await pilot.press('p')
@@ -1830,9 +1891,9 @@ def test_vanilla_route_editor_starts_in_review_mode(
     monkeypatch.setattr('pist.ui.maps.browser.app.MapPreview', Preview)
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data)
+        app = browser.MapBrowserApp(report, data_stores=local_data)
         async with app.run_test() as pilot:
-            await pilot.click(app.query_one(MapItem), button=3)
+            await pilot.click(app.query_one(browser.MapItem), button=3)
             await pilot.click('#map-action-edit-route')
             await started.wait()
             await pilot.pause()
@@ -1891,24 +1952,24 @@ def test_map_selected_in_detail_edits_credit_authors_from_the_record(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(
+        app = browser.MapBrowserApp(
             report,
             data_stores=local_data,
             save_slot=save_slot,
             gamebanana_client=StubGameBananaClient(),
         )
         async with app.run_test() as pilot:
-            await pilot.double_click(app.query_one(MapItem))
+            await pilot.double_click(app.query_one(browser.MapItem))
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
-            await pilot.click(app.screen.query_one(RecordAuthorField))
+            assert isinstance(app.screen, browser.RecordEditorScreen)
+            await pilot.click(app.screen.query_one(browser.RecordAuthorField))
             await pilot.pause()
-            assert isinstance(app.screen, AuthorSelectionScreen)
+            assert isinstance(app.screen, browser.AuthorSelectionScreen)
             await pilot.click('#record-author-0')
             await pilot.pause()
             await pilot.click('#author-select-save')
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
+            assert isinstance(app.screen, browser.RecordEditorScreen)
             await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
@@ -1947,12 +2008,12 @@ def test_collab_map_edits_multiple_dialog_authors_from_the_record(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
+        app = browser.MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
         async with app.run_test() as pilot:
-            await pilot.double_click(app.query_one(MapItem))
-            assert isinstance(app.screen, RecordEditorScreen)
-            await pilot.click(app.screen.query_one(RecordAuthorField))
-            assert isinstance(app.screen, DialogAuthorSelectionScreen)
+            await pilot.double_click(app.query_one(browser.MapItem))
+            assert isinstance(app.screen, browser.RecordEditorScreen)
+            await pilot.click(app.screen.query_one(browser.RecordAuthorField))
+            assert isinstance(app.screen, browser.DialogAuthorSelectionScreen)
             text_area = app.screen.query_one(TextArea)
             text_area.selection = Selection((0, 3), (0, 14))
             app.screen.query_one('#dialog-author-add', Button).press()
@@ -1970,7 +2031,7 @@ def test_collab_map_edits_multiple_dialog_authors_from_the_record(
             await pilot.pause()
             assert app.screen.query_one('#dialog-author-0', Input).value == 'Robert Jones'
             await pilot.click('#dialog-author-save')
-            assert isinstance(app.screen, RecordEditorScreen)
+            assert isinstance(app.screen, browser.RecordEditorScreen)
             await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
@@ -1988,7 +2049,7 @@ def test_record_confirmation_saves_optional_manual_main_record_values() -> None:
             'sid': 'Example/Map',
             'side': 'A',
             'save_slot': 0,
-            'record_values': {'主表': {'红草莓数': 2}},
+            'n_strawberries': 2,
         }
     )
     manual_fields = (
@@ -2005,48 +2066,45 @@ def test_record_confirmation_saves_optional_manual_main_record_values() -> None:
     saved: list[MapRecord] = []
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test() as pilot:
             app.push_screen(
-                RecordEditorScreen(record, manual_fields=manual_fields),
+                browser.RecordEditorScreen(record, manual_fields=manual_fields),
                 lambda result: saved.append(result) if result is not None else None,
             )
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
-            app.screen.query_one('#record-manual-0', Select).value = '高级'
-            app.screen.query_one('#record-manual-1', Select).value = '低'
-            app.screen.query_one('#record-manual-2', Select).value = '专家'
-            app.screen.query_one('#record-manual-3', Select).value = '高'
+            assert isinstance(app.screen, browser.RecordEditorScreen)
+            ids = [f'#{app.screen._manual_field_id(field)}' for field in manual_fields]
+            app.screen.query_one(ids[0], Select).value = '高级'
+            app.screen.query_one(ids[1], Select).value = '低'
+            app.screen.query_one(ids[2], Select).value = '专家'
+            app.screen.query_one(ids[3], Select).value = '高'
             await pilot.pause()
-            app.screen.query_one('#record-manual-4-picker', Button).press()
+            app.screen.query_one(f'{ids[4]}-picker', Button).press()
             await pilot.pause()
-            assert isinstance(app.screen, DatePickerScreen)
+            assert isinstance(app.screen, browser.DatePickerScreen)
             app.screen.query_one('#date-picker-day-1', Button).press()
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
-            app.screen.query_one('#record-manual-4', Input).value = '2026-09-12'
-            app.screen.query_one('#record-manual-5', Select).value = '通关'
-            app.screen.query_one('#record-manual-6', Input).value = '8'
-            app.screen.query_one('#record-manual-7', Input).value = '好图'
+            assert isinstance(app.screen, browser.RecordEditorScreen)
+            app.screen.query_one(ids[4], Input).value = '2026-09-12'
+            app.screen.query_one(ids[5], Select).value = '通关'
+            app.screen.query_one(ids[6], Input).value = '8'
+            app.screen.query_one(ids[7], Input).value = '好图'
             await pilot.click('#record-confirm-save')
 
     asyncio.run(check())
     assert saved == [
         record.model_copy(
             update={
-                'record_values': {
-                    '主表': {
-                        '红草莓数': 2,
-                        '体感难度': '高级',
-                        '难度子阶': '低',
-                        '标注难度': '专家',
-                        '标注难度子阶': '高',
-                        '起始日期': '2026-09-12',
-                        '状态': '通关',
-                        '评分': 8,
-                        '备注': '好图',
-                    }
-                }
+                'n_strawberries': 2,
+                'perceived_difficulty': '高级',
+                'perceived_difficulty_tier': '低',
+                'rated_difficulty': '专家',
+                'rated_difficulty_tier': '高',
+                'started_at': datetime.fromisoformat('2026-09-12').replace(tzinfo=UTC).date(),
+                'status': '通关',
+                'rating': 8,
+                'notes': '好图',
             }
         )
     ]
@@ -2080,10 +2138,10 @@ def test_map_without_record_does_not_open_record_confirmation(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
+        app = browser.MapBrowserApp(report, data_stores=local_data, save_slot=save_slot)
         async with app.run_test() as pilot:
-            await pilot.double_click(app.query_one(MapItem))
-            assert not isinstance(app.screen, RecordEditorScreen)
+            await pilot.double_click(app.query_one(browser.MapItem))
+            assert not isinstance(app.screen, browser.RecordEditorScreen)
 
     asyncio.run(check())
     with pytest.raises(ValueError, match='No saved local record'):
@@ -2102,6 +2160,9 @@ def test_browser_entries_share_settings_behavior(
         store.save(PistSettings(theme='textual-light', dialog_languages=('english',)))
     data_stores = AppDataStores(tmp_path / 'local-data.sqlite3')
     monkeypatch.setattr('pist.ui.maps.browser.app.AppDataStores', lambda: data_stores)
+    monkeypatch.setattr(
+        'pist.ui.maps.browser.app.record_writer_lock', lambda: record_writer_lock(tmp_path)
+    )
     monkeypatch.setattr(CollabLobbyOverrideStore, 'load', lambda _: CollabLobbyOverrides())
 
     def unexpected_default_store() -> SettingsStore:
@@ -2110,7 +2171,7 @@ def test_browser_entries_share_settings_behavior(
     monkeypatch.setattr('pist.ui.maps.browser.app.SettingsStore', unexpected_default_store)
     ran = False
 
-    async def check(app: MapBrowserApp) -> None:
+    async def check(app: browser.MapBrowserApp) -> None:
         nonlocal ran
         ran = True
         async with app.run_test() as pilot:
@@ -2118,9 +2179,9 @@ def test_browser_entries_share_settings_behavior(
             await pilot.press('t')
             assert app.theme == ('textual-dark' if persist else 'textual-light')
 
-    monkeypatch.setattr(MapBrowserApp, 'run_async', check)
+    monkeypatch.setattr(browser.MapBrowserApp, 'run_async', check)
     if entry == 'app':
-        asyncio.run(check(MapBrowserApp(report, settings_store=store)))
+        asyncio.run(check(browser.MapBrowserApp(report, settings_store=store)))
     else:
         asyncio.run(browse_maps(report, settings_store=store))
     assert ran
@@ -2136,7 +2197,7 @@ def test_explicit_settings_override_stored_presentation(tmp_path: Path) -> None:
     report = ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[])
     store = SettingsStore(tmp_path / 'settings.json')
     store.save(PistSettings(theme='textual-light'))
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         report,
         settings=PistSettings(theme='textual-dark'),
         settings_store=store,
@@ -2155,7 +2216,7 @@ def test_theme_shortcut_persists_selection(tmp_path: Path) -> None:
     settings_store = SettingsStore(tmp_path / 'settings.json')
 
     async def check() -> None:
-        app = MapBrowserApp(report, settings_store=settings_store)
+        app = browser.MapBrowserApp(report, settings_store=settings_store)
         async with app.run_test() as pilot:
             await pilot.press('t')
             assert app.theme == 'textual-light'
@@ -2179,7 +2240,7 @@ def test_theme_shortcut_preserves_game_settings(tmp_path: Path) -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, settings_store=settings_store)
+        app = browser.MapBrowserApp(report, settings_store=settings_store)
         async with app.run_test() as pilot:
             await pilot.press('t')
 
@@ -2190,7 +2251,7 @@ def test_theme_shortcut_preserves_game_settings(tmp_path: Path) -> None:
 
 
 def test_escape_quits_the_browser(tmp_path: Path) -> None:
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[]),
         data_stores=AppDataStores(tmp_path / 'local-data.sqlite3'),
     )
@@ -2210,7 +2271,7 @@ def test_page_keys_do_not_switch_save_slots(tmp_path: Path) -> None:
     for number in (0, 1):
         (saves_dir / f'{number}.celeste').write_text('<SaveData />', encoding='utf-8')
     save_slot = SaveSlot(0, {})
-    app = MapBrowserApp(
+    app = browser.MapBrowserApp(
         ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[]),
         data_stores=AppDataStores(tmp_path / 'local-data.sqlite3'),
         save_reader=SaveReader(tmp_path),
@@ -2219,7 +2280,7 @@ def test_page_keys_do_not_switch_save_slots(tmp_path: Path) -> None:
 
     async def check() -> None:
         async with app.run_test() as pilot:
-            app.query_one(f'#{DETAIL_SCROLL_ID}').focus()
+            app.query_one(f'#{browser.DETAIL_SCROLL_ID}').focus()
             await pilot.press('pageup', 'pagedown')
             assert app._save_slot is save_slot
             await pilot.press(']')
@@ -2248,14 +2309,14 @@ def test_campaigns_are_top_level_list_entries() -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
-            campaign_list = app.query_one(CampaignList)
-            items = list(campaign_list.query(CampaignItem))
+            campaign_list = app.query_one(browser.CampaignList)
+            items = list(campaign_list.query(browser.CampaignItem))
             assert len(items) == 1
             assert items[0].campaign is app._campaigns[0]
-            assert isinstance(app.query_one(CollabMapList), CollabMapList)
+            assert isinstance(app.query_one(browser.CollabMapList), browser.CollabMapList)
 
     asyncio.run(check())
 
@@ -2305,20 +2366,20 @@ def test_collab_map_list_orders_maps_and_reuses_cached_icons(
         {('Test/Easy', 0): MapStats(Duration.from_milliseconds(1_000), 1, completed=True)},
     )
 
-    async def map_order(app: MapBrowserApp) -> list[str]:
+    async def map_order(app: browser.MapBrowserApp) -> list[str]:
         async with app.run_test(size=(100, 40)) as pilot:
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
                     break
             assert not collab_list.has_class('is-loading')
-            map_list = collab_list.query_one(MapList)
+            map_list = collab_list.query_one(browser.MapList)
             assert collab_list.size.height > 1
-            return [item.map_info.file_path.as_posix() for item in map_list.query(MapItem)]
+            return [item.map_info.file_path.as_posix() for item in map_list.query(browser.MapItem)]
 
     assert asyncio.run(
-        map_order(MapBrowserApp(report, data_stores=local_data, save_slot=first_slot))
+        map_order(browser.MapBrowserApp(report, data_stores=local_data, save_slot=first_slot))
     ) == [
         'Maps/Test/Hard.bin',
         'Maps/Test/Easy.bin',
@@ -2333,7 +2394,7 @@ def test_collab_map_list_orders_maps_and_reuses_cached_icons(
     )
 
     assert asyncio.run(
-        map_order(MapBrowserApp(report, data_stores=local_data, save_slot=first_slot))
+        map_order(browser.MapBrowserApp(report, data_stores=local_data, save_slot=first_slot))
     ) == [
         'Maps/Test/Hard.bin',
         'Maps/Test/Easy.bin',
@@ -2341,9 +2402,9 @@ def test_collab_map_list_orders_maps_and_reuses_cached_icons(
     ]
 
     async def switched_map_order() -> list[str]:
-        app = MapBrowserApp(report, data_stores=local_data, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, data_stores=local_data, save_slot=first_slot)
         async with app.run_test(size=(100, 40)) as pilot:
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
@@ -2352,7 +2413,7 @@ def test_collab_map_list_orders_maps_and_reuses_cached_icons(
             await app._refresh_save_stats()
             return [
                 item.map_info.file_path.as_posix()
-                for item in collab_list.query_one(MapList).query(MapItem)
+                for item in collab_list.query_one(browser.MapList).query(browser.MapItem)
             ]
 
     assert asyncio.run(switched_map_order()) == [
@@ -2443,31 +2504,31 @@ def test_collab_map_list_uses_the_latest_save_slot_after_loading_race(
     )
     remove_started = asyncio.Event()
     resume_remove = asyncio.Event()
-    original_remove_children = CollabMapList.remove_children
+    original_remove_children = browser.CollabMapList.remove_children
 
-    async def pause_first_remove(self: CollabMapList) -> None:
+    async def pause_first_remove(self: browser.CollabMapList) -> None:
         if not remove_started.is_set():
             remove_started.set()
             await resume_remove.wait()
         await original_remove_children(self)
 
-    monkeypatch.setattr(CollabMapList, 'remove_children', pause_first_remove)
+    monkeypatch.setattr(browser.CollabMapList, 'remove_children', pause_first_remove)
 
     async def check() -> list[str]:
-        app = MapBrowserApp(report, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, save_slot=first_slot)
         async with app.run_test(size=(100, 40)) as pilot:
             await asyncio.wait_for(remove_started.wait(), timeout=1)
             app._save_slot = second_slot
             await app._refresh_save_stats()
             resume_remove.set()
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
                     break
             return [
                 item.map_info.file_path.as_posix()
-                for item in collab_list.query_one(MapList).query(MapItem)
+                for item in collab_list.query_one(browser.MapList).query(browser.MapItem)
             ]
 
     assert asyncio.run(check()) == ['Maps/Test/Easy.bin', 'Maps/Test/Hard.bin']
@@ -2516,21 +2577,21 @@ def test_collab_map_list_keeps_selected_side_and_new_slot_stats_when_reordered(
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report, save_slot=first_slot)
+        app = browser.MapBrowserApp(report, save_slot=first_slot)
         async with app.run_test(size=(100, 40)) as pilot:
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
                     break
-            map_list = collab_list.query_one(MapList)
+            map_list = collab_list.query_one(browser.MapList)
             side_item = next(item for item in map_list.map_items if isinstance(item, SideMapItem))
             map_list.index = map_list.map_items.index(side_item)
             side_item.switch_side(MapSideButton.Clicked(1))
             assert side_item.map.map_info is b_side
             app._save_slot = second_slot
             await app._refresh_save_stats()
-            refreshed_list = collab_list.query_one(MapList)
+            refreshed_list = collab_list.query_one(browser.MapList)
             refreshed_side_item = next(
                 item for item in refreshed_list.map_items if isinstance(item, SideMapItem)
             )
@@ -2565,12 +2626,12 @@ def test_campaign_switch_replaces_the_detail_map_list() -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test(size=(100, 40)) as pilot:
-            campaign_list = app.query_one(CampaignList)
+            campaign_list = app.query_one(browser.CampaignList)
             campaign_list.index = 1
             await pilot.pause()
-            assert [item.map_info for item in app.query(MapItem)] == [maps[0]]
+            assert [item.map_info for item in app.query(browser.MapItem)] == [maps[0]]
 
     asyncio.run(check())
 
@@ -2598,22 +2659,24 @@ def test_campaign_switch_loads_the_new_collab_map_list(tmp_path: Path) -> None:
     )
 
     async def check() -> None:
-        app = MapBrowserApp(report)
+        app = browser.MapBrowserApp(report)
         async with app.run_test() as pilot:
-            campaign_list = app.query_one(CampaignList)
+            campaign_list = app.query_one(browser.CampaignList)
             campaign_list.index = next(
                 i
                 for i, item in enumerate(campaign_list.children)
-                if isinstance(item, CampaignItem)
+                if isinstance(item, browser.CampaignItem)
                 and item.campaign.directory.as_posix() == 'Maps/Test'
             )
             await pilot.pause()
-            collab_list = app.query_one(CollabMapList)
+            collab_list = app.query_one(browser.CollabMapList)
             for _ in range(20):
                 await pilot.pause(0.05)
                 if not collab_list.has_class('is-loading'):
                     break
             assert not collab_list.has_class('is-loading')
-            assert [item.map_info for item in collab_list.query_one(MapList).map_items] == [maps[1]]
+            assert [item.map_info for item in collab_list.query_one(browser.MapList).map_items] == [
+                maps[1]
+            ]
 
     asyncio.run(check())

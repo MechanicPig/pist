@@ -37,31 +37,34 @@ from berries.game.maps import MapInfo
 from berries.game.saves import SaveReader, SaveSlot
 from berries.gamebanana import GameBananaClient, GameBananaLookupError, GameBananaSubmission
 from berries.map_preview.session import MapPreviewError
-from pist import entity_stats, record_entities, routes
+from pist import entity_stats
 from pist.app_data import AppDataStores
-from pist.collab_lobbies import (
+from pist.entities.audit import LOCAL_AUDIT_DB_PATH, EntityAuditStore
+from pist.entity_stats import SelectConflict
+from pist.lobby_overrides import (
     DEFAULT_COLLAB_LOBBY_OVERRIDES,
     SHARED_COLLAB_LOBBIES_WRITABLE,
     CollabLobbyOverrides,
     CollabLobbyOverrideStore,
 )
-from pist.entities.audit import LOCAL_AUDIT_DB_PATH, EntityAuditStore
-from pist.entity_stats import SelectConflict
 from pist.map_preview.server import MapPreview, MapPreviewMode
 from pist.paths import PIST_DIR
-from pist.records import (
-    MapRecord,
-    create_map_record,
-    map_record_progress,
-    merge_saved_record,
-)
-from pist.settings import PistSettings, SettingsStore
-from pist.sheet_report import manual_record_fields
-from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
-from pist.types import RecordValues
+from pist.records import entities as record_entities
+from pist.records.lock import record_writer_lock
+from pist.records.models import MapRecord, create_map_record, map_record_progress
+from pist.routes import models as routes
+from pist.settings import PistSettings, RecordListMaxWidths, SettingsStore
+from pist.smartsheet.client import TencentSmartSheetClient
+from pist.smartsheet.models import InspectionReport
+from pist.smartsheet.report import ManualRecordField, manual_record_fields
+from pist.types import CellValue
+from pist.ui.mouse import DOUBLE_CLICK_COUNT, LEFT_MOUSE_BUTTON, RIGHT_MOUSE_BUTTON
+from pist.ui.records import editor as records
+from pist.ui.records.controller import RecordEditorController
+from pist.ui.records.list import RecordListScreen
 
 from ...tui import RefreshableCssApp
-from . import campaign_list, catalog, collab_list, map_actions, map_list, records
+from . import campaign_list, catalog, collab_list, map_actions, map_list
 from .collab_order import CollabMapOrderController
 
 CAMPAIGN_LIST_ID = 'campaign-list'
@@ -71,9 +74,6 @@ BROWSER_WARNINGS_BUTTON_ID = 'browser-warnings-button'
 DETAIL_ID = 'detail'
 MAP_DETAIL_ID = 'map-detail'
 DETAIL_SCROLL_ID = 'detail-scroll'
-LEFT_MOUSE_BUTTON = 1
-RIGHT_MOUSE_BUTTON = 3
-DOUBLE_CLICK_COUNT = 2
 
 
 def _plain_html(value: str) -> str:
@@ -159,6 +159,7 @@ class MapBrowserApp(RefreshableCssApp[None]):
         ('[', 'previous_save_slot', '上一存档'),
         (']', 'next_save_slot', '下一存档'),
         ('p', 'preview_map', '预览地图'),
+        ('r', 'records', '本地记录'),
         ('t', 'toggle_theme', '切换亮暗'),
     ]
 
@@ -190,18 +191,24 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self.theme = settings.theme
         self._dialog_languages = settings.dialog_languages
         self._settings_store = settings_store
+        self._record_list_max_widths = settings.record_list_max_widths
         self._save_reader = save_reader
         self._save_slot = save_slot
         self._route_reader = route_reader
         self._data_stores = data_stores or AppDataStores()
         self._gamebanana_client = gamebanana_client
-        self._sheet_client = sheet_client
-        self._sheet_source = sheet_source
         self._entity_audit_store = entity_audit_store
         self._collab_lobby_overrides = collab_lobby_overrides
         self._collab_lobby_store = collab_lobby_store
         self._manual_record_fields = (
             () if inspection_report is None else manual_record_fields(inspection_report)
+        )
+        self._record_editor = RecordEditorController(
+            self,
+            self._data_stores.records,
+            client=sheet_client,
+            source=sheet_source,
+            manual_fields=self._manual_record_fields,
         )
         game_dir = Path(report.mods_dir).parent
         vanilla_dialogs = campaigns.load_vanilla_dialogs(game_dir)
@@ -276,6 +283,21 @@ class MapBrowserApp(RefreshableCssApp[None]):
                 else:
                     yield Static(Text('没有可加载的 campaign 地图。'), id=DETAIL_ID)
         yield Footer()
+
+    def action_records(self) -> None:
+        """Browse local records without reading the selected map or save."""
+        self.push_screen(
+            RecordListScreen(
+                self._record_editor,
+                max_widths=self._record_list_max_widths,
+                settings_store=self._settings_store,
+            ),
+            self._record_list_closed,
+        )
+
+    def _record_list_closed(self, widths: RecordListMaxWidths | None) -> None:
+        if widths is not None:
+            self._record_list_max_widths = widths
 
     def _campaign_label(self, camp: campaigns.Campaign) -> Text:
         name = camp.display_name(self._dialogs, self._dialog_languages)
@@ -376,9 +398,9 @@ class MapBrowserApp(RefreshableCssApp[None]):
         self.call_after_refresh(self._start_collab_order_loading)
 
     @on(Button.Pressed, f'#{BROWSER_WARNINGS_BUTTON_ID}')
-    def show_browser_warnings(self) -> None:
+    async def show_browser_warnings(self) -> None:
         """Open the details behind the warning count shown in the campaign header."""
-        self.action_show_messages()
+        await self.action_show_messages()
 
     @property
     def loading_warnings(self) -> tuple[str, ...]:
@@ -729,12 +751,13 @@ class MapBrowserApp(RefreshableCssApp[None]):
             self.notify('原版地图不支持创建本地初见记录。', severity='warning')
             return
         assert self._save_slot is not None
+        save_slot = self._save_slot
         record_source = self._record_source(level, side)
         if record_source is None:
             return
         source, route = record_source
         while True:
-            review, record_values, field_hints = self._record_values(source, route)
+            review, record_fields, field_hints = self._record_fields(source, route)
             collected_issues = review.collected_issues
             blocking_issues = _blocking_collected_entity_issues(collected_issues)
             if not blocking_issues:
@@ -775,30 +798,33 @@ class MapBrowserApp(RefreshableCssApp[None]):
             gamebanana=gamebanana,
             languages=self._dialog_languages,
             dialogs=self._dialogs,
-            record_values=record_values,
+            statistics=record_fields,
         )
-        existing_record_id = self._data_stores.records.existing_id(record)
-        if existing_record_id is not None:
-            record = merge_saved_record(record, self._data_stores.records.load(existing_record_id))
-        self.push_screen(
-            records.RecordEditorScreen(
+
+        def make_editor(
+            record: MapRecord, fields: tuple[ManualRecordField, ...]
+        ) -> records.RecordEditorScreen:
+            return records.RecordEditorScreen(
                 record,
-                manual_fields=self._manual_record_fields,
-                reference=self._record_reference(map_info, gamebanana),
+                manual_fields=fields,
+                reference=self._record_ref(map_info, gamebanana),
                 author_source=author_source,
                 collab_tags=self._collab_tags(level),
                 field_hints=field_hints,
                 edit_route=lambda: self._start_route_editor(level, side),
                 progress=map_record_progress(
-                    self._save_slot.get_map_stats(level, side),
+                    save_slot.get_map_stats(level, side),
                     review.stats,
-                    is_in_progress=self._save_slot.is_in_progress(level, side),
+                    is_in_progress=save_slot.is_in_progress(level, side),
                 ),
-            ),
-            self._save_record,
-        )
+            )
 
-    def _record_reference(
+        try:
+            await self._record_editor.edit(record, make_editor)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            self.notify(f'编辑记录失败：{error}', severity='error')
+
+    def _record_ref(
         self, map_info: MapInfo, gamebanana: GameBananaSubmission | None
     ) -> tuple[str, str] | None:
         """Return the human-maintained reference text relevant to one record."""
@@ -836,15 +862,29 @@ class MapBrowserApp(RefreshableCssApp[None]):
             return None
         return source, route
 
-    def _record_values(
+    def _record_fields(
         self, source: record_entities.MapEntityRecordSource, route: routes.MapRoute | None
-    ) -> tuple[record_entities.MapEntityRecordReview, RecordValues, dict[str, str]]:
-        """Summarize a retained map with the current rules and saved route corrections."""
+    ) -> tuple[record_entities.MapEntityRecordReview, dict[str, CellValue], dict[str, str]]:
+        """Summarize current rules and route corrections, warning about duplicate entity IDs."""
         review = source.eval_rules(variant_review_loader=self._variant_review_checker)
-        record_values = review.stats.record_values
-        if route is not None:
-            record_values.setdefault('主表', {})['主房间数'] = route.room_count
-        return review, record_values, _select_conflict_hints(review.stats.select_conflicts)
+        if review.stats.duplicate_instance_ids:
+            ids = '、'.join(
+                str(identity)
+                for identity in sorted(
+                    review.stats.duplicate_instance_ids,
+                    key=lambda identity: (identity.room, identity.entity_id),
+                )
+            )
+            self.notify(
+                f'地图 {source.map_data.package} 存在重复实体 ID：{ids}；'
+                '相关收集情况无法自动确认。',
+                severity='warning',
+                markup=False,
+            )
+        record_fields: dict[str, CellValue] = dict(review.stats.record_fields)
+        if route is not None and route.room_count > 0:
+            record_fields['n_main_rooms'] = route.room_count
+        return review, record_fields, _select_conflict_hints(review.stats.select_conflicts)
 
     def _variant_review_checker(
         self, entity_names: frozenset[str]
@@ -872,38 +912,6 @@ class MapBrowserApp(RefreshableCssApp[None]):
             self.notify(
                 f'当前地图未找到已收集实体（可能是地图版本变化）：{ids}', severity='warning'
             )
-
-    def _save_record(self, record: MapRecord | None) -> None:
-        if record is None:
-            return
-        existing_record_id = self._data_stores.records.existing_id(record)
-        record_id = self._data_stores.records.save(record)
-        action = '已更新' if existing_record_id is not None else '已保存'
-        self.notify(f'{action}本地记录：{record_id}')
-        if self._sheet_client is not None and self._sheet_source is not None:
-            self.push_screen(
-                records.RecordSyncModeScreen(),
-                lambda update: self._choose_record_sync(record, update),
-            )
-
-    def _choose_record_sync(self, record: MapRecord, update: bool | None) -> None:
-        """Start an explicit table write after the user selects its safe mode."""
-        if update is not None:
-            self.run_worker(self._sync_record(record, update), exclusive=False)
-
-    async def _sync_record(self, record: MapRecord, update: bool) -> None:
-        """Synchronize a saved record to the configured Smart Sheet."""
-        assert self._sheet_client is not None
-        assert self._sheet_source is not None
-        try:
-            remote_record_id = await self._sheet_client.sync_record(
-                extract_file_id(self._sheet_source), record, update=update
-            )
-        except (OSError, RuntimeError, TypeError, ValueError) as error:
-            self.notify(f'提交表格失败：{error}', severity='error')
-            return
-        action = '更新' if update else '新增'
-        self.notify(f'已{action}表格记录：{remote_record_id}')
 
     async def action_preview_map(self) -> None:
         """Open map preview for the currently highlighted map item."""
@@ -1044,18 +1052,21 @@ async def browse_maps(
     sheet_client: TencentSmartSheetClient | None = None,
     sheet_source: str | None = None,
 ) -> None:
-    """Run the map browser, loading and saving settings only with a supplied store."""
-    collab_lobby_store = CollabLobbyOverrideStore(can_write_shared=SHARED_COLLAB_LOBBIES_WRITABLE)
-    await MapBrowserApp(
-        report,
-        settings_store=settings_store,
-        save_reader=save_reader,
-        save_slot=save_slot,
-        route_reader=route_reader,
-        gamebanana_client=GameBananaClient(),
-        inspection_report=inspection_report,
-        sheet_client=sheet_client,
-        sheet_source=sheet_source,
-        collab_lobby_overrides=collab_lobby_store.load(),
-        collab_lobby_store=collab_lobby_store,
-    ).run_async()
+    """Run one exclusive record-writing browser; settings require a supplied store."""
+    with record_writer_lock():
+        collab_lobby_store = CollabLobbyOverrideStore(
+            can_write_shared=SHARED_COLLAB_LOBBIES_WRITABLE
+        )
+        await MapBrowserApp(
+            report,
+            settings_store=settings_store,
+            save_reader=save_reader,
+            save_slot=save_slot,
+            route_reader=route_reader,
+            gamebanana_client=GameBananaClient(),
+            inspection_report=inspection_report,
+            sheet_client=sheet_client,
+            sheet_source=sheet_source,
+            collab_lobby_overrides=collab_lobby_store.load(),
+            collab_lobby_store=collab_lobby_store,
+        ).run_async()

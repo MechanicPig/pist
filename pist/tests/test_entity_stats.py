@@ -14,6 +14,9 @@ from berries.entities.rules import (
     load_entity_rules,
 )
 from berries.game.binmap import BinElement, BinMap
+from berries.game.duration import Duration
+from berries.game.saves import MapStats
+from berries.map_entity_id import MapEntityID
 from pist.entity_stats import (
     EntityStatAggregation,
     EntityStatRule,
@@ -22,9 +25,95 @@ from pist.entity_stats import (
     load_entity_stat_rules,
     map_entity_stats,
 )
+from pist.records.models import MapRecordProgress, map_record_progress
 
 SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
 STAT_RULES = load_entity_stat_rules(SHARED_RULES)
+
+
+@pytest.mark.parametrize(
+    ('other_entities', 'all_collected'),
+    (
+        ((BinElement('strawberry', {'id': 1, 'moon': True}, ()),), False),
+        ((BinElement('goldenBerry', {'id': 1}, ()),), False),
+        ((BinElement('unknownEntity', {'id': 1}, ()),), False),
+        ((BinElement('cassette', {'id': 1}, ()),), False),
+        ((BinElement('strawberry', {'id': 1}, ()),), False),
+        ((BinElement('strawberry', {'id': 2, 'moon': True}, ()),), True),
+        ((BinElement('strawberry', {'id': 2}, ()),), True),
+        (
+            (
+                BinElement('unknownEntity', {'id': 99}, ()),
+                BinElement('unknownEntity', {'id': 99}, ()),
+            ),
+            True,
+        ),
+    ),
+)
+def test_completion_rejects_actual_instance_identity_collisions(
+    other_entities: tuple[BinElement, ...], all_collected: bool
+) -> None:
+    entities = BinElement(
+        'entities', {}, (BinElement('strawberry', {'id': 1}, ()), *other_entities)
+    )
+    room = BinElement('level', {'name': 'room'}, (entities,))
+    map_data = BinMap('Test', BinElement('Map', {}, (BinElement('levels', {}, (room,)),)))
+    stats = map_entity_stats(map_data, entity_rules=SHARED_RULES, stat_rules=STAT_RULES)
+    save = MapStats(
+        Duration.from_milliseconds(1),
+        0,
+        single_run_completed=True,
+        cassette_collected=True,
+        collected_strawberries=frozenset({MapEntityID('room', 1), MapEntityID('room', 2)}),
+    )
+    expected = (
+        MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+        if all_collected
+        else MapRecordProgress.COMPLETED_MISSING_COLLECTIBLES
+    )
+    assert map_record_progress(save, stats, is_in_progress=False) is expected
+
+
+def test_one_instance_projected_into_multiple_statistics_is_not_a_collision() -> None:
+    entities = BinElement('entities', {}, (BinElement('strawberry', {'id': 1}, ()),))
+    room = BinElement('level', {'name': 'room'}, (entities,))
+    map_data = BinMap('Test', BinElement('Map', {}, (BinElement('levels', {}, (room,)),)))
+    rules = EntityStatRules(
+        stats={
+            **STAT_RULES.stats,
+            'another_strawberry': EntityStatRule(
+                kind='strawberry',
+                aggregation=EntityStatAggregation.COUNT,
+                table='test',
+                field='another_count',
+            ),
+        }
+    )
+    stats = map_entity_stats(map_data, entity_rules=SHARED_RULES, stat_rules=rules)
+    collected = frozenset({MapEntityID('room', 1)})
+    assert stats.count('strawberry') == stats.count('another_strawberry') == 1
+    assert stats.all_instances_collected('strawberry', collected)
+    assert stats.all_instances_collected('another_strawberry', collected)
+    save = MapStats(
+        Duration.from_milliseconds(1),
+        0,
+        single_run_completed=True,
+        collected_strawberries=collected,
+    )
+    assert (
+        map_record_progress(save, stats, is_in_progress=False)
+        is MapRecordProgress.COMPLETED_ALL_COLLECTIBLES
+    )
+
+
+def test_same_editor_id_in_different_rooms_is_not_a_collision() -> None:
+    entities = BinElement('entities', {}, (BinElement('strawberry', {'id': 1}, ()),))
+    rooms = tuple(BinElement('level', {'name': name}, (entities,)) for name in ('first', 'second'))
+    map_data = BinMap('Test', BinElement('Map', {}, (BinElement('levels', {}, rooms),)))
+    stats = map_entity_stats(map_data, entity_rules=SHARED_RULES, stat_rules=STAT_RULES)
+    collected = frozenset({MapEntityID('first', 1), MapEntityID('second', 1)})
+    assert stats.count('strawberry') == 2
+    assert stats.all_instances_collected('strawberry', collected)
 
 
 def test_entity_record_values_include_absent_count_and_existence_kinds() -> None:
@@ -172,6 +261,10 @@ def test_map_entities_classifies_configured_entities_with_sources() -> None:
 
     assert stats.count('strawberry') == 1
     assert stats.count('moonberry') == 1
+    assert stats.instance_ids == {
+        'strawberry': frozenset({MapEntityID('first_room', 1)}),
+        'moonberry': frozenset({MapEntityID('first_room', 2)}),
+    }
     assert [entity.entity_id for entity in entities if entity.kind == 'goldenberry'] == [3]
     assert [entity.room for entity in entities if entity.kind == 'silverberry'] == ['first_room']
     assert stats.exists('cassette')

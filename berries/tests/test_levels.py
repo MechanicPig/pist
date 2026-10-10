@@ -180,7 +180,7 @@ def test_journal_references_preserve_source_order_and_report_invalid_triggers(
         BinElement('CollabUtils2/JournalTrigger', {}, ()),
     )
     monkeypatch.setattr(
-        'berries.game.collab.binmap.parse_map_bin',
+        'berries.game.map_data.binmap.parse_map_bin',
         lambda *_args, **_kwargs: BinMap('Example', BinElement('Map', {}, triggers)),
     )
 
@@ -205,5 +205,5 @@ def test_journal_references_normalize_invalid_content_source(tmp_path: Path) -> 
     )
     loaded_map = Map(MapInfo(file_path=ContentPath('Maps/Example/0-Lobbies/1-Beginner.bin')), mod)
 
-    with pytest.raises(ValueError, match='Invalid content source for lobby map'):
+    with pytest.raises(ValueError, match='Invalid content source for map'):
         collab.journal_references(loaded_map)

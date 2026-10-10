@@ -90,7 +90,7 @@ def test_campaigns_follow_required_dependency_content_order() -> None:
     assert catalog.mod_for(catalog.overrides[0].replacement) is delayed
 
 
-def test_campaigns_omit_packages_with_unsatisfied_required_dependencies() -> None:
+def test_campaigns_omit_pkgs_with_unsatisfied_required_dependencies() -> None:
     unavailable = make_installed_mod(
         source='zip',
         filename='Unavailable.zip',
@@ -186,7 +186,7 @@ def test_campaigns_use_globally_merged_dialog_entries_for_active_maps() -> None:
     assert catalog.campaigns[0].localized_names(catalog.dialogs) == {'en': 'Prefixed campaign'}
 
 
-def test_campaigns_ignore_dialogs_from_unloaded_packages() -> None:
+def test_campaigns_ignore_dialogs_from_unloaded_pkgs() -> None:
     map_info = MapInfo(file_path=ContentPath('Maps/MapModifier/Example.bin'))
     map_mod = make_installed_mod(
         source='zip',
@@ -440,7 +440,7 @@ def test_campaigns_sort_combined_hidden_map_collections(tmp_path: Path) -> None:
     ]
 
 
-def test_campaigns_merge_active_maps_from_multiple_packages() -> None:
+def test_campaigns_merge_active_maps_from_multiple_pkgs() -> None:
     first = make_installed_mod(
         source='zip',
         filename='First.zip',
@@ -468,7 +468,7 @@ def test_campaigns_merge_active_maps_from_multiple_packages() -> None:
     ]
 
 
-def test_a_later_manifest_entry_can_activate_its_physical_package() -> None:
+def test_a_later_manifest_entry_can_activate_its_physical_pkg() -> None:
     bundle = ZipMod(
         filename='Bundle.zip',
         path=Path('Bundle.zip'),

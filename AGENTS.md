@@ -9,7 +9,7 @@ Pist 用于扫描本地 Celeste 与已启用 Mod，辅助记录地图初见数�
 ## 工程约束
 
 - 使用 Python 3.14 及以上版本；依赖、虚拟环境和锁文件统一由 `uv` 管理。
-- 公共包 Berries 位于 `berries/src/berries/`，个人应用 Pist 位于 `pist/src/pist/`，两包测试分别位于 `berries/tests/` 与 `pist/tests/`，架构验证位于 `tests/test_arch.py`，共享测试工厂位于 `tests/test_support/`，扫描测试合成数据位于 `berries/tests/data/`；公共共享数据位于 `berries/src/berries/data/`，应用数据位于 `pist/src/pist/data/` 与 `pist/src/pist/app_resources/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
+- 公共包 Berries 位于 `berries/src/berries/`，个人应用 Pist 位于 `pist/src/pist/`，两包测试分别位于 `berries/tests/` 与 `pist/tests/`，架构验证位于 `tests/test_arch.py`，共享测试工厂位于 `tests/test_support/`，扫描测试合成数据位于 `berries/tests/data/`；公共共享数据位于 `berries/src/berries/data/`，活动应用数据统一位于 `pist/src/pist/data/`，归档资源随所属模块放入 `pist/src/pist/archive/`，用户可复用的技能位于 `skills/`，设计与分析文档位于 `docs/`。
 - Pist 运行时本地数据位于名为 `.pist` 的目录：源码工作区使用仓库根目录，安装包使用 `platformdirs` 选择的平台用户数据目录；`PIST_DATA_DIR` 可覆盖其完整路径。Berries 单独安装时使用自己的平台用户数据目录和 `BERRIES_DATA_DIR`，在本仓库源码 workspace 中则与 Pist 共用根目录 `.pist/`。开发用检查报告、临时脚本、参考仓库及构建产物仍放在仓库内被忽略的 `.pist/`；其中 `local-data.sqlite3`、扫描报告和构建产物不得手工修改。
 - 仅面向内部开发的本地数据结构变更时，先确认没有进程占用对应的 `.pist/*.sqlite3`，再直接迁移当前数据库；不要在源码中保留一次性迁移或旧字段兼容逻辑。
 - 变更 SQLite 的表、字段或其语义前，先向用户列出 schema diff 与当前本地数据迁移方案供审查；获确认后再实施，并删除旧 schema，不保留运行时兼容层。
@@ -40,7 +40,7 @@ uv run --package pist pist --help
 # 完整验证
 uv run --all-packages pytest --basetemp .pist/pytest
 uv run --all-packages ruff check berries pist tests examples
-uv run --all-packages ruff format --check berries pist tests examples
+uv run --all-packages ruff format berries pist tests examples
 uv run --all-packages pyright
 
 # 单独验证公共包（包含根目录开发依赖）
@@ -63,7 +63,7 @@ uv run --all-packages pytest --basetemp .pist/pytest
 - 修改领域逻辑、解析、持久化或规则生成后，运行对应测试；影响面不明确或跨层时运行完整测试、Ruff 与 Pyright。
 - 修改 Textual UI 或 TCSS 后，至少运行相应 UI 测试；涉及布局、焦点或浏览器预览时还应人工验证关键交互。
 - Textual 的静态样式统一放在 `pist/src/pist/ui/styles/*.tcss`，通过应用的 `CSS_PATH` 加载；不要在 Python 类中定义内联 `CSS`。地图预览的浏览器样式保留在其 `static/*.css` 中。
-- 修改 CLI 参数、命令语义或用户可见工作流后，同步更新 `README.md`；若改变了技能涵盖的工作流，也同步更新对应 `skills/*/SKILL.md`。
+- 修改 `README.md` 前须获得用户明确允许；主 README 是项目门面，保留必要的功能介绍与上手步骤，不堆叠实现、测试或交互细节。修改 CLI 参数、命令语义或用户可见工作流后，若需更新 README，先向用户说明并请求允许；若改变了技能涵盖的工作流，也同步更新对应 `skills/*/SKILL.md`。
 - 每次新增一项完整能力后，主动检查它是否让现有模块混入新的稳定职责、让 `__init__.py` 承担实现细节，或使浏览器协议的两端失配；满足任一情况时，应在同一任务中拆分，或在交付时说明暂不拆分的原因与后续边界。
 - 不手改由 `uv`、测试、构建、扫描命令或 TUI 生成的文件。共享规则和模板数据是版本控制下的源数据，修改时应通过审查流程或配套测试验证。
 - 内部开发阶段的本地数据路径或 schema 变更应直接迁移现有开发数据，并删除旧实现；除非用户明确要求兼容，不保留旧路径探测、双读或长期回退分支。

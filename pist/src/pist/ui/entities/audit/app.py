@@ -26,6 +26,7 @@ from berries.game.content import ContentPath
 from berries.game.saves import MapProgress, SaveReader
 from berries.map_preview import MapPreview
 from pist.entities import audit as backend
+from pist.entities.audit import kind_changes
 from pist.entities.audit.inference import rule_candidates_for_detail
 
 from ...tui import RefreshableCssApp
@@ -603,8 +604,9 @@ class EntityAuditApp(RefreshableCssApp[None]):
                 )
             )
             if previous_name is not None and previous_name != result.name:
-                self._kind_store.rename_kind(previous_name, result.name, rules)
-                self._store.rename_kind(previous_name, result.name)
+                kind_changes.change_kind(
+                    self._kind_store, self._store, previous_name, result.name, rules
+                )
                 self._kind_values = {
                     control_id: result.name if value == previous_name else value
                     for control_id, value in self._kind_values.items()
@@ -612,7 +614,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
             else:
                 self._kind_store.save(rules)
             self._rules = rules
-        except ValueError as error:
+        except (OSError, RuntimeError, ValueError) as error:
             self.notify(str(error), severity='warning', markup=False)
             return None
         if self._selected_entity is not None:
@@ -635,14 +637,13 @@ class EntityAuditApp(RefreshableCssApp[None]):
             if fallback is None:
                 raise ValueError(f'Cannot delete root entity kind: {kind!r}')
             rules = self._rules.with_deleted_kind(kind)
-            self._kind_store.delete_kind(kind, fallback, rules)
-            self._store.rename_kind(kind, fallback)
+            kind_changes.change_kind(self._kind_store, self._store, kind, fallback, rules)
             self._kind_values = {
                 control_id: fallback if value == kind else value
                 for control_id, value in self._kind_values.items()
             }
             self._rules = rules
-        except ValueError as error:
+        except (OSError, RuntimeError, ValueError) as error:
             self.notify(str(error), severity='warning', markup=False)
             return None
         if self._selected_entity is not None:

@@ -1,12 +1,15 @@
-"""Record editing and record-specific dialogs for the map browser."""
+"""Shared record editing and supporting dialogs."""
 
+import csv
 from calendar import monthrange
 from collections.abc import Callable, Mapping
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from enum import StrEnum
+from io import StringIO
 from types import MappingProxyType
 from typing import ClassVar
 
+from pydantic import ValidationError
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -19,18 +22,48 @@ from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 from berries.entities.classification import CollectedEntityRuleIssue, CollectedEntityRuleIssueStatus
 from berries.game.binmap import AttrValue
 from berries.gamebanana import GameBananaSubmission
-from pist.records import MapRecord, MapRecordProgress
-from pist.sheet_report import ManualRecordField
+from pist.records.fields import RECORD_ATTRIBUTES
+from pist.records.models import MapRecord, MapRecordProgress
+from pist.smartsheet.fields import load_sheet_fields
+from pist.smartsheet.models import FieldType
+from pist.smartsheet.report import ManualRecordField
 from pist.types import CellValue
+from pist.ui.mouse import DOUBLE_CLICK_COUNT, LEFT_MOUSE_BUTTON
 
-LEFT_MOUSE_BUTTON = 1
-DOUBLE_CLICK_COUNT = 2
 type AuthorSource = GameBananaSubmission | str | None
 
-RECORD_DIFFICULTY_ROWS = (
-    ('体感难度', '难度子阶'),
-    ('标注难度', '标注难度子阶'),
+RECORD_FIELD_LABELS = {
+    'Mod元数据名': 'Mod 元数据名',
+    'Mod名': 'Mod 名',
+    '标注难度子阶': '难度子阶',
+    'SL使用': 'SL 使用',
+}
+
+RECORD_FIELD_ORDER = (
+    'Mod元数据名',
+    'Mod名',
+    '地图名',
+    '作者',
+    '用时',
+    '死亡数',
+    '红草莓数',
+    '月莓数',
+    '磁带',
+    '水晶之心',
+    '主房间数',
+    '状态',
+    '体感难度',
+    '难度子阶',
+    '标注难度',
+    '标注难度子阶',
+    '起始日期',
+    '结束日期',
+    'SL使用',
+    '评分',
+    '标签',
+    '备注',
 )
+
 COLLECTED_ENTITY_ISSUE_REASONS = MappingProxyType(
     {
         CollectedEntityRuleIssueStatus.UNMATCHED: '尚无匹配规则',
@@ -38,6 +71,13 @@ COLLECTED_ENTITY_ISSUE_REASONS = MappingProxyType(
         CollectedEntityRuleIssueStatus.UNREVIEWED_VARIANT: '出现尚未审查的属性变体',
     }
 )
+
+
+def _tags_text(tags: tuple[str, ...]) -> str:
+    """Represent tags on one editable line, quoting commas inside individual tags."""
+    output = StringIO()
+    csv.writer(output, lineterminator='\n').writerow(tags)
+    return output.getvalue().removesuffix('\n')
 
 
 def _reference_summary(title: str, content: str, *, limit: int = 120) -> str:
@@ -59,12 +99,21 @@ def _entity_meta_summary(meta: Mapping[str, AttrValue] | None) -> str:
     return '' if not meta else f'\n地图元数据：{_entity_attrs_summary(meta)}'
 
 
+class RecordSIDInput(Input):
+    """Display a read-only SID with cursor navigation and selection for copying."""
+
+    def replace(self, text: str, start: int, end: int) -> None:
+        """Keep the SID unchanged when typing, deleting, cutting or pasting."""
+
+
 class DatePickerScreen(ModalScreen[str | None]):
     """Choose one optional ISO date from a compact month calendar."""
 
+    CSS_PATH = '../styles/record_editor.tcss'
+
     def __init__(self, selected: date | None = None) -> None:
         super().__init__()
-        selected = selected or datetime.now(tz=UTC).date()
+        selected = selected or datetime.now(UTC).astimezone().date()
         self._year = selected.year
         self._month = selected.month
 
@@ -108,7 +157,7 @@ class DatePickerScreen(ModalScreen[str | None]):
             )
 
 
-class RecordReferenceSummary(Static):
+class RecordRefSummary(Static):
     """Compact supplemental record information that opens in full on double-click."""
 
     class Opened(Message):
@@ -151,8 +200,10 @@ class RecordReferenceSummary(Static):
             self.post_message(self.Opened(self._title, self._content))
 
 
-class RecordReferenceScreen(ModalScreen[None]):
+class RecordRefScreen(ModalScreen[None]):
     """Show the complete GameBanana introduction or collab tag text."""
+
+    CSS_PATH = '../styles/record_editor.tcss'
 
     BINDINGS: ClassVar = [('escape', 'dismiss', '关闭')]
 
@@ -162,14 +213,14 @@ class RecordReferenceScreen(ModalScreen[None]):
         self._content = content
 
     def compose(self) -> ComposeResult:
-        with Vertical(id='record-reference-dialog'):
-            yield Static(self._title, classes='record-reference-title')
-            with VerticalScroll(id='record-reference-content'):
+        with Vertical(id='record-ref-dialog'):
+            yield Static(self._title, classes='record-ref-title')
+            with VerticalScroll(id='record-ref-content'):
                 yield Static(self._content)
-            with Horizontal(id='record-reference-actions'):
-                yield Button('关闭', id='record-reference-close', variant='primary')
+            with Horizontal(id='record-ref-actions'):
+                yield Button('关闭', id='record-ref-close', variant='primary')
 
-    @on(Button.Pressed, '#record-reference-close')
+    @on(Button.Pressed, '#record-ref-close')
     def close(self) -> None:
         self.dismiss()
 
@@ -184,13 +235,15 @@ class CollectedEntityRulesResult(StrEnum):
 class CollectedEntityRulesScreen(ModalScreen[CollectedEntityRulesResult]):
     """Explain why a record cannot proceed until collected entities have rules."""
 
+    CSS_PATH = '../styles/record_editor.tcss'
+
     def __init__(self, issues: tuple[CollectedEntityRuleIssue, ...]) -> None:
         super().__init__()
         self._issues = issues
 
     def compose(self) -> ComposeResult:
         with Vertical(id='collected-entity-rules'):
-            yield Static('已收集实体需要补充规则', classes='record-reference-title')
+            yield Static('已收集实体需要补充规则', classes='record-ref-title')
             yield Static('请在实体审计中确认下列实体的类别或排除条件，再点击“刷新规则”重新检查。')
             with VerticalScroll(id='collected-entity-rules-content'):
                 for issue in self._issues:
@@ -247,6 +300,8 @@ class RecordRouteField(Static):
 class RecordEditorScreen(ModalScreen[MapRecord | None]):
     """Edit one local record before writing it to local storage."""
 
+    CSS_PATH = '../styles/record_editor.tcss'
+
     BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
 
     def __init__(
@@ -263,7 +318,12 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
     ) -> None:
         super().__init__()
         self._record = record
-        self._manual_fields = manual_fields
+        fields = {
+            spec.title: ManualRecordField(spec.title, spec.type)
+            for spec in load_sheet_fields().fields
+        }
+        fields.update((field.title, field) for field in manual_fields)
+        self._manual_fields = tuple(fields[title] for title in RECORD_FIELD_ORDER)
         self._reference = reference
         self._author_source = author_source
         self._collab_tags = collab_tags
@@ -276,11 +336,11 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             with VerticalScroll(id='record-confirm-content'):
                 if self._reference is not None:
                     title, content = self._reference
-                    yield RecordReferenceSummary(
+                    yield RecordRefSummary(
                         title,
                         content,
-                        id='record-reference-summary',
-                        classes='record-reference-summary',
+                        id='record-ref-summary',
+                        classes='record-ref-summary',
                     )
                 with Grid(id='record-fields'):
                     yield from self._record_field_widgets()
@@ -288,10 +348,20 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
                 yield Button('取消', id='record-confirm-cancel')
                 yield Button('保存', id='record-confirm-save', variant='primary')
 
-    @on(RecordReferenceSummary.Opened)
-    def open_record_reference(self, event: RecordReferenceSummary.Opened) -> None:
+    def on_mount(self) -> None:
+        self._update_field_layout()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_field_layout()
+
+    def _update_field_layout(self) -> None:
+        for grid in self.query('#record-fields'):
+            grid.set_class(self.size.width < 120, 'record-fields-narrow')
+
+    @on(RecordRefSummary.Opened)
+    def open_record_ref(self, event: RecordRefSummary.Opened) -> None:
         """Open the complete supplemental reference without leaving the record."""
-        self.app.push_screen(RecordReferenceScreen(event.title, event.content))
+        self.app.push_screen(RecordRefScreen(event.title, event.content))
 
     @on(RecordAuthorField.Clicked)
     def edit_authors(self) -> None:
@@ -317,6 +387,9 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         if authors is None:
             return
         self._record = self._record.model_copy(update={'authors': authors})
+        field = self._manual_field('作者')
+        assert field is not None
+        self.query_one(f'#{self._manual_field_id(field)}', TextArea).load_text('\n'.join(authors))
         author_field = self.query_one(RecordAuthorField)
         author_field.update('、'.join(authors) or '单击选择作者')
         if authors:
@@ -325,60 +398,79 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             author_field.add_class('record-author-placeholder')
 
     def _record_field_widgets(self) -> ComposeResult:
-        """Render generated data and editable table fields in the requested row order."""
-        yield from self._pair(
-            'Mod 名', self._record.mod_name, 'Mod 元数据名', self._record.mod_metadata_name
-        )
-        yield self._label('作者')
-        if self._author_source is None:
-            yield Static('、'.join(self._record.authors))
-        else:
-            author_field = RecordAuthorField('、'.join(self._record.authors) or '单击选择作者')
-            if not self._record.authors:
-                author_field.add_class('record-author-placeholder')
-            yield author_field
+        """Group map information, experience data and personal assessments for editing."""
+        yield Static('地图信息', classes='record-section-title')
+        yield from self._manual_field_widgets(('Mod名', 'Mod元数据名', '地图名', '作者'))
+        yield self._label('SID')
+        yield RecordSIDInput(self._record.sid or '', id='record-sid', compact=True)
+        yield self._label('合集标签')
+        yield self._field_value('合集标签参考', self._collab_tags)
         yield self._label('更新时间')
         yield self._updated_at_control()
-        yield from self._pair('地图', self._record.map_name, 'SID', self._record.sid)
+        yield self._label('Mod 链接')
+        yield Input(self._record.mod_url or '', id='record-mod-url', compact=True)
+        if self._author_source is not None:
+            yield self._label('作者来源')
+            yield RecordAuthorField('单击选择作者')
+            yield Static('', classes='record-field-spacer')
+            yield Static('', classes='record-field-spacer')
+
+        yield Static('初见记录', classes='record-section-title')
         yield from self._pair(
-            '存档槽',
+            '存档编号',
             self._record.save_slot,
-            '通关状态' if self._progress is not None else '已通关',
-            self._progress.label if self._progress is not None else self._record.completed,
+            '存档通关参考',
+            self._progress.label if self._progress else self._record.completed,
         )
-        yield from self._pair('用时', self._record.time_played, '死亡', self._record.deaths)
-        yield self._label('主房间数')
-        room_count = self._table_value('主房间数')
-        if self._edit_route is None:
-            yield Static(self._display_value(room_count))
-        else:
-            route_label = '单击编辑路线'
-            if room_count is not None:
-                route_label = f'{room_count}（单击编辑路线）'
-            route_field = RecordRouteField(route_label)
-            if room_count is None:
-                route_field.add_class('record-route-placeholder')
-            yield route_field
-        yield self._label('合集标签')
-        yield Static(self._display_value(self._collab_tags))
-        yield from self._pair(
-            '红草莓数', self._table_value('红草莓数'), '月莓数', self._table_value('月莓数')
+        yield from self._manual_field_widgets(
+            (
+                '起始日期',
+                '结束日期',
+                '用时',
+                '死亡数',
+                '红草莓数',
+                '月莓数',
+                '磁带',
+                '水晶之心',
+                '主房间数',
+                '状态',
+            )
         )
-        yield from self._pair(
-            '磁带', self._table_value('磁带'), '水晶之心', self._table_value('水晶之心')
+        if self._edit_route is not None:
+            yield self._label('路线')
+            yield RecordRouteField('单击编辑路线')
+            yield Static('', classes='record-field-spacer')
+            yield Static('', classes='record-field-spacer')
+        yield from self._manual_field_widgets(('SL使用',))
+        yield self._label('视频链接')
+        yield Input(self._record.video_url or '', id='record-video-url', compact=True)
+
+        yield Static('评价与备注', classes='record-section-title')
+        yield from self._manual_field_widgets(
+            (
+                '体感难度',
+                '难度子阶',
+                '标注难度',
+                '标注难度子阶',
+                '评分',
+                '标签',
+            )
         )
-        for titles in RECORD_DIFFICULTY_ROWS:
-            yield from self._manual_pair(*titles)
-        yield from self._manual_pair('起始日期', '结束日期')
-        yield from self._manual_pair('状态', 'SL使用')
-        rating = self._manual_field('评分')
-        if rating is not None:
-            yield self._label('评分')
-            yield self._manual_control(rating, classes='record-wide-control')
-        note = self._manual_field('备注')
-        if note is not None:
-            yield self._label('备注')
-            yield self._manual_control(note, classes='record-note-control')
+        yield from self._manual_field_widgets(('备注',))
+
+    def _manual_field_widgets(self, titles: tuple[str, ...]) -> ComposeResult:
+        """Render editable fields with their validation hints in the given order."""
+        for title in titles:
+            field = self._manual_field(title)
+            assert field is not None
+            yield self._label(field.title)
+            control = self._manual_control(
+                field, classes='record-wide-control' if title == '备注' else None
+            )
+            control.tooltip = self._field_hints.get(field.title)
+            if field.title in self._field_hints:
+                control.add_class('record-field-warning')
+            yield control
 
     def _pair(
         self, left_label: str, left_value: object, right_label: str, right_value: object
@@ -391,7 +483,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
     @staticmethod
     def _label(value: str) -> Static:
         """Render a bold field label without affecting its paired value."""
-        return Static(value, classes='record-field-label')
+        return Static(RECORD_FIELD_LABELS.get(value, value), classes='record-field-label')
 
     def _field_value(self, title: str, value: object) -> Static:
         """Render a generated field value or a visible explanation for a missing value."""
@@ -401,12 +493,6 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             field.add_class('record-field-warning')
         return field
 
-    def _manual_pair(self, left_title: str, right_title: str) -> ComposeResult:
-        for title in (left_title, right_title):
-            field = self._manual_field(title)
-            yield self._label('难度子阶' if title == '标注难度子阶' else title)
-            yield Static('') if field is None else self._manual_control(field)
-
     def _manual_field(self, title: str) -> ManualRecordField | None:
         return next((field for field in self._manual_fields if field.title == title), None)
 
@@ -414,7 +500,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         field_id = self._manual_field_id(field)
         value = self._table_value(field.title)
         match field.field_type:
-            case 4:
+            case FieldType.DATE:
                 return Horizontal(
                     Input(
                         self._display_value(value),
@@ -430,14 +516,38 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
                     ),
                     classes=f'record-date-control {classes or ""}'.strip(),
                 )
-            case 17:
+            case FieldType.CHECKBOX:
+                return Select(
+                    (('有', True), ('无', False)),
+                    value=value,
+                    allow_blank=False,
+                    id=field_id,
+                    compact=True,
+                )
+            case FieldType.MULTI_SELECT:
+                if field.title == '标签':
+                    return Input(
+                        _tags_text(value) if isinstance(value, tuple) else '',
+                        id=field_id,
+                        placeholder='多个标签用英文逗号分隔',
+                        compact=True,
+                    )
+                return TextArea(
+                    '\n'.join(value) if isinstance(value, tuple) else '',
+                    id=field_id,
+                    classes='record-list-control',
+                    compact=True,
+                )
+            case FieldType.SINGLE_SELECT:
                 options = field.options
+                if not options:
+                    return Input(self._display_value(value), id=field_id, compact=True)
                 if isinstance(value, str) and value and value not in options:
                     options = (*options, value)
                 if isinstance(value, str):
                     return Select(
                         ((option, option) for option in options),
-                        prompt=f'选择{field.title}',
+                        prompt=f'选择{RECORD_FIELD_LABELS.get(field.title, field.title)}',
                         value=value,
                         id=field_id,
                         classes=classes,
@@ -445,31 +555,29 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
                     )
                 return Select(
                     ((option, option) for option in options),
-                    prompt=f'选择{field.title}',
+                    prompt=f'选择{RECORD_FIELD_LABELS.get(field.title, field.title)}',
                     id=field_id,
                     classes=classes,
                     compact=True,
                 )
-            case 2:
+            case FieldType.NUMBER:
                 return Input(
                     self._display_value(value),
-                    placeholder='0–10',
+                    placeholder='未统计' if field.title == '主房间数' else '整数',
                     type='integer',
                     id=field_id,
                     classes=classes,
                     validators=None,
                     compact=True,
                 )
-            case 1:
+            case FieldType.TEXT | FieldType.LINK:
                 return Input(self._display_value(value), id=field_id, classes=classes, compact=True)
             case _:
                 return Static('')
 
     def _updated_at_control(self) -> Horizontal:
         value = (
-            ''
-            if self._record.mod_updated_at is None
-            else self._record.mod_updated_at.date().isoformat()
+            '' if self._record.mod_updated_at is None else self._record.mod_updated_at.isoformat()
         )
         return Horizontal(
             Input(value=value, placeholder='YYYY-MM-DD', id='record-updated-at', compact=True),
@@ -483,10 +591,10 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         )
 
     def _table_value(self, title: str) -> CellValue | None:
-        for values in self._record.record_values.values():
-            if title in values:
-                return values[title]
-        return None
+        value = getattr(self._record, RECORD_ATTRIBUTES[title])
+        if isinstance(value, date):
+            return value.isoformat()
+        return value
 
     @staticmethod
     def _display_value(value: object) -> str:
@@ -507,6 +615,12 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             self.dismiss(None)
             return
         if event.button.id == 'record-confirm-save':
+            video_url = self.query_one('#record-video-url', Input).value.strip() or None
+            try:
+                MapRecord.validate_http_url(video_url)
+            except ValueError:
+                self.notify('视频链接请使用完整的 HTTP 或 HTTPS 地址。', severity='warning')
+                return
             manual_values = self._manual_values()
             if manual_values is None:
                 return
@@ -515,15 +629,24 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             except ValueError:
                 self.notify('更新时间请使用 YYYY-MM-DD 格式。', severity='warning')
                 return
-            record_values = {
-                table: dict(values) for table, values in self._record.record_values.items()
-            }
-            record_values.setdefault('主表', {}).update(manual_values)
-            self.dismiss(
-                self._record.model_copy(
-                    update={'mod_updated_at': updated_at, 'record_values': record_values}
-                )
+            data = self._record.model_dump()
+            data.update(manual_values)
+            data.update(
+                mod_updated_at=updated_at,
+                video_url=video_url,
+                mod_url=self.query_one('#record-mod-url', Input).value.strip() or None,
             )
+            try:
+                result = MapRecord.model_validate(data)
+            except ValidationError as error:
+                titles = {attribute: title for title, attribute in RECORD_ATTRIBUTES.items()}
+                issues = '；'.join(
+                    f'{titles.get(str(issue["loc"][0]), str(issue["loc"][0]))}：{issue["msg"]}'
+                    for issue in error.errors(include_url=False, include_input=False)
+                )
+                self.notify(f'记录内容无效：{issues}', severity='warning')
+                return
+            self.dismiss(result)
 
     @on(Button.Pressed)
     def open_date_picker(self, event: Button.Pressed) -> None:
@@ -548,77 +671,169 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         if value is not None:
             self.query_one(f'#{field_id}', Input).value = value
 
-    def _updated_at(self) -> datetime | None:
+    def _updated_at(self) -> date | None:
         value = self.query_one('#record-updated-at', Input).value.strip()
         if not value:
             return None
-        return datetime.combine(date.fromisoformat(value), time.min, tzinfo=UTC)
+        return date.fromisoformat(value)
 
     def _manual_field_id(self, field: ManualRecordField) -> str:
         """Return a DOM-safe ID for a selected inspected field."""
         return f'record-manual-{self._manual_fields.index(field)}'
 
-    def _manual_values(self) -> dict[str, int | str] | None:
-        """Validate optional inputs and return only fields the user filled in."""
-        values: dict[str, int | str] = {}
+    def _manual_values(self) -> dict[str, CellValue | date | None] | None:
+        """Read all editable values, preserving explicit clearing and false values."""
+        values: dict[str, CellValue | date | None] = {}
         for field in self._manual_fields:
-            widget_id = self._manual_field_id(field)
-            if field.field_type == 4:
-                value = self.query_one(f'#{widget_id}', Input).value.strip()
-                if not value:
-                    continue
-                try:
-                    date.fromisoformat(value)
-                except ValueError:
-                    self.notify(f'{field.title}请使用 YYYY-MM-DD 格式。', severity='warning')
-                    return None
-                values[field.title] = value
-            elif field.field_type == 17:
-                value = self.query_one(f'#{widget_id}', Select).value
-                if isinstance(value, str):
-                    values[field.title] = value
-            elif field.field_type == 2:
-                value = self.query_one(f'#{widget_id}', Input).value.strip()
-                if not value:
-                    continue
-                try:
-                    rating = int(value)
-                except ValueError:
-                    self.notify('评分必须是 0–10 的整数。', severity='warning')
-                    return None
-                if not 0 <= rating <= 10:
-                    self.notify('评分必须在 0–10 之间。', severity='warning')
-                    return None
-                values[field.title] = rating
-            elif field.field_type == 1:
-                value = self.query_one(f'#{widget_id}', Input).value.strip()
-                if value:
-                    values[field.title] = value
+            attribute = RECORD_ATTRIBUTES[field.title]
+            control = self.query_one(f'#{self._manual_field_id(field)}')
+            try:
+                if isinstance(control, TextArea):
+                    if field.field_type == FieldType.TEXT:
+                        values[attribute] = control.text or None
+                        continue
+                    previous = getattr(self._record, attribute)
+                    if control.text == '\n'.join(previous):
+                        values[attribute] = previous
+                        continue
+                    values[attribute] = tuple(
+                        dict.fromkeys(
+                            item.strip() for item in control.text.splitlines() if item.strip()
+                        )
+                    )
+                elif isinstance(control, Select):
+                    selected = control.value
+                    values[attribute] = selected if isinstance(selected, (str, bool)) else None
+                elif isinstance(control, Input):
+                    text = control.value
+                    if field.field_type == FieldType.MULTI_SELECT:
+                        previous = getattr(self._record, attribute)
+                        if text == _tags_text(previous):
+                            values[attribute] = previous
+                        else:
+                            items = next(csv.reader([text], strict=True)) if text else []
+                            values[attribute] = tuple(
+                                dict.fromkeys(item.strip() for item in items if item.strip())
+                            )
+                    elif not text.strip():
+                        values[attribute] = None
+                    elif field.field_type == FieldType.DATE:
+                        values[attribute] = date.fromisoformat(text)
+                    elif field.field_type == FieldType.NUMBER:
+                        if attribute == 'n_main_rooms' and int(text) <= 0:
+                            self.notify('主房间数请填写正整数；未统计请留空。', severity='warning')
+                            return None
+                        values[attribute] = int(text)
+                    else:
+                        values[attribute] = text
+            except ValueError, csv.Error:
+                self.notify(f'{field.title}格式不正确。', severity='warning')
+                return None
         return values
 
 
-class RecordSyncModeScreen(ModalScreen[bool | None]):
-    """Ask whether a saved local record should add or update a table record."""
+class RecordSaveModeScreen(ModalScreen[int | None]):
+    """Choose a new experience record or the explicit existing record to update."""
+
+    CSS_PATH = '../styles/record_editor.tcss'
+
+    BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
+
+    def __init__(self, candidates: tuple[MapRecord, ...], *, save_slot: int | None) -> None:
+        super().__init__()
+        self._save_slot = save_slot
+        self._same_slot = tuple(
+            record
+            for record in candidates
+            if save_slot is not None and record.save_slot == save_slot
+        )
+        self._candidates = self._same_slot + tuple(
+            record for record in candidates if save_slot is None or record.save_slot != save_slot
+        )
+
+    @staticmethod
+    def _slot_label(save_slot: int | None) -> str:
+        return '存档未知' if save_slot is None else f'存档 {save_slot}'
 
     def compose(self) -> ComposeResult:
         with Vertical(id='record-sync-mode'):
-            yield Static('本地记录已保存。是否同步到腾讯表格？')
-            yield Static('更新会按 Mod 元数据名和地图名查找唯一记录；不唯一时会拒绝写入。')
+            yield Static(
+                '此地图已有同存档记录，请选择新增或更新。'
+                if self._same_slot
+                else '此地图已有其他存档或存档未知的记录，默认新增；更新需明确选择原记录。'
+            )
+            yield Select(
+                (
+                    (
+                        (
+                            f'记录 {record.record_number or "未编号"} · '
+                            f'{self._slot_label(record.save_slot)} · '
+                            f'{record.created_at.astimezone().date()}'
+                        ),
+                        record.local_id,
+                    )
+                    for record in self._candidates
+                ),
+                value=self._same_slot[0].local_id if self._same_slot else Select.NULL,
+                allow_blank=not self._same_slot,
+                prompt='选择要更新的原记录（可选）',
+                id='record-save-target',
+            )
+            yield Static('', id='record-save-warning')
             with Horizontal(id='record-sync-actions'):
-                yield Button('仅保存本地记录', id='record-sync-cancel')
-                yield Button('新增表格记录', id='record-sync-add')
-                yield Button('更新匹配记录', id='record-sync-update', variant='primary')
+                yield Button('取消', id='record-save-cancel')
+                yield Button(
+                    '新增记录',
+                    id='record-save-add',
+                    variant='default' if self._same_slot else 'primary',
+                )
+                yield Button(
+                    '更新原记录',
+                    id='record-save-update',
+                    variant='primary' if self._same_slot else 'default',
+                    disabled=not self._same_slot,
+                )
+
+    def on_mount(self) -> None:
+        self.query_one(
+            '#record-save-update' if self._same_slot else '#record-save-add', Button
+        ).focus()
+
+    @on(Select.Changed, '#record-save-target')
+    def select_target(self, event: Select.Changed) -> None:
+        button = self.query_one('#record-save-update', Button)
+        button.disabled = event.value is Select.NULL
+        warning = ''
+        if isinstance(event.value, int):
+            selected = next(record for record in self._candidates if record.local_id == event.value)
+            if selected.save_slot is None or self._save_slot is None:
+                warning = '存档归属无法确认；更新将覆盖游戏数据，不累加，并替换为当前存档编号。'
+            elif selected.save_slot != self._save_slot:
+                warning = (
+                    f'跨存档更新：存档 {selected.save_slot} → {self._slot_label(self._save_slot)}。'
+                    '游戏数据只覆盖、不累加，原记录编号与手填信息保留。'
+                )
+        button.label = '覆盖原记录' if warning else '更新原记录'
+        message = self.query_one('#record-save-warning', Static)
+        message.update(warning)
+        message.display = bool(warning)
 
     @on(Button.Pressed)
-    def choose_mode(self, event: Button.Pressed) -> None:
-        if event.button.id is None:
-            return
-        choice = {'record-sync-add': False, 'record-sync-update': True}.get(event.button.id)
-        self.dismiss(choice)
+    def choose_record(self, event: Button.Pressed) -> None:
+        if event.button.id == 'record-save-add':
+            self.dismiss(0)
+        elif event.button.id == 'record-save-update':
+            selected = self.query_one('#record-save-target', Select).value
+            assert isinstance(selected, int)
+            self.dismiss(selected)
+        elif event.button.id == 'record-save-cancel':
+            self.dismiss(None)
 
 
 class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
     """Let the player select author entries from raw GameBanana Credits."""
+
+    CSS_PATH = '../styles/record_editor.tcss'
 
     BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
 
@@ -665,6 +880,8 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
 
 class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
     """Select one or more arbitrary author-name spans from Dialog text."""
+
+    CSS_PATH = '../styles/record_editor.tcss'
 
     BINDINGS: ClassVar = [
         ('ctrl+enter', 'add_author', '添加选区'),

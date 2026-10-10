@@ -1,9 +1,56 @@
 import asyncio
+from pathlib import Path
 
+import pytest
+from textual.widget import Widget
 from textual.widgets import Button, TabbedContent
 
+from pist.ui import messages
 from pist.ui.messages import MessageActionScreen, MessageCard, MessagesScreen
 from pist.ui.tui import RefreshableCssApp
+
+
+def test_open_messages_waits_for_delayed_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check() -> None:
+        mounting = asyncio.Event()
+        release = asyncio.Event()
+
+        class DelayedMessagesScreen(MessagesScreen):
+            CSS_PATH = Path(messages.__file__).parent / 'styles/messages.tcss'
+
+            async def mount_composed_widgets(self, widgets: list[Widget]) -> None:
+                mounting.set()
+                await release.wait()
+                await super().mount_composed_widgets(widgets)
+
+        class TestApp(RefreshableCssApp[None]):
+            @property
+            def loading_warnings(self) -> tuple[str, ...]:
+                return ('Loading warning',)
+
+        monkeypatch.setattr(messages, 'MessagesScreen', DelayedMessagesScreen)
+        app = TestApp()
+        async with app.run_test() as pilot:
+            opening = asyncio.create_task(app.run_action('show_messages'))
+            await asyncio.wait_for(mounting.wait(), timeout=5)
+            try:
+                assert not opening.done(), 'Opening must not finish before the contents mount'
+                app.notify('Warning during mount', severity='warning')
+            finally:
+                release.set()
+                await opening
+                await pilot.pause()
+            assert isinstance(app.screen, MessagesScreen)
+            assert app.screen.query_one(TabbedContent).active == 'loading-messages'
+            assert len(app.screen.query(MessageCard)) == 2
+            await pilot.click('#--content-tab-runtime-messages')
+            assert app.screen.query_one(TabbedContent).active == 'runtime-messages'
+            app.notify('Runtime warning', severity='warning')
+            await pilot.pause()
+            assert len(app.screen.query(MessageCard)) == 3
+            await pilot.click('#messages-close')
+
+    asyncio.run(check())
 
 
 def test_runtime_cards_survive_toasts_and_support_individual_copy_and_clear() -> None:

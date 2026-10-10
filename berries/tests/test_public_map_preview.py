@@ -133,6 +133,7 @@ def test_public_preview_serves_loopback_state_and_cleans_up(
                 'geometry.js',
                 'client.js',
                 'object_info.js',
+                'mouse.js',
             } <= modules
             async with session.get(f'{url}/assets/object_info.css') as response:
                 assert response.status == 200

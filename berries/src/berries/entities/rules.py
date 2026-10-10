@@ -1,7 +1,8 @@
 """Configurable classification rules for map entities."""
 
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Self
@@ -19,6 +20,8 @@ from berries.game.binmap import AttrValue
 from berries.models import FrozenModel
 from berries.paths import BERRIES_DIR
 from berries.types import NonEmptyStr
+
+from ._file_update import replace_rule_files
 
 SHARED_ENTITIES_PATH = Path(__file__).parent.parent / 'data' / 'entities.toml'
 SHARED_KINDS_PATH = Path(__file__).parent.parent / 'data' / 'kinds.toml'
@@ -557,9 +560,9 @@ class EntityConfigStore:
     def save(self, rules: EntityRules) -> None:
         current_kinds = EntityKindLayer.model_validate(_load_toml(self._kinds_path))
         kind_layer = EntityKindLayer(kinds=rules.kinds)
+        updates: dict[Path, str] = {}
         if current_kinds.kinds != rules.kinds:
-            self._kinds_path.parent.mkdir(parents=True, exist_ok=True)
-            self._kinds_path.write_text(entity_kinds_toml(kind_layer), encoding='utf-8')
+            updates[self._kinds_path] = entity_kinds_toml(kind_layer)
         baseline = (
             EntityRules.from_layers(kind_layer)
             if self._local_path is None
@@ -568,14 +571,31 @@ class EntityConfigStore:
                 EntityRuleLayer.model_validate(_load_toml(self._shared_path)),
             )
         )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(entity_rules_toml(rules, baseline=baseline), encoding='utf-8')
+        updates[self.path] = entity_rules_toml(rules, baseline=baseline)
+        with replace_rule_files(updates):
+            pass
 
     def rename_kind(self, old_name: str, new_name: str, rules: EntityRules) -> None:
         """Persist a kind-ID rename across every rule layer this store owns."""
         if old_name == new_name:
             self.save(rules)
             return
+
+        with self.kind_change(old_name, new_name, rules):
+            pass
+
+    def delete_kind(self, name: str, fallback_kind: str, rules: EntityRules) -> None:
+        """Persist a kind deletion across every rule layer this store owns."""
+        with self.kind_change(name, fallback_kind, rules):
+            pass
+
+    @contextmanager
+    def kind_change(self, old_name: str, new_name: str, rules: EntityRules) -> Generator[None]:
+        """Change kind definitions and references, restoring files if a participant fails.
+
+        Use this scope to coordinate rule changes with another transactional store.
+        The supplied rules define the resulting tree for either rename or deletion.
+        """
 
         paths_and_layers: list[tuple[Path, EntityRuleLayer]] = [
             (self._shared_path, EntityRuleLayer.model_validate(_load_toml(self._shared_path))),
@@ -596,38 +616,10 @@ class EntityConfigStore:
         # Validate all writes together before modifying any user-visible file.
         EntityRules.from_layers(kind_layer, *(layer for _, layer in renamed_layers))
 
-        self._kinds_path.parent.mkdir(parents=True, exist_ok=True)
-        self._kinds_path.write_text(entity_kinds_toml(kind_layer), encoding='utf-8')
-        for path, layer in renamed_layers:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(entity_rules_toml(layer), encoding='utf-8')
-
-    def delete_kind(self, name: str, fallback_kind: str, rules: EntityRules) -> None:
-        """Persist a kind deletion across every rule layer this store owns."""
-        paths_and_layers: list[tuple[Path, EntityRuleLayer]] = [
-            (self._shared_path, EntityRuleLayer.model_validate(_load_toml(self._shared_path))),
-        ]
-        if self._local_path is not None and self._local_path.is_file():
-            paths_and_layers.append(
-                (self._local_path, EntityRuleLayer.model_validate(_load_toml(self._local_path)))
-            )
-        updated_layers = [
-            (
-                path,
-                EntityRuleLayer(
-                    entities=_renamed_entity_rules(layer.entities, name, fallback_kind)
-                ),
-            )
-            for path, layer in paths_and_layers
-        ]
-        kind_layer = EntityKindLayer(kinds=rules.kinds)
-        EntityRules.from_layers(kind_layer, *(layer for _, layer in updated_layers))
-
-        self._kinds_path.parent.mkdir(parents=True, exist_ok=True)
-        self._kinds_path.write_text(entity_kinds_toml(kind_layer), encoding='utf-8')
-        for path, layer in updated_layers:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(entity_rules_toml(layer), encoding='utf-8')
+        updates = {self._kinds_path: entity_kinds_toml(kind_layer)}
+        updates.update((path, entity_rules_toml(layer)) for path, layer in renamed_layers)
+        with replace_rule_files(updates):
+            yield
 
     def load_shared_layer(self) -> EntityRuleLayer:
         """Load the shared entity rules without kinds or user-local overrides."""

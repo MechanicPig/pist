@@ -261,17 +261,17 @@ class ModScanner:
         blacklist = self._read_blacklist()
         temporary_blacklist = self._read_optional_list(self._temporary_blacklist_path)
         whitelist = self._read_optional_list(self._whitelist_path)
-        packages = (*self._zip_mod_paths(), *self._directory_mod_paths())
+        pkgs = (*self._zip_mod_paths(), *self._directory_mod_paths())
         return ModScanPreparation(
             candidates=tuple(
-                package
-                for package in packages
-                if self._should_load(package.name, blacklist, temporary_blacklist, whitelist)
+                pkg
+                for pkg in pkgs
+                if self._should_load(pkg.name, blacklist, temporary_blacklist, whitelist)
             ),
             disabled_candidates=tuple(
-                package
-                for package in packages
-                if not self._should_load(package.name, blacklist, temporary_blacklist, whitelist)
+                pkg
+                for pkg in pkgs
+                if not self._should_load(pkg.name, blacklist, temporary_blacklist, whitelist)
             ),
         )
 

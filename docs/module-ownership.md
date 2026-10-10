@@ -18,6 +18,7 @@ loopback 预览的 HTTP 集成测试使用共享辅助工具约束启动与请�
 
 - `berries.installation`：面向第三方应用的高层只读入口；
 - `berries.game.*`：游戏、Mod、存档、Campaign、Level、Map 与 Collab 事实读取；
+- `berries.game.map_data`：地图资源读取与解码边界，供布局解释、实体统计及 Collab 日志共用；
 - `berries.entities.rules`、`berries.entities.classification`：共享识别规则与分类；
 - `berries.map_layout`、`berries.map_entrances`：客观地图布局与入口识别；
 - `berries.gamebanana`：外部投稿元数据查询；
@@ -41,14 +42,21 @@ Everest 激活、覆盖与 Mod 组合语义
 
 ## 个人记录应用
 
-- `pist.entity_stats`、`pist.record_entities`、`pist.records`：个人统计与记录投影；
-- `pist.app_resources`：随个人应用版本控制、但不属于公共规则库的数据；
-- `pist.routes`、`pist.route_store`：个人路线模型与持久化；
+- `pist.entity_stats`：个人实体统计；`pist.records.models`、`pist.records.entities`：记录模型、构建合并与地图统计投影；
+- `pist/data`：随个人应用版本控制的统计规则、表格字段配置等应用数据；不属于公共规则库，也不包含归档子系统资源；
+- `pist.routes.models`、`pist.routes.store`：个人路线模型与持久化；
 - `pist.map_preview`：组合 Berries 基础能力的地图预览，附加路线编辑、实体屏蔽及初见统计；
-- `pist.record_store`、`pist.app_data`：个人数据持久化与应用组装；
+- `pist.records.schema`、`pist.records.store`：逐列记录存储、远端确认基准与读取快照；`pist.app_data` 负责应用组装；
 - `pist.catalog_cache`：地图浏览器使用的、可丢弃且可重建的 Collab 扫描缓存；
-- `pist.smartsheet`、`pist.sheet_report`、`pist.secrets`：腾讯表格和凭证；
+- `pist.records.fields`、`pist.smartsheet.fields`：明确的记录字段映射与表格协议校验；
+- `pist.records.sync`：远端核对、冲突检测与写入回读确认，不依赖 UI；
+- `pist.records.lock`：同一数据目录的跨进程记录写入锁；
+- `pist.smartsheet.models`、`pist.smartsheet.client`：腾讯表格协议模型与 HTTP 边界，不依赖个人记录；
+- `pist.smartsheet.encoding`、`pist.smartsheet.fields`、`pist.smartsheet.report`：个人记录的单元格转换、字段契约与检查报告；
+- `pist.credentials`：凭据模型与存储、系统后端选择及 Windows 后端适配；
 - `pist.ui.maps`：个人记录工作流。
+
+记录领域集中在 `pist.records`，调用方直接从职责所属子模块导入；包入口不提前加载统计、存储或网络边界。
 
 ## 实体审计应用
 
@@ -62,3 +70,7 @@ Everest 激活、覆盖与 Mod 组合语义
 `berries.map_preview.server.MapPreview` 和 `pist.map_preview.server.MapPreview` 不互相继承。两者组合使用 `PreviewSession` 管理 loopback 服务和浏览器生命周期，使用 `PreviewAssets` 加载页面、共享绘制模块及图片，使用 `PreviewNavigation` 解析入口目标并维护地图历史。各自的页面通过组合共享的 JavaScript `MapCanvas` 完成瓦片、图片、重生点绘制和视野适配。
 
 Pist 保留自己的编辑协议、页面交互和个人数据叠加；公共能力不读取路线数据库、个人统计规则或表格字段。基础画布模块由 Berries 提供，Pist 不复制一份静态实现。
+
+## 休眠子系统
+
+`pist.archive.loenn` 保存当前不参与产品工作流的 Loenn 静态分析与求值能力，其内置模板 `builtin_templates.toml` 随模块一起归档，不放入活动的 `pist/data`。活动代码不得依赖归档模块或其中的资源。

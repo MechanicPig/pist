@@ -1,12 +1,11 @@
 """Read CollabUtils2 lobby identities and static journal references."""
 
-from collections.abc import Generator, Iterable
-from contextlib import contextmanager
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from berries.game import binmap
-from berries.game.content import BadContentEntry, ContentEntry, entry_fingerprint
+from berries.game.content import entry_fingerprint
 from berries.game.levels import Map
+from berries.game.map_data import load_map_data, open_map_entry
 
 JOURNAL_TRIGGER = 'CollabUtils2/JournalTrigger'
 
@@ -36,9 +35,7 @@ def is_lobby_sid(sid: str, collab_ids: Iterable[str]) -> bool:
 
 def journal_references(map_file: Map) -> JournalReferences:
     """Read exact JournalTrigger level-set identities in source order."""
-    with _open_map_entry(map_file) as map_entry:
-        data = map_entry.read_bytes()
-    map_data = binmap.parse_map_bin(data, allow_trailing=True)
+    map_data = load_map_data(map_file)
     result: list[str] = []
     seen: set[str] = set()
     invalid_count = 0
@@ -56,17 +53,5 @@ def journal_references(map_file: Map) -> JournalReferences:
 
 def journal_fingerprint(map_file: Map) -> str:
     """Return a cheap source fingerprint for one concrete lobby map resource."""
-    with _open_map_entry(map_file) as map_entry:
+    with open_map_entry(map_file) as map_entry:
         return entry_fingerprint(map_entry)
-
-
-@contextmanager
-def _open_map_entry(map_file: Map) -> Generator[ContentEntry]:
-    try:
-        with map_file.open_content() as root:
-            map_entry = root.joinpath(map_file.file_path)
-            if not map_entry.is_file():
-                raise ValueError(f'Lobby map does not exist: {map_file.file_path!r}')
-            yield map_entry
-    except BadContentEntry as error:
-        raise ValueError(f'Invalid content source for lobby map: {map_file.file_path!r}') from error

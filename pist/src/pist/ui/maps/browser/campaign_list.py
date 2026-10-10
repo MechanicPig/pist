@@ -8,8 +8,7 @@ from textual.message import Message
 from textual.widgets import ListItem, ListView, Static
 
 from berries.game import campaigns
-
-LEFT_MOUSE_BUTTON = 1
+from pist.ui.mouse import LEFT_MOUSE_BUTTON
 
 
 class CampaignItem(ListItem):

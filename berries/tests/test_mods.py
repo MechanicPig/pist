@@ -192,7 +192,7 @@ def test_scanner_warns_and_ignores_invalid_zip_member_paths(tmp_path: Path) -> N
     ]
 
 
-def test_scanner_preserves_all_metadata_entries_for_one_package(tmp_path: Path) -> None:
+def test_scanner_preserves_all_metadata_entries_for_one_pkg(tmp_path: Path) -> None:
     mods_dir = tmp_path / 'Celeste' / 'Mods'
     mods_dir.mkdir(parents=True)
     with ZipFile(mods_dir / 'bundle.zip', 'w') as archive:

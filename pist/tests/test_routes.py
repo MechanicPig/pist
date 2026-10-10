@@ -5,8 +5,8 @@ import pytest
 from berries.entities.rules import SHARED_ENTITIES_PATH, load_entity_rules
 from berries.game.binmap import BinElement, BinMap
 from pist.entity_stats import load_entity_stat_rules, map_entity_stats
-from pist.route_store import RouteStore
-from pist.routes import MapRoute
+from pist.routes.models import MapRoute
+from pist.routes.store import RouteStore
 
 
 def test_map_entity_record_values_apply_saved_marker_exclusions() -> None:

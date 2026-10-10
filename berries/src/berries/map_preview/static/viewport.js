@@ -1,4 +1,8 @@
 // Browser-local camera and gestures; application actions are supplied by the page.
+import { MouseButton } from './mouse.js';
+
+const MIDDLE_DOUBLE_CLICK_INTERVAL_MS = 350;
+
 export class MapViewport {
   constructor(canvas) {
     this.canvas = canvas;
@@ -72,14 +76,14 @@ export class CanvasInteraction {
     }, { ...options, passive: false });
     canvas.addEventListener('dblclick', event => this.callbacks.doubleClick?.(viewport.world(event), event), options);
     canvas.addEventListener('contextmenu', event => event.preventDefault(), options);
-    canvas.addEventListener('auxclick', event => { if (event.button === 1) event.preventDefault(); }, options);
+    canvas.addEventListener('auxclick', event => { if (event.button === MouseButton.MIDDLE) event.preventDefault(); }, options);
   }
 
   start(event) {
-    if (event.button > 2) return;
-    if (event.button !== 0) event.preventDefault();
-    if (event.button === 1 && this.callbacks.reset) {
-      if (this.lastMiddleDown !== undefined && event.timeStamp - this.lastMiddleDown <= 350) {
+    if (event.button > MouseButton.RIGHT) return;
+    if (event.button !== MouseButton.LEFT) event.preventDefault();
+    if (event.button === MouseButton.MIDDLE && this.callbacks.reset) {
+      if (this.lastMiddleDown !== undefined && event.timeStamp - this.lastMiddleDown <= MIDDLE_DOUBLE_CLICK_INTERVAL_MS) {
         this.lastMiddleDown = undefined;
         this.cancel();
         this.callbacks.reset();
@@ -90,7 +94,7 @@ export class CanvasInteraction {
     const start = this.viewport.world(event);
     this.drag = { button: event.button, x: event.clientX, y: event.clientY, start, moved: false };
     this.callbacks.dragStart?.(start, event);
-    if (event.button !== 0) this.viewport.canvas.classList.add('panning');
+    if (event.button !== MouseButton.LEFT) this.viewport.canvas.classList.add('panning');
   }
 
   move(event) {
@@ -100,11 +104,11 @@ export class CanvasInteraction {
     const dy = event.clientY - drag.y;
     if (!drag.moved && Math.hypot(dx, dy) < this.threshold) return;
     drag.moved = true;
-    if (drag.button !== 0) this.viewport.pan(dx, dy);
+    if (drag.button !== MouseButton.LEFT) this.viewport.pan(dx, dy);
     else this.callbacks.dragMove?.(drag.start, this.viewport.world(event), event);
     drag.x = event.clientX;
     drag.y = event.clientY;
-    if (drag.button === 1) this.lastMiddleDown = undefined;
+    if (drag.button === MouseButton.MIDDLE) this.lastMiddleDown = undefined;
     this.callbacks.redraw();
   }
 
@@ -113,7 +117,7 @@ export class CanvasInteraction {
     if (!drag || event.button !== drag.button) return;
     this.drag = undefined;
     this.viewport.canvas.classList.remove('panning');
-    if (drag.button === 0 && drag.moved) this.callbacks.dragEnd?.(event);
+    if (drag.button === MouseButton.LEFT && drag.moved) this.callbacks.dragEnd?.(event);
     else if (!drag.moved) this.callbacks.click?.(this.viewport.world(event), event);
   }
 

@@ -13,7 +13,15 @@ from aiohttp import web
 from berries.paths import BERRIES_DIR
 
 _SHARED_ASSETS = frozenset(
-    {'canvas.js', 'viewport.js', 'geometry.js', 'client.js', 'object_info.js', 'object_info.css'}
+    {
+        'canvas.js',
+        'viewport.js',
+        'geometry.js',
+        'client.js',
+        'mouse.js',
+        'object_info.js',
+        'object_info.css',
+    }
 )
 
 
@@ -26,18 +34,18 @@ class PreviewAssets:
 
     def __init__(
         self,
-        package: str,
+        pkg: str,
         *,
         sprite_dir: Path = BERRIES_DIR / 'sprites',
         scripts: Iterable[str] = (),
     ) -> None:
-        self.package = package
+        self.package = pkg
         self.sprite_dir = sprite_dir
         self.asset_names = _SHARED_ASSETS | {'map_preview.css', 'map_preview.js'} | set(scripts)
 
     def text(self, name: str) -> str:
-        package = 'berries.map_preview' if name in _SHARED_ASSETS else self.package
-        return files(package).joinpath('static', name).read_text(encoding='utf-8')
+        pkg = 'berries.map_preview' if name in _SHARED_ASSETS else self.package
+        return files(pkg).joinpath('static', name).read_text(encoding='utf-8')
 
     def sprite(self, name: str) -> bytes | None:
         # This HTTP identifier is POSIX-relative, including on Windows hosts.
@@ -50,8 +58,8 @@ class PreviewAssets:
         if local.is_file():
             return local.read_bytes()
         # Application-specific sprites take precedence over shared Berries sprites.
-        for package in dict.fromkeys((self.package.split('.')[0], 'berries')):
-            shared = files(package).joinpath('data', 'sprites', *path.parts)
+        for pkg in dict.fromkeys((self.package.split('.')[0], 'berries')):
+            shared = files(pkg).joinpath('data', 'sprites', *path.parts)
             if shared.is_file():
                 return shared.read_bytes()
         builtin = files('berries.map_preview').joinpath('game_assets', *path.parts)

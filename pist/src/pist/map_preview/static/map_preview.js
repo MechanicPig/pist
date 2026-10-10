@@ -6,6 +6,7 @@ import { EditState } from './edit_state.js';
 import { MapOverlays } from './overlays.js';
 import { RoomList } from './room_list.js';
 import { ObjectInfoPanel } from './object_info.js';
+import { MouseButton } from './mouse.js';
 
 const base = location.pathname;
 const canvas = document.querySelector('#map');
@@ -199,18 +200,18 @@ const interaction = new CanvasInteraction(viewport, {
   dragCancel: () => { selectionBox = undefined; draw(); },
   click: (point, event) => {
     if (!state) return;
-    if (event.button === 2) {
+    if (event.button === MouseButton.RIGHT) {
       const item = geometry.entityAt(point, { radius: 12 / viewport.scale, nearest: true, filter: entity => Boolean(entity.entityId) });
       const entrance = geometry.entranceAt(point, { radius: 16 / viewport.scale, nearest: true });
       if (item) showInspectableEntity(item, event);
       else if (entrance) showEntranceInfo(entrance, event);
-    } else if (event.button === 0) {
+    } else if (event.button === MouseButton.LEFT) {
       const room = geometry.roomAt(point);
       if (room) toggleRoom(room);
     }
   },
   doubleClick: (point, event) => {
-    if (!state || event.button !== 0 || mode !== 'preview') return;
+    if (!state || event.button !== MouseButton.LEFT || mode !== 'preview') return;
     const room = geometry.roomAt(point);
     if (room) { selectPreviewRoom(room); centerRoom(room); }
   },
@@ -329,7 +330,7 @@ document.querySelector('#back').addEventListener('click', () => navigate('back')
 document.querySelector('#forward').addEventListener('click', () => navigate('forward'));
 document.querySelector('#home').addEventListener('click', () => navigate('home'));
 addEventListener('mousedown', event => {
-  const action = event.button === 3 ? 'back' : event.button === 4 ? 'forward' : undefined;
+  const action = event.button === MouseButton.BACK ? 'back' : event.button === MouseButton.FORWARD ? 'forward' : undefined;
   if (action) {
     event.preventDefault();
     event.stopPropagation();

@@ -6,20 +6,20 @@ from pist.paths import PIST_DIR, pist_dir, source_root
 
 
 def test_source_checkout_uses_repository_pist_directory(tmp_path: Path) -> None:
-    package_dir = tmp_path / 'pist/src/pist'
-    package_dir.mkdir(parents=True)
+    pkg_dir = tmp_path / 'pist/src/pist'
+    pkg_dir.mkdir(parents=True)
     (tmp_path / 'pyproject.toml').touch()
 
-    assert source_root(package_dir) == tmp_path
-    assert pist_dir(package_dir, {}) == tmp_path / '.pist'
+    assert source_root(pkg_dir) == tmp_path
+    assert pist_dir(pkg_dir, {}) == tmp_path / '.pist'
 
 
-def test_installed_package_uses_platform_data_directory(tmp_path: Path) -> None:
-    package_dir = tmp_path / 'site-packages/pist'
-    package_dir.mkdir(parents=True)
+def test_installed_pkg_uses_platform_data_directory(tmp_path: Path) -> None:
+    pkg_dir = tmp_path / 'site-packages/pist'
+    pkg_dir.mkdir(parents=True)
 
-    assert source_root(package_dir) is None
-    assert pist_dir(package_dir, {}) == user_data_path('.pist', appauthor=False)
+    assert source_root(pkg_dir) is None
+    assert pist_dir(pkg_dir, {}) == user_data_path('.pist', appauthor=False)
 
 
 def test_explicit_data_directory_overrides_runtime_mode(tmp_path: Path) -> None:

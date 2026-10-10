@@ -1,6 +1,7 @@
 """Apply the personal record application's entity-stat projection rules."""
 
 import tomllib
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -10,11 +11,13 @@ from pydantic import Field, ValidationError, model_validator
 from berries.entities.classification import ClassifiedEntity, classify_map_entities
 from berries.entities.rules import EntityRules
 from berries.game.binmap import BinMap
+from berries.map_entity_id import MapEntityID
 from berries.models import FrozenModel
 from berries.types import StrippedNonEmptyStr
-from pist.types import RecordValues
+from pist.records.fields import RECORD_ATTRIBUTES
+from pist.types import CellValue, RecordValues
 
-ENTITY_STATS_PATH = Path(__file__).parent / 'app_resources' / 'entity_stats.toml'
+ENTITY_STATS_PATH = Path(__file__).parent / 'data' / 'entity_stats.toml'
 
 
 class EntityStatAggregation(StrEnum):
@@ -94,6 +97,8 @@ class MapEntityStats:
     existing_stats: frozenset[str] = field(default_factory=frozenset)
     selected_stats: frozenset[str] = field(default_factory=frozenset)
     select_values: dict[str, frozenset[str]] = field(default_factory=dict)
+    instance_ids: dict[str, frozenset[MapEntityID]] = field(default_factory=dict)
+    duplicate_instance_ids: frozenset[MapEntityID] = field(default_factory=frozenset)
 
     def count(self, stat: str) -> int:
         return self.counts.get(stat, 0)
@@ -103,6 +108,15 @@ class MapEntityStats:
 
     def has_stat(self, stat: str) -> bool:
         return stat in self.counts or stat in self.existing_stats or stat in self.selected_stats
+
+    def all_instances_collected(self, stat: str, collected: AbstractSet[MapEntityID]) -> bool:
+        """Confirm every counted instance by ID, rejecting missing or duplicate identities."""
+        ids = self.instance_ids.get(stat, frozenset())
+        return (
+            len(ids) == self.count(stat)
+            and ids.isdisjoint(self.duplicate_instance_ids)
+            and ids <= collected
+        )
 
     @property
     def select_conflicts(self) -> tuple[SelectConflict, ...]:
@@ -128,6 +142,15 @@ class MapEntityStats:
                     value = next(iter(selected))
             values.setdefault(rule.table, {})[rule.field] = value
         return values
+
+    @property
+    def record_fields(self) -> dict[str, CellValue]:
+        """Return supported statistic results in the local record vocabulary."""
+        return {
+            RECORD_ATTRIBUTES[title]: value
+            for title, value in self.record_values.get('主表', {}).items()
+            if title in RECORD_ATTRIBUTES
+        }
 
 
 def load_entity_stat_rules(
@@ -157,6 +180,7 @@ def map_entity_stats(
     existing: set[str] = set()
     selected: set[str] = set()
     select_values: dict[str, set[str]] = {}
+    instance_ids: dict[str, set[MapEntityID]] = {}
     for entity in classify_map_entities(map_data, rule_set=entity_rules):
         if entity.key in excluded_entities:
             continue
@@ -166,6 +190,10 @@ def map_entity_stats(
             match rule.aggregation:
                 case EntityStatAggregation.COUNT:
                     counts[name] = counts.get(name, 0) + 1
+                    if entity.entity_id is not None:
+                        instance_ids.setdefault(name, set()).add(
+                            MapEntityID(entity.room, entity.entity_id)
+                        )
                 case EntityStatAggregation.EXIST:
                     existing.add(name)
                 case EntityStatAggregation.SELECT:
@@ -178,7 +206,30 @@ def map_entity_stats(
         existing_stats=frozenset(existing),
         selected_stats=frozenset(selected),
         select_values={name: frozenset(values) for name, values in select_values.items()},
+        instance_ids={name: frozenset(ids) for name, ids in instance_ids.items()},
+        duplicate_instance_ids=_duplicate_instance_ids(map_data),
     )
+
+
+def _duplicate_instance_ids(map_data: BinMap) -> frozenset[MapEntityID]:
+    """Find identities shared by distinct map instances, regardless of rule projections."""
+    seen: set[MapEntityID] = set()
+    duplicates: set[MapEntityID] = set()
+    for room in map_data.iter_rooms():
+        entities = room.child('entities')
+        if entities is None:
+            continue
+        room_name = room.attrs.get('name')
+        room_name = room_name if isinstance(room_name, str) else ''
+        for entity in entities.children:
+            entity_id = entity.attrs.get('id')
+            if type(entity_id) is not int:
+                continue
+            identity = MapEntityID(room_name, entity_id)
+            if identity in seen:
+                duplicates.add(identity)
+            seen.add(identity)
+    return frozenset(duplicates)
 
 
 def _select_value(

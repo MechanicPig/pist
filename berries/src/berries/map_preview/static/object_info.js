@@ -1,4 +1,6 @@
 // Floating property panel mechanics; the page supplies object content and actions.
+import { MouseButton } from './mouse.js';
+
 export class ObjectInfoPanel {
   constructor(node) {
     this.node = node;
@@ -10,7 +12,7 @@ export class ObjectInfoPanel {
     this.drag = undefined;
     node.querySelector('[data-role="close"]').addEventListener('click', () => this.hide());
     this.header.addEventListener('pointerdown', event => {
-      if (event.button !== 1) return;
+      if (event.button !== MouseButton.MIDDLE) return;
       const rect = node.getBoundingClientRect();
       this.drag = { pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
       node.classList.add('dragging');
@@ -24,7 +26,7 @@ export class ObjectInfoPanel {
     for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
       this.header.addEventListener(name, event => this.finishDrag(event.pointerId));
     }
-    this.header.addEventListener('auxclick', event => { if (event.button === 1) event.preventDefault(); });
+    this.header.addEventListener('auxclick', event => { if (event.button === MouseButton.MIDDLE) event.preventDefault(); });
   }
 
   move(left, top) {

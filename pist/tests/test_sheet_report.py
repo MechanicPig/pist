@@ -1,10 +1,4 @@
-from pist.sheet_report import (
-    ManualRecordField,
-    field_coverage_report,
-    inspection_fields,
-    manual_record_fields,
-)
-from pist.smartsheet import (
+from pist.smartsheet.models import (
     FieldsResult,
     FileIdConversion,
     GetSheetsData,
@@ -14,6 +8,7 @@ from pist.smartsheet import (
     SubSheetInspection,
     ViewsResult,
 )
+from pist.smartsheet.report import ManualRecordField, field_coverage_report, manual_record_fields
 
 
 def test_field_coverage_report_classifies_current_planned_and_formula_fields() -> None:
@@ -42,7 +37,6 @@ def test_field_coverage_report_classifies_current_planned_and_formula_fields() -
         ],
     )
 
-    assert [field.field_id for field in inspection_fields(report)] == ['mod', 'berry', 'average']
     assert field_coverage_report(report) == (
         '# Smart Sheet 字段覆盖报告\n\n'
         '文件 ID：`file`\n\n'
@@ -144,4 +138,5 @@ def test_manual_record_fields_use_main_table_metadata_and_select_options() -> No
         ManualRecordField('状态', 17, ('通关', '进行中')),
         ManualRecordField('评分', 2),
         ManualRecordField('备注', 1),
+        ManualRecordField('标签', 9),
     )

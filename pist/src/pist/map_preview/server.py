@@ -1,5 +1,6 @@
 """Personal map preview with route editing and first-clear overlays."""
 
+import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -16,9 +17,10 @@ from berries.game.maps import MapInfo
 from berries.map_preview.navigation import EntranceResp, OpenMapReq, PreviewNavigation, map_title
 from berries.map_preview.session import PreviewAssets, PreviewSession
 from berries.models import FrozenModel, StrictModel
-from pist import entity_stats, routes
+from pist import entity_stats
 from pist.paths import PIST_DIR
-from pist.route_store import RouteStore
+from pist.routes import models as routes
+from pist.routes.store import RouteStore
 
 
 class MapPreviewMode(StrEnum):
@@ -380,9 +382,6 @@ class MapPreview:
             return web.json_response({'error': '无效的地图预览保存内容。'}, status=400)
         selected, excluded_entities, room_counts = saved
         page = self._navigation.current
-        page.selected = selected
-        page.room_counts = room_counts
-        page.excluded_entities = excluded_entities
         route = routes.MapRoute(
             map_file=page.map_info.file_path.as_posix(),
             rooms=tuple(room.name for room in page.layout.rooms if room.name in selected),
@@ -390,7 +389,13 @@ class MapPreview:
             excluded_entities=excluded_entities,
         )
         if self._route_store is not None:
-            self._route_store.save(route)
+            try:
+                self._route_store.save(route)
+            except (sqlite3.Error, OSError, RuntimeError, ValueError) as error:
+                return web.json_response({'error': f'路线保存失败：{error}'}, status=500)
+        page.selected = selected
+        page.room_counts = room_counts
+        page.excluded_entities = excluded_entities
         return web.json_response({'ok': True})
 
     async def _cancel(self, _: web.Request) -> web.Response:

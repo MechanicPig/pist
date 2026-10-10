@@ -3,6 +3,7 @@ import { CanvasInteraction, MapViewport } from './viewport.js';
 import { MapGeometry } from './geometry.js';
 import { PreviewClient } from './client.js';
 import { ObjectInfoPanel } from './object_info.js';
+import { MouseButton } from './mouse.js';
 
 const base = location.pathname;
 const canvas = document.querySelector('#map');
@@ -125,7 +126,7 @@ function status(message) {
 const interaction = new CanvasInteraction(viewport, {
   redraw: draw,
   click: (point, event) => {
-    if (!state || event.button !== 0) return;
+    if (!state || event.button !== MouseButton.LEFT) return;
     const entrance = geometry.entranceAt(point, { minimumSize: 4 / viewport.scale });
     if (entrance) return showObject(entrance, event);
     const item = geometry.entityAt(point, { radius: 8 / viewport.scale });

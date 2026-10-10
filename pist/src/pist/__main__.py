@@ -8,19 +8,24 @@ from datetime import UTC, datetime
 from getpass import getpass
 from pathlib import Path
 
+from aiohttp import ClientError
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
 from berries.game.enders_blender import EndersBlenderReader
 from berries.game.mods import DisabledMod, ModScanner, ModScanReport, ScannedMod
 from berries.game.saves import SaveReader
+from pist.credentials.store import CredentialStore
 from pist.paths import PIST_DIR
-from pist.record_store import RecordStore
-from pist.secrets import CredentialStore
+from pist.records.lock import record_writer_lock
+from pist.records.store import RecordStore, RecordSyncState
+from pist.records.sync import RecordSyncService
 from pist.settings import PistSettings, SettingsStore
-from pist.sheet_report import field_coverage_report
-from pist.smartsheet import InspectionReport, TencentSmartSheetClient, extract_file_id
+from pist.smartsheet.client import TencentSmartSheetClient, extract_file_id
+from pist.smartsheet.models import MAX_PAGE_SIZE, InspectionReport
+from pist.smartsheet.report import field_coverage_report
 from pist.ui.entities.audit import review_entity_audit
 from pist.ui.maps.browser import browse_maps
+from pist.ui.records.app import browse_records
 
 INSPECT_DIR = PIST_DIR / 'inspect'
 MOD_REPORT_DIR = PIST_DIR / 'mods'
@@ -87,18 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
         '--output-path', type=Path, help='Markdown output path; defaults beside input.'
     )
 
-    record = subcommands.add_parser('record', help='Manage saved local map records.')
-    record_subcommands = record.add_subparsers(dest='record_command', required=True)
-    sync = record_subcommands.add_parser(
+    records = subcommands.add_parser('records', help='Manage saved local map records.')
+    records_subcommands = records.add_subparsers(dest='records_command', required=True)
+    records_subcommands.add_parser(
+        'browse', help='Browse and edit local history without game files.'
+    )
+    sync = records_subcommands.add_parser(
         'sync', help='Synchronize one saved local record to the main table.'
     )
     sync.add_argument(
-        'record_id', type=int, help='Local record identifier shown after saving a record.'
-    )
-    mode = sync.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--add', dest='update', action='store_false', help='Add a new record.')
-    mode.add_argument(
-        '--update', dest='update', action='store_true', help='Update one matching record.'
+        'record_id', type=int, help='Internal local record ID, not the formal record number.'
     )
     sync.add_argument('--sheet-source', help='Smart Sheet URL or file ID; defaults to settings.')
     mods = subcommands.add_parser('mods', help='Inspect locally enabled Mods.')
@@ -160,7 +163,7 @@ async def set_credentials(store: CredentialStore) -> None:
     if not client_id or not access_token or not open_id:
         raise ValueError('Client ID, Access Token, and Open ID cannot be empty.')
     await store.save_credentials(client_id, access_token, open_id)
-    print('Tencent Docs credentials were saved to Windows Credential Manager.')
+    print('Tencent Docs credentials were saved to the configured system credential backend.')
 
 
 def update_settings(store: SettingsStore, **changes: object) -> PistSettings:
@@ -229,8 +232,8 @@ async def inspect_sheet(
     record_limit: int,
     output_dir: Path,
 ) -> None:
-    if record_limit < 1 or record_limit > 100:
-        raise ValueError('--record-limit must be between 1 and 100.')
+    if record_limit < 1 or record_limit > MAX_PAGE_SIZE:
+        raise ValueError(f'--record-limit must be between 1 and {MAX_PAGE_SIZE}.')
     client = TencentSmartSheetClient(store)
     result = await client.inspect(extract_file_id(source), record_limit=record_limit)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -241,20 +244,29 @@ async def inspect_sheet(
     print(json.dumps(inspection_summary(result), ensure_ascii=False, indent=2))
 
 
-async def sync_saved_record(
-    store: CredentialStore, source: str, record_id: int, *, update: bool
-) -> None:
-    """Synchronize one local record using an explicit add or update operation."""
-    record = RecordStore().load(record_id)
-    client = TencentSmartSheetClient(store)
-    remote_record_id = await client.sync_record(extract_file_id(source), record, update=update)
-    action = '更新' if update else '新增'
-    print(f'已{action}表格记录：{remote_record_id}')
+async def sync_saved_record(store: CredentialStore, source: str, record_id: int) -> None:
+    """Sync one exact local record, refusing unreviewed conflicts or ambiguous identity."""
+    with record_writer_lock():
+        records = RecordStore()
+        record = records.load(record_id)
+        service = RecordSyncService(records, TencentSmartSheetClient(store), source)
+        check = await service.check(record)
+        if check.issues:
+            raise ValueError('\n'.join(check.issues))
+        if check.differences:
+            titles = '、'.join(diff.title for diff in check.differences)
+            raise ValueError(f'远端存在未确认的变化：{titles}。请在编辑界面核对，未执行写入。')
+        result = await service.save(record, check)
+        if not result.synced or records.sync_state(record_id) is not RecordSyncState.SYNCED:
+            raise RuntimeError(f'本地 ID {record_id} 仍待同步：{result.error or "本地数据已变化"}')
+        print(f'本地 ID {record_id} 已同步并回读确认。')
 
 
 def create_sheet_report(input_path: Path, output_path: Path | None) -> Path:
     """Create a Markdown field-coverage report without accessing the network."""
-    result = InspectionReport.model_validate_json(input_path.read_text(encoding='utf-8'))
+    result = InspectionReport.model_validate_json(
+        input_path.read_text(encoding='utf-8'), by_name=True
+    )
     if output_path is None:
         output_path = input_path.with_name(f'{input_path.stem}-fields.md')
     output_path.write_text(field_coverage_report(result), encoding='utf-8')
@@ -311,7 +323,9 @@ def latest_inspection_report() -> InspectionReport | None:
     if not paths:
         return None
     try:
-        return InspectionReport.model_validate_json(paths[0].read_text(encoding='utf-8'))
+        return InspectionReport.model_validate_json(
+            paths[0].read_text(encoding='utf-8'), by_name=True
+        )
     except (OSError, ValueError) as error:
         raise ValueError(f'Invalid latest Sheet inspection: {paths[0]!r}') from error
 
@@ -405,12 +419,18 @@ async def async_main(args: argparse.Namespace) -> None:
     elif args.command == 'sheet' and args.sheet_command == 'report':
         output_path = create_sheet_report(args.input_path, args.output_path)
         print(f'Field-coverage report saved to: {output_path}')
-    elif args.command == 'record' and args.record_command == 'sync':
+    elif args.command == 'records' and args.records_command == 'browse':
+        source = settings_store.load().smartsheet_url
+        await browse_records(
+            settings_store=settings_store,
+            client=TencentSmartSheetClient(store) if source is not None else None,
+            source=source,
+        )
+    elif args.command == 'records' and args.records_command == 'sync':
         await sync_saved_record(
             store,
             default_sheet_source(args.sheet_source, settings_store.load()),
             args.record_id,
-            update=args.update,
         )
     elif args.command == 'mods' and args.mods_command == 'scan':
         scan_mods(
@@ -447,7 +467,7 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         asyncio.run(async_main(args))
-    except (RuntimeError, TypeError, ValueError) as error:
+    except (ClientError, OSError, RuntimeError, TypeError, ValueError) as error:
         print(f'Error: {error}', file=sys.stderr)
         raise SystemExit(1) from error
 

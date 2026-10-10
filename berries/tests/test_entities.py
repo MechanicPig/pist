@@ -6,31 +6,20 @@ import pytest
 import tomlkit
 from pydantic import ValidationError
 
-from berries.entities.rules import (
-    SHARED_ENTITIES_PATH,
-    EntityConfigStore,
-    EntityKind,
-    EntityRule,
-    EntityRuleLayer,
-    EntityRules,
-    EntityRulesForId,
-    entity_rules_toml,
-    load_entity_rule_layers,
-    load_entity_rules,
-)
+from berries.entities import rules as entity_rules
 
-SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
+SHARED_RULES = entity_rules.load_entity_rules(entity_rules.SHARED_ENTITIES_PATH)
 
 
 @pytest.mark.parametrize(
     'model',
     (
-        lambda: EntityRule(missing=('',)),
-        lambda: EntityRule(missing_meta=('',)),
+        lambda: entity_rules.EntityRule(missing=('',)),
+        lambda: entity_rules.EntityRule(missing_meta=('',)),
     ),
 )
 def test_entity_rule_configuration_rejects_blank_required_names(
-    model: Callable[[], EntityRule],
+    model: Callable[[], entity_rules.EntityRule],
 ) -> None:
     with pytest.raises(ValueError):
         model()
@@ -72,7 +61,7 @@ def test_entity_kind_uses_exact_entity_and_attribute_rules(
 
 
 def test_kind_sprite_is_inherited_without_implying_statistics() -> None:
-    rules = load_entity_rules(SHARED_ENTITIES_PATH)
+    rules = entity_rules.load_entity_rules(entity_rules.SHARED_ENTITIES_PATH)
 
     assert rules.kind_sprite('strawberry') == 'strawberry.png'
     assert rules.kind_sprite('goldenberry') is None
@@ -107,7 +96,7 @@ rules = [{ kind = 'testberry', when = { moon = true } }]
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
+    rules = entity_rules.load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert rules.entity_kind('TestHelper/Berry', {'moon': True}) == 'testberry'
     assert rules.entity_kind('TestHelper/Berry', {'moon': False}) is None
@@ -128,7 +117,7 @@ rules = [{ kind = 'berry' }]
     )
 
     with pytest.raises(ValueError, match='Invalid entity rules config'):
-        load_entity_rules(entities_path, kinds_path=kinds_path)
+        entity_rules.load_entity_rules(entities_path, kinds_path=kinds_path)
 
 
 def test_entity_rules_support_metadata_conditions_and_terminal_non_collectibles(
@@ -153,7 +142,7 @@ rules = [
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
+    rules = entity_rules.load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert rules.entity_kind('TestHelper/Heart', {'fake': True}) is None
     assert (
@@ -165,20 +154,22 @@ rules = [
     assert rules.entity_kind('TestHelper/Heart', {'fake': False}, meta={}) is None
     assert rules.entity_kind('TestHelper/Heart', {}, meta={'HeartIsEnd': False}) is None
 
-    serialized = entity_rules_toml(rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}))
+    serialized = entity_rules.entity_rules_toml(
+        rules.with_exclusion('TestHelper/OtherHeart', {'fake': True})
+    )
     assert 'exclude' not in serialized
     assert '[[' not in serialized
     assert '.rules.' not in serialized
     assert 'missing = ["fake"]' in serialized
     assert (
-        EntityRuleLayer.model_validate(tomllib.loads(serialized)).entities
+        entity_rules.EntityRuleLayer.model_validate(tomllib.loads(serialized)).entities
         == rules.with_exclusion('TestHelper/OtherHeart', {'fake': True}).entities
     )
 
 
 def test_entity_rules_reject_overlapping_value_and_missing_conditions() -> None:
     with pytest.raises(ValueError, match='both matched and missing'):
-        EntityRule(when={'moon': False}, missing=('moon',))
+        entity_rules.EntityRule(when={'moon': False}, missing=('moon',))
 
 
 def test_more_specific_rules_precede_defaults_regardless_of_write_order(tmp_path: Path) -> None:
@@ -189,9 +180,9 @@ label = 'Strawberry'
 """,
         encoding='utf-8',
     )
-    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path)).with_rule(
-        'Example/Berry', 'strawberry', {}
-    )
+    rules = entity_rules.load_entity_rules(
+        config_path, kinds_path=_split_config(config_path)
+    ).with_rule('Example/Berry', 'strawberry', {})
     rules = rules.with_exclusion('Example/Berry', {'fake': True})
 
     assert rules.entity_kind('Example/Berry', {'fake': True}) is None
@@ -212,7 +203,10 @@ rules = [{ kind = 'test' }]
     )
 
     kinds_path = _split_config(config_path)
-    assert load_entity_rules(config_path, kinds_path=kinds_path).entity_kind('Test', {}) == 'test'
+    assert (
+        entity_rules.load_entity_rules(config_path, kinds_path=kinds_path).entity_kind('Test', {})
+        == 'test'
+    )
     if invalid_reference == 'parent':
         kinds_path.write_text(
             "[kinds.test]\nlabel = 'Test'\nparent = 'missing'\n", encoding='utf-8'
@@ -225,7 +219,7 @@ rules = [{ kind = 'test' }]
         message = "Unknown kind 'missing'"
 
     with pytest.raises(ValueError, match='Invalid entity rules config') as caught:
-        load_entity_rules(config_path, kinds_path=kinds_path)
+        entity_rules.load_entity_rules(config_path, kinds_path=kinds_path)
     assert isinstance(caught.value.__cause__, ValidationError)
     assert message in str(caught.value.__cause__)
 
@@ -246,16 +240,18 @@ rules = [{ kind = 'berry' }]
         encoding='utf-8',
     )
 
-    rules = load_entity_rules(config_path, kinds_path=_split_config(config_path))
+    rules = entity_rules.load_entity_rules(config_path, kinds_path=_split_config(config_path))
 
     assert rules.entity_kind('TestHelper/Berry', {}) == 'berry'
 
 
 def test_adding_a_child_preserves_rules_targeting_its_new_parent() -> None:
-    rules = EntityRules(
-        kinds={'moonberry': EntityKind(label='月莓')},
+    rules = entity_rules.EntityRules(
+        kinds={'moonberry': entity_rules.EntityKind(label='月莓')},
         entities={
-            'strawberry': EntityRulesForId(rules=(EntityRule(kind='moonberry'),)),
+            'strawberry': entity_rules.EntityRulesForId(
+                rules=(entity_rules.EntityRule(kind='moonberry'),)
+            ),
         },
     )
 
@@ -273,7 +269,7 @@ label = 'Berry'
 """,
         encoding='utf-8',
     )
-    store = EntityConfigStore(config_path, kinds_path=_split_config(config_path))
+    store = entity_rules.EntityConfigStore(config_path, kinds_path=_split_config(config_path))
 
     rules = store.load().with_kind(
         'customberry', 'Custom Berry', parent='berry', sprite='customberry.png'
@@ -288,10 +284,10 @@ label = 'Berry'
 
 
 def test_entity_rules_can_update_a_kind_without_renaming_it() -> None:
-    rules = EntityRules(
+    rules = entity_rules.EntityRules(
         kinds={
-            'berry': EntityKind(label='Berry'),
-            'customberry': EntityKind(label='Custom Berry', parent='berry'),
+            'berry': entity_rules.EntityKind(label='Berry'),
+            'customberry': entity_rules.EntityKind(label='Custom Berry', parent='berry'),
         }
     )
 
@@ -299,16 +295,16 @@ def test_entity_rules_can_update_a_kind_without_renaming_it() -> None:
         'customberry', 'Custom Strawberry', parent='berry', sprite='customberry.png'
     )
 
-    assert updated.kinds['customberry'] == EntityKind(
+    assert updated.kinds['customberry'] == entity_rules.EntityKind(
         label='Custom Strawberry', parent='berry', sprite='customberry.png'
     )
 
 
 def test_entity_rules_validate_kind_hierarchy_after_an_update() -> None:
-    rules = EntityRules(
+    rules = entity_rules.EntityRules(
         kinds={
-            'berry': EntityKind(label='Berry'),
-            'strawberry': EntityKind(label='Strawberry', parent='berry'),
+            'berry': entity_rules.EntityKind(label='Berry'),
+            'strawberry': entity_rules.EntityKind(label='Strawberry', parent='berry'),
         }
     )
 
@@ -317,15 +313,19 @@ def test_entity_rules_validate_kind_hierarchy_after_an_update() -> None:
 
 
 def test_entity_rules_can_rename_a_kind_and_its_references() -> None:
-    rules = EntityRules(
+    rules = entity_rules.EntityRules(
         kinds={
-            'berry': EntityKind(label='Berry'),
-            'strawberry': EntityKind(label='Strawberry', parent='berry'),
-            'goldenberry': EntityKind(label='Golden Berry', parent='strawberry'),
+            'berry': entity_rules.EntityKind(label='Berry'),
+            'strawberry': entity_rules.EntityKind(label='Strawberry', parent='berry'),
+            'goldenberry': entity_rules.EntityKind(label='Golden Berry', parent='strawberry'),
         },
         entities={
-            'strawberry': EntityRulesForId(rules=(EntityRule(kind='strawberry'),)),
-            'goldenBerry': EntityRulesForId(rules=(EntityRule(kind='goldenberry'),)),
+            'strawberry': entity_rules.EntityRulesForId(
+                rules=(entity_rules.EntityRule(kind='strawberry'),)
+            ),
+            'goldenBerry': entity_rules.EntityRulesForId(
+                rules=(entity_rules.EntityRule(kind='goldenberry'),)
+            ),
         },
     )
 
@@ -339,14 +339,16 @@ def test_entity_rules_can_rename_a_kind_and_its_references() -> None:
 
 
 def test_entity_rules_can_delete_a_kind_and_fall_back_to_its_parent() -> None:
-    rules = EntityRules(
+    rules = entity_rules.EntityRules(
         kinds={
-            'berry': EntityKind(label='Berry'),
-            'strawberry': EntityKind(label='Strawberry', parent='berry'),
-            'wingedberry': EntityKind(label='Winged Berry', parent='strawberry'),
+            'berry': entity_rules.EntityKind(label='Berry'),
+            'strawberry': entity_rules.EntityKind(label='Strawberry', parent='berry'),
+            'wingedberry': entity_rules.EntityKind(label='Winged Berry', parent='strawberry'),
         },
         entities={
-            'strawberry': EntityRulesForId(rules=(EntityRule(kind='strawberry'),)),
+            'strawberry': entity_rules.EntityRulesForId(
+                rules=(entity_rules.EntityRule(kind='strawberry'),)
+            ),
         },
     )
 
@@ -392,7 +394,7 @@ rules = [{ kind = 'strawberry' }]
 """,
         encoding='utf-8',
     )
-    store = EntityConfigStore(
+    store = entity_rules.EntityConfigStore(
         shared_path=shared_path,
         kinds_path=kinds_path,
         local_path=local_path,
@@ -430,7 +432,7 @@ sprite = '../outside.png'
 
     kinds_path = _split_config(config_path)
     with pytest.raises(ValueError, match='Invalid entity rules config') as caught:
-        load_entity_rules(config_path, kinds_path=kinds_path)
+        entity_rules.load_entity_rules(config_path, kinds_path=kinds_path)
     assert isinstance(caught.value.__cause__, ValidationError)
     errors = caught.value.__cause__.errors()
     assert len(errors) == 1
@@ -459,7 +461,7 @@ label = 'Berry'
 
     kinds_path = _split_config(config_path)
     with pytest.raises(ValueError, match='Invalid entity rules config') as caught:
-        load_entity_rules(config_path, kinds_path=kinds_path)
+        entity_rules.load_entity_rules(config_path, kinds_path=kinds_path)
     assert isinstance(caught.value.__cause__, ValidationError)
     assert [(error['loc'], error['type']) for error in caught.value.__cause__.errors()] == [
         (('kinds', 'berry', field), 'extra_forbidden')
@@ -481,7 +483,7 @@ rules = [{ kind = 'strawberry' }]
 """,
         encoding='utf-8',
     )
-    store = EntityConfigStore(source_path, kinds_path=_split_config(source_path))
+    store = entity_rules.EntityConfigStore(source_path, kinds_path=_split_config(source_path))
 
     rules = store.load().with_rule('TestHelper/Berry', 'strawberry', {'moon': True})
     store.save(rules)
@@ -523,11 +525,13 @@ rules = [{ kind = 'moonberry', when = { moon = true } }]
     )
 
     kinds_path = _split_config(shared_path)
-    store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path, local_path=local_path)
+    store = entity_rules.EntityConfigStore(
+        shared_path=shared_path, kinds_path=kinds_path, local_path=local_path
+    )
     rules = store.load().with_rule('TestHelper/Berry', 'moonberry', {'golden': True})
     store.save(rules)
 
-    reloaded = load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
+    reloaded = entity_rules.load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
     assert reloaded.entity_kind('TestHelper/Berry', {}) == 'strawberry'
     assert reloaded.entity_kind('TestHelper/Berry', {'moon': True}) == 'moonberry'
     assert reloaded.entity_kind('TestHelper/Berry', {'golden': True}) == 'moonberry'
@@ -556,7 +560,7 @@ parent = 'collectible'
 
     kinds_path = _split_config(shared_path)
     with pytest.raises(ValueError, match='Invalid entity rules config layers'):
-        load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
+        entity_rules.load_entity_rule_layers(shared_path, local_path, kinds_path=kinds_path)
 
 
 def test_local_rule_layer_reports_conflicting_shared_rule_overrides(tmp_path: Path) -> None:
@@ -587,7 +591,9 @@ rules = [{ kind = 'moonberry' }]
     )
 
     kinds_path = _split_config(shared_path)
-    store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path, local_path=local_path)
+    store = entity_rules.EntityConfigStore(
+        shared_path=shared_path, kinds_path=kinds_path, local_path=local_path
+    )
     rules = store.load()
 
     assert rules.entity_kind('TestHelper/Berry', {}) == 'moonberry'
@@ -614,7 +620,9 @@ parent = 'berry'
     )
     entities_path = tmp_path / 'entities.toml'
     entities_path.write_text('', encoding='utf-8')
-    store = EntityConfigStore(shared=True, shared_path=entities_path, kinds_path=kinds_path)
+    store = entity_rules.EntityConfigStore(
+        shared=True, shared_path=entities_path, kinds_path=kinds_path
+    )
 
     store.save(store.load().with_rule('TestHelper/Berry', 'strawberry', {}))
 
@@ -635,9 +643,13 @@ label = 'Berry'
     )
     shared_path = tmp_path / 'entities.toml'
     shared_path.write_text('', encoding='utf-8')
-    store = EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path)
-    generated = EntityRuleLayer(
-        entities={'TestHelper/Berry': EntityRulesForId(rules=(EntityRule(kind='berry'),))}
+    store = entity_rules.EntityConfigStore(shared_path=shared_path, kinds_path=kinds_path)
+    generated = entity_rules.EntityRuleLayer(
+        entities={
+            'TestHelper/Berry': entity_rules.EntityRulesForId(
+                rules=(entity_rules.EntityRule(kind='berry'),)
+            )
+        }
     )
 
     store.save_generated_layer(generated)

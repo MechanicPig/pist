@@ -18,8 +18,8 @@ from berries.map_layout import MapEntrance, MapLayout, MapPreviewEntity, MapRoom
 from berries.map_preview.session import PreviewAssets
 from pist.entity_stats import load_entity_stat_rules
 from pist.map_preview import MapPreview, MapPreviewMode
-from pist.route_store import RouteStore
-from pist.routes import MapRoute
+from pist.routes.models import MapRoute
+from pist.routes.store import RouteStore
 from test_support.browser import load_browser_modules
 from test_support.mod_factory import make_installed_mod
 from test_support.preview import preview_url
@@ -32,6 +32,58 @@ class _Request:
 
     async def json(self) -> object:
         return self._data
+
+
+def test_failed_route_save_returns_json_and_preserves_cancel_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    map_info = MapInfo(file_path=ContentPath('Maps/Test.bin'))
+    store = RouteStore(tmp_path / 'routes.sqlite3')
+    original = MapRoute(
+        map_file=map_info.file_path.as_posix(), rooms=('start',), room_counts={'start': 2}
+    )
+    store.save(original)
+    layout = MapLayout((MapRoom('start', 0, 0, 100, 100), MapRoom('goal', 100, 0, 100, 100)))
+    preview = MapPreview(map_info, layout, route_store=store, saved_route=original)
+    urls: list[str] = []
+    monkeypatch.setattr(
+        'berries.map_preview.session.webbrowser.open', lambda url: urls.append(url) or True
+    )
+    with store.connect() as conn:
+        conn.execute("""CREATE TRIGGER reject_route BEFORE INSERT ON map_routes BEGIN
+            SELECT RAISE(ABORT, 'simulated route write failure'); END""")
+
+    async def run() -> None:
+        task = asyncio.create_task(preview.preview())
+        async with preview_url(task, urls) as url, ClientSession() as session:
+            payload = {'rooms': ['goal'], 'roomCounts': {'goal': 3}}
+            async with session.post(f'{url}/save', json=payload) as response:
+                assert response.status == 500
+                assert 'simulated route write failure' in (await response.json())['error']
+            async with session.post(f'{url}/cancel') as response:
+                state = await response.json()
+                assert state['selected'] == ['start']
+                assert state['rooms'][0]['roomCount'] == 2
+            assert store.load(original.map_file) == original
+            reopened = MapPreview(
+                map_info, layout, route_store=store, saved_route=store.load(original.map_file)
+            )
+            state_response = await reopened._state(cast(web.Request, _Request({})))
+            assert state_response.text is not None
+            assert json.loads(state_response.text)['selected'] == ['start']
+            with store.connect() as conn:
+                conn.execute('DROP TRIGGER reject_route')
+            async with session.post(f'{url}/save', json=payload) as response:
+                assert response.status == 200
+            async with session.post(f'{url}/cancel') as response:
+                state = await response.json()
+                assert state['selected'] == ['goal']
+                assert state['rooms'][1]['roomCount'] == 3
+            assert store.load(original.map_file) == MapRoute(
+                map_file=original.map_file, rooms=('goal',), room_counts={'goal': 3}
+            )
+
+    asyncio.run(run())
 
 
 def test_map_preview_rejects_invalid_browser_requests() -> None:
@@ -639,6 +691,7 @@ def test_map_preview_serves_loopback_state_and_persists_saved_route(
                 'edit_state.js',
                 'overlays.js',
                 'object_info.js',
+                'mouse.js',
                 'room_list.js',
             } <= modules
             async with session.get(f'{url}/assets/unregistered.js') as response:

@@ -2,18 +2,18 @@
 
 from dataclasses import dataclass
 
-from pist.records import MANUAL_RECORD_FIELD_TITLES
-from pist.smartsheet import InspectionReport, SmartSheetField
+from pist.records.fields import RECORD_ATTRIBUTES
+from pist.smartsheet.models import FieldsResult, FieldType, InspectionReport
 
-FIELD_TYPES = {
-    1: '文本',
-    2: '数字',
-    3: '复选框',
-    4: '日期',
-    8: '链接',
-    9: '多选',
-    17: '单选',
-    19: '公式',
+FIELD_TYPES: dict[int, str] = {
+    FieldType.TEXT: '文本',
+    FieldType.NUMBER: '数字',
+    FieldType.CHECKBOX: '复选框',
+    FieldType.DATE: '日期',
+    FieldType.LINK: '链接',
+    FieldType.MULTI_SELECT: '多选',
+    FieldType.SINGLE_SELECT: '单选',
+    FieldType.FORMULA: '公式',
 }
 
 FIELD_SOURCES = {
@@ -32,7 +32,7 @@ FIELD_SOURCES = {
     '磁带': ('计划自动', '.bin 地图实体分析'),
     '水晶之心': ('计划自动', '.bin 地图实体分析'),
     '主房间数': ('当前记录', '用户保存的地图主路线房间数'),
-    '状态': ('计划自动', '由通关和收集情况推导'),
+    '状态': ('人工填写', '用户选择；存档推断的通关状态仅供参考'),
     '标签': ('人工填写', '尚无可靠自动提取规则'),
     '体感难度': ('人工填写', '主观评价'),
     '难度子阶': ('人工填写', '主观评价'),
@@ -47,35 +47,35 @@ MAIN_TABLE_TITLE = '主表'
 
 @dataclass(frozen=True, slots=True)
 class ManualRecordField:
-    """One optional manually-entered field supported by the current main table."""
+    """One editable public record field and its available sheet options."""
 
     title: str
     field_type: int
     options: tuple[str, ...] = ()
 
 
-def inspection_fields(report: InspectionReport) -> list[SmartSheetField]:
-    """Return validated field metadata from every inspected sub-sheet."""
-    return [field for inspection in report.sheets for field in inspection.fields.fields]
-
-
 def manual_record_fields(report: InspectionReport) -> tuple[ManualRecordField, ...]:
-    """Return supported optional record fields declared by the inspected main table."""
+    """Return supported editable fields declared by the inspected main table."""
     for inspection in report.sheets:
         if inspection.sheet.title != MAIN_TABLE_TITLE:
             continue
-        result: list[ManualRecordField] = []
-        for field in inspection.fields.fields:
-            if field.field_title not in MANUAL_RECORD_FIELD_TITLES:
-                continue
-            options = (
-                ()
-                if field.property_single_select is None
-                else tuple(option.text for option in field.property_single_select.options)
-            )
-            result.append(ManualRecordField(field.field_title, field.field_type, options))
-        return tuple(result)
+        return manual_fields_for_schema(inspection.fields)
     return ()
+
+
+def manual_fields_for_schema(fields: FieldsResult) -> tuple[ManualRecordField, ...]:
+    """Build editor controls from one freshly validated main-table schema."""
+    return tuple(
+        ManualRecordField(
+            field.field_title,
+            field.field_type,
+            ()
+            if field.property_single_select is None
+            else tuple(option.text for option in field.property_single_select.options),
+        )
+        for field in fields.fields
+        if field.field_title in RECORD_ATTRIBUTES and field.property_formula is None
+    )
 
 
 def field_coverage_report(report: InspectionReport) -> str:

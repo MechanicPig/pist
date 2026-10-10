@@ -2,6 +2,8 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import IntEnum
+from os import environ
 from struct import unpack_from
 
 BIN_HEADER = 'CELESTE MAP'
@@ -9,10 +11,23 @@ MAX_FILE_SIZE = 64 * 1024 * 1024
 MAX_DECODED_TEXT_SIZE = 64 * 1024 * 1024
 MAX_LOOKUP_SIZE = 65_535
 MAX_ELEMENT_COUNT = 1_000_000
-MAX_RECURSION_DEPTH = 1_000
+DEFAULT_MAX_DEPTH = 32
 
 type NumericAttrValue = int | float
 type AttrValue = bool | NumericAttrValue | str
+
+
+class ValueTag(IntEnum):
+    """BinaryPacker's one-byte attribute value discriminators."""
+
+    BOOLEAN = 0
+    BYTE = 1
+    SHORT = 2
+    INT = 3
+    FLOAT = 4
+    LOOKUP_STRING = 5
+    STRING = 6
+    RLE_STRING = 7
 
 
 class BadMapBin(ValueError):
@@ -33,9 +48,14 @@ class BinElement:
 
     def walk(self) -> Iterator[BinElement]:
         """Yield this element and every descendant in depth-first order."""
-        yield self
-        for child in self.children:
-            yield from child.walk()
+        pending: list[Iterator[BinElement]] = [iter((self,))]
+        while pending:
+            element = next(pending[-1], None)
+            if element is None:
+                pending.pop()
+            else:
+                yield element
+                pending.append(iter(element.children))
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,21 +73,39 @@ class BinMap:
                     yield room
 
 
+@dataclass(slots=True)
+class _ElementFrame:
+    """An element whose remaining child payload has not yet been decoded."""
+
+    name: str
+    attrs: dict[str, AttrValue]
+    children: list[BinElement]
+    remaining_children: int
+
+
 class _BinReader:
     """Bounds-checked little-endian reader for BinaryPacker primitives."""
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, *, max_depth: int | None = None) -> None:
+        if max_depth is None:
+            try:
+                max_depth = int(environ.get('BERRIES_MAX_MAP_DEPTH', str(DEFAULT_MAX_DEPTH)))
+            except ValueError as error:
+                raise ValueError('BERRIES_MAX_MAP_DEPTH must be a positive integer.') from error
+        if type(max_depth) is not int or max_depth < 1:
+            raise ValueError('Map depth limit must be a positive integer.')
         self._data = data
+        self._max_depth = max_depth
         self._offset = 0
         self._element_count = 0
         self._decoded_text_size = 0
 
     def read_map(self, *, allow_trailing: bool) -> BinMap:
         """Decode a complete BinaryPacker map file."""
-        package, lookup = self.read_header()
+        pkg, lookup = self.read_header()
         root = self.read_element(lookup, depth=0)
         self.check_trailing(allow_trailing)
-        return BinMap(package=package, root=root)
+        return BinMap(package=pkg, root=root)
 
     def read_map_meta(self, *, allow_trailing: bool) -> dict[str, AttrValue]:
         """Read only the root ``meta`` element while skipping all other map data."""
@@ -104,16 +142,30 @@ class _BinReader:
             raise BadMapBin('Unexpected trailing data after map root element.')
 
     def read_element(self, lookup: tuple[str, ...], *, depth: int) -> BinElement:
-        """Decode one recursively nested BinaryPacker element."""
+        """Decode one element and its descendants within the nesting safety limit."""
+        pending = [self.read_element_frame(lookup, depth=depth)]
+        while True:
+            frame = pending[-1]
+            if frame.remaining_children:
+                frame.remaining_children -= 1
+                pending.append(self.read_element_frame(lookup, depth=depth + len(pending)))
+                continue
+            element = BinElement(frame.name, frame.attrs, tuple(frame.children))
+            pending.pop()
+            if not pending:
+                return element
+            pending[-1].children.append(element)
+
+    def read_element_frame(self, lookup: tuple[str, ...], *, depth: int) -> _ElementFrame:
+        """Read an element's attributes and the number of child payloads it owns."""
         name, attr_count = self.read_element_header(lookup, depth=depth)
         attrs = self.read_attrs(lookup, attr_count)
-        children = tuple(self.read_element(lookup, depth=depth + 1) for _ in range(self.read_u16()))
-        return BinElement(name=name, attrs=attrs, children=children)
+        return _ElementFrame(name, attrs, [], self.read_u16())
 
     def read_element_header(self, lookup: tuple[str, ...], *, depth: int) -> tuple[str, int]:
         """Read one element's name and attribute count, enforcing parser limits."""
-        if depth >= MAX_RECURSION_DEPTH:
-            raise BadMapBin(f'Map element nesting exceeds {MAX_RECURSION_DEPTH}.')
+        if depth >= self._max_depth:
+            raise BadMapBin(f'Map element nesting exceeds {self._max_depth} levels.')
         self._element_count += 1
         if self._element_count > MAX_ELEMENT_COUNT:
             raise BadMapBin(f'Map element count exceeds {MAX_ELEMENT_COUNT}.')
@@ -131,33 +183,34 @@ class _BinReader:
 
     def skip_children(self, lookup: tuple[str, ...], *, depth: int) -> None:
         """Skip all children belonging to the current element."""
-        for _ in range(self.read_u16()):
-            self.skip_element(lookup, depth=depth + 1)
-
-    def skip_element(self, lookup: tuple[str, ...], *, depth: int) -> None:
-        """Consume one element without allocating its attributes or children."""
-        _, attr_count = self.read_element_header(lookup, depth=depth)
-        self.skip_attrs(lookup, attr_count)
-        self.skip_children(lookup, depth=depth)
+        pending = [self.read_u16()]
+        while pending:
+            if not pending[-1]:
+                pending.pop()
+                continue
+            pending[-1] -= 1
+            _, attr_count = self.read_element_header(lookup, depth=depth + len(pending))
+            self.skip_attrs(lookup, attr_count)
+            pending.append(self.read_u16())
 
     def read_value(self, lookup: tuple[str, ...]) -> AttrValue:
         """Decode a value after its one-byte BinaryPacker type tag."""
         match self.read_u8():
-            case 0:
+            case ValueTag.BOOLEAN:
                 return self.read_u8() != 0
-            case 1:
+            case ValueTag.BYTE:
                 return self.read_u8()
-            case 2:
+            case ValueTag.SHORT:
                 return self.read_i16()
-            case 3:
+            case ValueTag.INT:
                 return self.read_i32()
-            case 4:
+            case ValueTag.FLOAT:
                 return self.read_f32()
-            case 5:
+            case ValueTag.LOOKUP_STRING:
                 return self.read_lookup(lookup)
-            case 6:
+            case ValueTag.STRING:
                 return self.read_string()
-            case 7:
+            case ValueTag.RLE_STRING:
                 return self.read_rle_string()
             case type_id:
                 raise BadMapBin(f'Unknown BinaryPacker value type: {type_id}.')
@@ -165,17 +218,17 @@ class _BinReader:
     def skip_value(self) -> None:
         """Consume one BinaryPacker attribute value without constructing it."""
         match self.read_u8():
-            case 0 | 1:
+            case ValueTag.BOOLEAN | ValueTag.BYTE:
                 self.skip_bytes(1)
-            case 2:
+            case ValueTag.SHORT:
                 self.skip_bytes(2)
-            case 3 | 4:
+            case ValueTag.INT | ValueTag.FLOAT:
                 self.skip_bytes(4)
-            case 5:
+            case ValueTag.LOOKUP_STRING:
                 self.skip_bytes(2)
-            case 6:
+            case ValueTag.STRING:
                 self.skip_bytes(self.read_varlen())
-            case 7:
+            case ValueTag.RLE_STRING:
                 self.skip_bytes(self.read_u16())
             case type_id:
                 raise BadMapBin(f'Unknown BinaryPacker value type: {type_id}.')
@@ -270,11 +323,25 @@ class _BinReader:
             raise BadMapBin(f'Decoded text exceeds {MAX_DECODED_TEXT_SIZE} byte limit.')
 
 
-def parse_map_bin(data: bytes, *, allow_trailing: bool = False) -> BinMap:
-    """Decode a `.bin` map file, optionally accepting extra payload data."""
-    return _BinReader(data).read_map(allow_trailing=allow_trailing)
+def parse_map_bin(
+    data: bytes, *, allow_trailing: bool = False, max_depth: int | None = None
+) -> BinMap:
+    """Decode a map with a configurable level limit including the root element.
+
+    An explicit max_depth overrides BERRIES_MAX_MAP_DEPTH; otherwise the environment
+    setting or DEFAULT_MAX_DEPTH is used. Exceeding the limit raises BadMapBin.
+    """
+    return _BinReader(data, max_depth=max_depth).read_map(allow_trailing=allow_trailing)
 
 
-def parse_map_meta(data: bytes, *, allow_trailing: bool = False) -> dict[str, AttrValue]:
-    """Read the top-level map metadata without constructing a full map tree."""
-    return _BinReader(data).read_map_meta(allow_trailing=allow_trailing)
+def parse_map_meta(
+    data: bytes, *, allow_trailing: bool = False, max_depth: int | None = None
+) -> dict[str, AttrValue]:
+    """Read metadata within a configurable level limit, including the root element.
+
+    With allow_trailing, return as soon as root metadata is found; unread payload
+    is not validated. Otherwise, validate the complete map structure.
+    The depth limit follows the same argument/environment/default priority as
+    parse_map_bin.
+    """
+    return _BinReader(data, max_depth=max_depth).read_map_meta(allow_trailing=allow_trailing)

@@ -10,12 +10,13 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.notifications import SeverityLevel
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
+from textual.widget import AwaitMount
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
 from pist.ui.context_menu import ContextMenuScreen
-
-RIGHT_MOUSE_BUTTON = 3
+from pist.ui.mouse import RIGHT_MOUSE_BUTTON
+from pist.ui.toast_compositor import ToastCompositor
 
 
 @dataclass(frozen=True, eq=False)
@@ -163,6 +164,18 @@ class DiagnosticApp[ReturnType](App[ReturnType]):
 
     BINDINGS: ClassVar = [('f2', 'show_messages', '警告与错误')]
 
+    def get_default_screen(self) -> Screen:
+        screen = super().get_default_screen()
+        screen._compositor = ToastCompositor()
+        return screen
+
+    def _get_screen(self, screen: Screen | str) -> tuple[Screen, AwaitMount]:
+        """Apply the notification rendering workaround to every workflow and modal."""
+        mounted, await_mount = super()._get_screen(screen)
+        if not isinstance(mounted._compositor, ToastCompositor):
+            mounted._compositor = ToastCompositor()
+        return mounted, await_mount
+
     @cached_property
     def _runtime_messages(self) -> list[RuntimeMessage]:
         return []
@@ -202,9 +215,10 @@ class DiagnosticApp[ReturnType](App[ReturnType]):
     def diagnostics_changed(self) -> None:
         """Refresh any application-specific diagnostic count indicator."""
 
-    def action_show_messages(self) -> None:
+    async def action_show_messages(self) -> None:
+        """Open diagnostics and wait until the window contents are mounted."""
         if not isinstance(self.screen, MessagesScreen):
-            self.push_screen(
+            await self.push_screen(
                 MessagesScreen(
                     self.loading_warnings,
                     tuple(self._runtime_messages),

@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from pist.catalog_cache import CatalogCache
-from pist.record_store import RecordStore
-from pist.route_store import RouteStore
+from pist.records.store import RecordStore
+from pist.routes.store import RouteStore
 from pist.sqlite_store import LOCAL_DATA_PATH
 
 

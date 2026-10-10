@@ -18,32 +18,8 @@ from berries.game.binmap import AttrValue
 from berries.game.map_source import MapSource
 from pist.paths import PIST_DIR
 
+from . import models
 from .inference import rule_candidates_for_detail
-from .models import (
-    CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS,
-    CLASSIFICATION_IRRELEVANT_STATUSES,
-    LOCATION_ATTR_NAMES,
-    META_ATTR_PREFIX,
-    UNKNOWN,
-    AttrAuditStatus,
-    AttrAuditSummary,
-    AuditMapOccurrences,
-    AuditReport,
-    AuditSource,
-    DefaultValue,
-    EntityAuditDetail,
-    EntityAuditStatus,
-    EntityAuditSummary,
-    EntityKindConfirmation,
-    EntityVariant,
-    EntityVariantSignature,
-    ObservationQuestion,
-    ObservationStatus,
-    RawEntityOccurrence,
-    RuleCandidate,
-    VariantObservation,
-)
-from .models import VariantKey as _VariantKey
 
 LOCAL_AUDIT_DB_PATH = PIST_DIR / 'entity-audit.sqlite3'
 ATTRS_ADAPTER = TypeAdapter(dict[str, AttrValue])
@@ -58,7 +34,7 @@ class _VariantReviewChecker:
     """An immutable audit snapshot used while reviewing one decoded map."""
 
     ignored_names_by_entity: Mapping[str, frozenset[str]]
-    reviewed_signatures_by_entity: Mapping[str, frozenset[EntityVariantSignature]]
+    reviewed_signatures_by_entity: Mapping[str, frozenset[models.EntityVariantSignature]]
 
     def __call__(
         self,
@@ -74,8 +50,8 @@ class _VariantReviewChecker:
 
 
 def occurrences_for_variants(
-    occurrences: Iterable[RawEntityOccurrence], variants: Iterable[EntityVariant]
-) -> tuple[RawEntityOccurrence, ...]:
+    occurrences: Iterable[models.RawEntityOccurrence], variants: Iterable[models.EntityVariant]
+) -> tuple[models.RawEntityOccurrence, ...]:
     """Return raw occurrences represented by the given semantic attribute variants."""
     keys = {_variant_key(variant.attrs, variant.meta) for variant in variants}
     return tuple(
@@ -96,7 +72,7 @@ class EntityAuditStore:
         """Import one report's raw entity occurrences, preserving older reports."""
         data = path.read_bytes()
         try:
-            report = AuditReport.model_validate_json(data)
+            report = models.AuditReport.model_validate_json(data)
         except ValidationError as error:
             raise ValueError(f'Invalid entity audit report: {path!r}') from error
         digest = hashlib.sha256(data).hexdigest()
@@ -144,7 +120,9 @@ class EntityAuditStore:
                     )
         return report_id
 
-    def entity_summaries(self, report_id: int | None = None) -> tuple[EntityAuditSummary, ...]:
+    def entity_summaries(
+        self, report_id: int | None = None
+    ) -> tuple[models.EntityAuditSummary, ...]:
         """Return entity-level counts for one imported report, newest by default."""
         with self._connect() as conn:
             report_id = self._report_id(conn, report_id)
@@ -171,11 +149,11 @@ class EntityAuditStore:
             ):
                 map_files[row['entity_name']].add(row['map_file'])
             return tuple(
-                EntityAuditSummary(
+                models.EntityAuditSummary(
                     row['entity_name'],
                     int(row['occurrence_count']),
                     None,
-                    EntityAuditStatus(row['status']),
+                    models.EntityAuditStatus(row['status']),
                     tuple(sorted(map_files[row['entity_name']], key=str.casefold)),
                 )
                 for row in rows
@@ -186,7 +164,9 @@ class EntityAuditStore:
         with self._connect() as conn:
             return self._report_id(conn, None)
 
-    def entity_detail(self, entity_name: str, report_id: int | None = None) -> EntityAuditDetail:
+    def entity_detail(
+        self, entity_name: str, report_id: int | None = None
+    ) -> models.EntityAuditDetail:
         """Return raw occurrences and attribute knowledge for one entity ID."""
         with self._connect() as conn:
             report_id = self._report_id(conn, report_id)
@@ -199,9 +179,9 @@ class EntityAuditStore:
             variants = () if report_id is None else self._variants(conn, report_id, entity_name)
             attr_summaries = self._attr_summaries(conn, entity_name, variants)
             confirmation = self._entity_kind_confirmation(conn, entity_name)
-            return EntityAuditDetail(
+            return models.EntityAuditDetail(
                 entity_name,
-                EntityAuditStatus(row['status']),
+                models.EntityAuditStatus(row['status']),
                 row['reason'],
                 row['evidence'],
                 confirmation,
@@ -211,15 +191,15 @@ class EntityAuditStore:
 
     def occurrences(
         self, entity_name: str, report_id: int | None = None
-    ) -> tuple[RawEntityOccurrence, ...]:
+    ) -> tuple[models.RawEntityOccurrence, ...]:
         """Load raw positions only for an explicit occurrence-inspection request."""
         with self._connect() as conn:
             report_id = self._report_id(conn, report_id)
             return () if report_id is None else self._occurrences(conn, report_id, entity_name)
 
     def map_occurrences(
-        self, entity_name: str, source: AuditSource, report_id: int | None = None
-    ) -> tuple[RawEntityOccurrence, ...]:
+        self, entity_name: str, source: models.AuditSource, report_id: int | None = None
+    ) -> tuple[models.RawEntityOccurrence, ...]:
         """Load raw coordinates for one map preview only."""
         with self._connect() as conn:
             report_id = self._report_id(conn, report_id)
@@ -231,8 +211,8 @@ class EntityAuditStore:
         self,
         entity_name: str,
         report_id: int | None = None,
-        variants: Iterable[EntityVariant] | None = None,
-    ) -> tuple[AuditMapOccurrences, ...]:
+        variants: Iterable[models.EntityVariant] | None = None,
+    ) -> tuple[models.AuditMapOccurrences, ...]:
         """Return map and room counts without materializing raw entity instances."""
         with self._connect() as conn:
             report_id = self._report_id(conn, report_id)
@@ -255,7 +235,7 @@ class EntityAuditStore:
                 else {_variant_key(variant.attrs, variant.meta) for variant in variants}
             )
             maps: dict[
-                tuple[str, str, str | None, str | None], tuple[AuditSource, Counter[str]]
+                tuple[str, str, str | None, str | None], tuple[models.AuditSource, Counter[str]]
             ] = {}
             for row in rows:
                 if (
@@ -267,7 +247,7 @@ class EntityAuditStore:
                 map_key = row['scope'], row['map_file'], row['mod_file'], row['package']
                 entry = maps.get(map_key)
                 if entry is None:
-                    source = AuditSource(
+                    source = models.AuditSource(
                         scope=row['scope'],
                         map_file=row['map_file'],
                         map_name=row['map_name'],
@@ -282,7 +262,7 @@ class EntityAuditStore:
                     _, room_counts = entry
                 room_counts[row['room']] += int(row['count'])
         return tuple(
-            AuditMapOccurrences(
+            models.AuditMapOccurrences(
                 source,
                 tuple(
                     sorted(
@@ -326,9 +306,9 @@ class EntityAuditStore:
                     f"""
                     SELECT name FROM attr_knowledge
                     WHERE entity_name = ?
-                        AND status IN ({CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS})
+                        AND status IN ({models.CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS})
                     """,
-                    (entity_name, *CLASSIFICATION_IRRELEVANT_STATUSES),
+                    (entity_name, *models.CLASSIFICATION_IRRELEVANT_STATUSES),
                 )
             }
             reviewed = {
@@ -340,9 +320,9 @@ class EntityAuditStore:
                     """,
                     (
                         entity_name,
-                        ObservationQuestion.ENTITY_CLASSIFICATION,
-                        ObservationStatus.CONFIRMED,
-                        ObservationStatus.NOT_COLLECTIBLE,
+                        models.ObservationQuestion.ENTITY_CLASSIFICATION,
+                        models.ObservationStatus.CONFIRMED,
+                        models.ObservationStatus.NOT_COLLECTIBLE,
                     ),
                 )
             }
@@ -401,21 +381,21 @@ class EntityAuditStore:
             for row in conn.execute(
                 f"""
                 SELECT entity_name, name FROM attr_knowledge
-                WHERE status IN ({CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS}){entity_clause}
+                WHERE status IN ({models.CLASSIFICATION_IRRELEVANT_STATUS_PLACEHOLDERS}){entity_clause}
                 """,
-                (*CLASSIFICATION_IRRELEVANT_STATUSES, *(names or ())),
+                (*models.CLASSIFICATION_IRRELEVANT_STATUSES, *(names or ())),
             ):
                 ignored_by_entity[row['entity_name']].add(row['name'])
-            known_by_entity: dict[str, set[EntityVariantSignature]] = defaultdict(set)
+            known_by_entity: dict[str, set[models.EntityVariantSignature]] = defaultdict(set)
             for row in conn.execute(
                 f"""
                 SELECT entity_name, attrs_json FROM variant_observations
                 WHERE question = ? AND status IN (?, ?){entity_clause}
                 """,
                 (
-                    ObservationQuestion.ENTITY_CLASSIFICATION,
-                    ObservationStatus.CONFIRMED,
-                    ObservationStatus.NOT_COLLECTIBLE,
+                    models.ObservationQuestion.ENTITY_CLASSIFICATION,
+                    models.ObservationStatus.CONFIRMED,
+                    models.ObservationStatus.NOT_COLLECTIBLE,
                     *(names or ()),
                 ),
             ):
@@ -436,7 +416,7 @@ class EntityAuditStore:
     def save_entity_knowledge(
         self,
         entity_name: str,
-        status: EntityAuditStatus,
+        status: models.EntityAuditStatus,
         *,
         reason: str = '',
         evidence: str | None = None,
@@ -457,11 +437,11 @@ class EntityAuditStore:
         self,
         entity_name: str,
         name: str,
-        status: AttrAuditStatus,
+        status: models.AttrAuditStatus,
         *,
         reason: str = '',
         evidence: str | None = None,
-        default_value: DefaultValue = UNKNOWN,
+        default_value: models.DefaultValue = models.UNKNOWN,
     ) -> None:
         """Update knowledge scoped to exactly one entity ID and attribute name."""
         with self._connect() as conn:
@@ -480,7 +460,7 @@ class EntityAuditStore:
                     status,
                     reason,
                     evidence,
-                    None if default_value is UNKNOWN else _value_json(default_value),
+                    None if default_value is models.UNKNOWN else _value_json(default_value),
                 ),
             )
 
@@ -488,8 +468,8 @@ class EntityAuditStore:
         self,
         entity_name: str,
         attrs: dict[str, AttrValue],
-        question: ObservationQuestion,
-        status: ObservationStatus,
+        question: models.ObservationQuestion,
+        status: models.ObservationStatus,
         *,
         kind: str | None = None,
         meta: dict[str, AttrValue] | None = None,
@@ -532,8 +512,8 @@ class EntityAuditStore:
         self.save_group_observation(
             entity_name,
             detail.variants,
-            ObservationQuestion.ENTITY_CLASSIFICATION,
-            ObservationStatus.CONFIRMED,
+            models.ObservationQuestion.ENTITY_CLASSIFICATION,
+            models.ObservationStatus.CONFIRMED,
             kind=kind,
             reason=reason,
             evidence=evidence,
@@ -593,8 +573,8 @@ class EntityAuditStore:
                         (
                             entity_name,
                             key,
-                            ObservationQuestion.ENTITY_CLASSIFICATION,
-                            ObservationStatus.CONFIRMED,
+                            models.ObservationQuestion.ENTITY_CLASSIFICATION,
+                            models.ObservationStatus.CONFIRMED,
                             confirmation.kind,
                             confirmation.reason,
                             confirmation.evidence,
@@ -629,9 +609,9 @@ class EntityAuditStore:
     def save_group_observation(
         self,
         entity_name: str,
-        variants: Iterable[EntityVariant],
-        question: ObservationQuestion,
-        status: ObservationStatus,
+        variants: Iterable[models.EntityVariant],
+        question: models.ObservationQuestion,
+        status: models.ObservationStatus,
         *,
         kind: str | None = None,
         reason: str = '',
@@ -663,7 +643,7 @@ class EntityAuditStore:
 
     def rule_candidates(
         self, entity_name: str, report_id: int | None = None
-    ) -> tuple[RuleCandidate, ...]:
+    ) -> tuple[models.RuleCandidate, ...]:
         """Suggest only conditions that distinguish confirmed kinds in known raw variants."""
         return rule_candidates_for_detail(self.entity_detail(entity_name, report_id))
 
@@ -720,7 +700,7 @@ class EntityAuditStore:
                     WHERE raw.report_id = ? AND raw.entity_name = entity_knowledge.entity_name
                 ) DESC, entity_name COLLATE NOCASE
                 """,
-                (EntityAuditStatus.ENTITY_CANDIDATE, report_id, report_id),
+                (models.EntityAuditStatus.ENTITY_CANDIDATE, report_id, report_id),
             )
             return tuple(row['entity_name'] for row in rows)
 
@@ -817,8 +797,8 @@ class EntityAuditStore:
         conn: sqlite3.Connection,
         report_id: int,
         entity_name: str,
-        source: AuditSource | None = None,
-    ) -> tuple[RawEntityOccurrence, ...]:
+        source: models.AuditSource | None = None,
+    ) -> tuple[models.RawEntityOccurrence, ...]:
         source_conditions = ''
         source_values: tuple[MapSource | str | None, ...] = ()
         if source is not None:
@@ -835,10 +815,10 @@ class EntityAuditStore:
             (report_id, entity_name, *source_values),
         )
         return tuple(
-            RawEntityOccurrence(
+            models.RawEntityOccurrence(
                 entity_name,
                 _attrs(row['attrs_json']),
-                AuditSource(
+                models.AuditSource(
                     scope=row['scope'],
                     map_file=row['map_file'],
                     map_name=row['map_name'],
@@ -857,18 +837,18 @@ class EntityAuditStore:
     def _attr_summaries(
         conn: sqlite3.Connection,
         entity_name: str,
-        variants: Iterable[EntityVariant],
-    ) -> tuple[AttrAuditSummary, ...]:
+        variants: Iterable[models.EntityVariant],
+    ) -> tuple[models.AttrAuditSummary, ...]:
         counts: dict[str, Counter[AttrValue | None]] = defaultdict(Counter)
         total_occurrence_count = 0
         for variant in variants:
             attrs: dict[str, AttrValue] = {
                 name: value
                 for name, value in variant.attrs.items()
-                if name not in LOCATION_ATTR_NAMES
+                if name not in models.LOCATION_ATTR_NAMES
             }
             attrs.update(
-                (f'{META_ATTR_PREFIX}{name}', value) for name, value in variant.meta.items()
+                (f'{models.META_ATTR_PREFIX}{name}', value) for name, value in variant.meta.items()
             )
             for name, values in counts.items():
                 if name not in attrs:
@@ -889,17 +869,17 @@ class EntityAuditStore:
             )
         }
         return tuple(
-            AttrAuditSummary(
+            models.AttrAuditSummary(
                 name,
                 tuple(sorted(values.items(), key=_attr_value_sort_key)),
-                AttrAuditStatus(
+                models.AttrAuditStatus(
                     knowledge_rows[name]['status'] if name in knowledge_rows else 'unknown'
                 ),
                 knowledge_rows[name]['reason'] if name in knowledge_rows else '',
                 knowledge_rows[name]['evidence'] if name in knowledge_rows else None,
                 _value(knowledge_rows[name]['default_json'])
                 if name in knowledge_rows and knowledge_rows[name]['default_json'] is not None
-                else UNKNOWN,
+                else models.UNKNOWN,
             )
             for name, values in sorted(counts.items(), key=lambda item: item[0].casefold())
         )
@@ -909,8 +889,8 @@ class EntityAuditStore:
         conn: sqlite3.Connection,
         report_id: int,
         entity_name: str,
-    ) -> tuple[EntityVariant, ...]:
-        observations_by_attrs: dict[str, list[VariantObservation]] = defaultdict(list)
+    ) -> tuple[models.EntityVariant, ...]:
+        observations_by_attrs: dict[str, list[models.VariantObservation]] = defaultdict(list)
         for row in conn.execute(
             """
             SELECT attrs_json, question, status, kind, reason, evidence
@@ -919,9 +899,9 @@ class EntityAuditStore:
             (entity_name,),
         ):
             observations_by_attrs[row['attrs_json']].append(
-                VariantObservation(
-                    ObservationQuestion(row['question']),
-                    ObservationStatus(row['status']),
+                models.VariantObservation(
+                    models.ObservationQuestion(row['question']),
+                    models.ObservationStatus(row['status']),
                     row['kind'],
                     row['reason'],
                     row['evidence'],
@@ -938,7 +918,7 @@ class EntityAuditStore:
             (report_id, entity_name),
         )
         return tuple(
-            EntityVariant(
+            models.EntityVariant(
                 attrs := _attrs(row['semantic_attrs_json']),
                 meta := _attrs(row['meta_json']),
                 int(row['occurrence_count']),
@@ -953,7 +933,7 @@ class EntityAuditStore:
     @staticmethod
     def _entity_kind_confirmation(
         conn: sqlite3.Connection, entity_name: str
-    ) -> EntityKindConfirmation | None:
+    ) -> models.EntityKindConfirmation | None:
         row = conn.execute(
             """
             SELECT kind, reason, evidence FROM entity_kind_confirmations
@@ -964,7 +944,7 @@ class EntityAuditStore:
         return (
             None
             if row is None
-            else EntityKindConfirmation(row['kind'], row['reason'], row['evidence'])
+            else models.EntityKindConfirmation(row['kind'], row['reason'], row['evidence'])
         )
 
 
@@ -1004,13 +984,13 @@ def _attrs(value: str) -> dict[str, AttrValue]:
 
 def _semantic_attrs(attrs: Mapping[str, AttrValue]) -> dict[str, AttrValue]:
     """Return raw explicit attributes except physical instance-location fields."""
-    return {name: value for name, value in attrs.items() if name not in LOCATION_ATTR_NAMES}
+    return {name: value for name, value in attrs.items() if name not in models.LOCATION_ATTR_NAMES}
 
 
 def _variant_key_parts(key: str) -> tuple[dict[str, AttrValue], dict[str, AttrValue]]:
     """Decode one stored variant key."""
     try:
-        parsed = _VariantKey.model_validate_json(key)
+        parsed = models.VariantKey.model_validate_json(key)
     except ValidationError as error:
         raise TypeError('Expected serialized entity variant attributes and metadata.') from error
     return parsed.attrs, parsed.meta
@@ -1020,15 +1000,15 @@ def _variant_signature(
     attrs: Mapping[str, AttrValue],
     meta: Mapping[str, AttrValue],
     ignored_names: AbstractSet[str],
-) -> EntityVariantSignature:
+) -> models.EntityVariantSignature:
     """Return the raw presence/value signature still relevant to classification review."""
-    return EntityVariantSignature(
+    return models.EntityVariantSignature(
         tuple(sorted((name, value) for name, value in attrs.items() if name not in ignored_names)),
         tuple(
             sorted(
                 (name, value)
                 for name, value in meta.items()
-                if f'{META_ATTR_PREFIX}{name}' not in ignored_names
+                if f'{models.META_ATTR_PREFIX}{name}' not in ignored_names
             )
         ),
     )
@@ -1039,8 +1019,8 @@ def _attr_value_sort_key(item: tuple[AttrValue | None, int]) -> tuple[bool, str]
     return value is not None, repr(value)
 
 
-def _validate_observation_kind(status: ObservationStatus, kind: str | None) -> None:
-    if status is ObservationStatus.CONFIRMED and kind is None:
+def _validate_observation_kind(status: models.ObservationStatus, kind: str | None) -> None:
+    if status is models.ObservationStatus.CONFIRMED and kind is None:
         raise ValueError('A confirmed observation must identify a collectible kind.')
-    if status is ObservationStatus.NOT_COLLECTIBLE and kind is not None:
+    if status is models.ObservationStatus.NOT_COLLECTIBLE and kind is not None:
         raise ValueError('A non-collectible observation must not identify a collectible kind.')

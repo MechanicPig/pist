@@ -1,17 +1,17 @@
 """Build and merge locally maintained first-playthrough map records."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Final
 
-from pydantic import Field, NonNegativeInt
+from pydantic import Field, HttpUrl, NonNegativeInt, PositiveInt, field_validator
 
 from berries.game import dialog, levels, mods, saves
 from berries.gamebanana import GameBananaCredit, GameBananaSubmission
 from berries.models import FrozenModel
 from pist.entity_stats import MapEntityStats
-from pist.types import CellValue, RecordValues
+from pist.types import CellValue
 
 MANUAL_RECORD_FIELD_TITLES = frozenset(
     {
@@ -65,9 +65,9 @@ def map_record_progress(
     if stats is None or not stats.is_recorded:
         return MapRecordProgress.NOT_STARTED
     if stats.single_run_completed:
-        strawberries = entity_stats.count('strawberry') + entity_stats.count('moonberry')
         all_collected = (
-            len(stats.collected_strawberries) >= strawberries
+            entity_stats.all_instances_collected('strawberry', stats.collected_strawberries)
+            and entity_stats.all_instances_collected('moonberry', stats.collected_strawberries)
             and (not entity_stats.has_stat('cassette') or stats.cassette_collected)
             and (not entity_stats.has_stat('heart') or stats.heart_collected)
         )
@@ -85,23 +85,49 @@ class MapRecord(FrozenModel):
     """One locally maintained map record, optionally synchronized to Smart Sheet."""
 
     created_at: datetime
-    mod_metadata_name: str
+    local_id: PositiveInt | None = None
+    record_number: PositiveInt | None = None
+    mod_metadata_name: str | None = None
     mod_name: str | None = None
     mod_url: str | None = None
-    mod_updated_at: datetime | None = None
+    mod_updated_at: date | None = None
     credits: tuple[GameBananaCredit, ...] = ()
     map_name: str
+    video_url: str | None = None
     map_english_name: str | None = None
-    map_file: str
-    sid: str
-    side: Literal['A', 'B', 'C']
+    map_file: str | None = None
+    sid: str | None = None
+    side: levels.LevelSide | None = None
     authors: tuple[str, ...] = ()
     difficulty: str | None = None
-    save_slot: NonNegativeInt
+    save_slot: NonNegativeInt | None = None
     time_played: str | None = None
     deaths: NonNegativeInt | None = None
     completed: bool | None = None
-    record_values: RecordValues = Field(default_factory=dict)
+    n_strawberries: NonNegativeInt | None = None
+    n_moonberries: NonNegativeInt | None = None
+    cassette: bool = False
+    heart: str | None = None
+    n_main_rooms: PositiveInt | None = None
+    status: str | None = None
+    tags: tuple[str, ...] = ()
+    perceived_difficulty: str | None = None
+    perceived_difficulty_tier: str | None = None
+    rated_difficulty: str | None = None
+    rated_difficulty_tier: str | None = None
+    started_at: date | None = None
+    finished_at: date | None = None
+    save_load_usage: str | None = None
+    rating: int | None = Field(default=None, ge=0, le=10)
+    notes: str | None = None
+
+    @field_validator('video_url', 'mod_url')
+    @classmethod
+    def validate_http_url(cls, value: str | None) -> str | None:
+        """Accept an optional HTTP(S) link without rewriting its spelling."""
+        if value is not None:
+            HttpUrl(value)
+        return value
 
 
 def create_map_record(
@@ -114,7 +140,7 @@ def create_map_record(
     authors: tuple[str, ...] = (),
     languages: tuple[str, ...] = dialog.DIALOG_LANGUAGES,
     dialogs: Mapping[str, Mapping[str, str]] | None = None,
-    record_values: Mapping[str, Mapping[str, CellValue]] | None = None,
+    statistics: Mapping[str, CellValue | date] | None = None,
     now: datetime | None = None,
 ) -> MapRecord:
     """Build a local record from one selected Mod map."""
@@ -128,18 +154,20 @@ def create_map_record(
     fallback_name = level.fallback_name(side)
     map_name = dialog.localized_name(names, languages) or fallback_name
     english_name = names.get('en') or fallback_name
-    return MapRecord(
+    record = MapRecord(
         created_at=now or datetime.now(tz=UTC),
         mod_metadata_name=mod.metadata_name,
         mod_name=gamebanana.name if gamebanana is not None else None,
         mod_url=gamebanana.page_url if gamebanana is not None else None,
-        mod_updated_at=gamebanana.latest_update_added_time if gamebanana is not None else None,
+        mod_updated_at=gamebanana.latest_update_added_time.astimezone().date()
+        if gamebanana is not None
+        else None,
         credits=gamebanana.credits if gamebanana is not None else (),
         map_name=map_name,
         map_english_name=english_name if english_name != map_name else None,
         map_file=map_info.file_path.as_posix(),
         sid=level.sid,
-        side=side.value,
+        side=side,
         authors=authors,
         save_slot=save_slot.number,
         time_played=(
@@ -149,38 +177,49 @@ def create_map_record(
         ),
         deaths=recorded_stats.deaths if recorded_stats is not None else None,
         completed=recorded_stats.completed if recorded_stats is not None else None,
-        record_values={table: dict(values) for table, values in record_values.items()}
-        if record_values is not None
-        else {},
     )
+    data = record.model_dump()
+    if statistics is not None:
+        data.update(statistics)
+    return MapRecord.model_validate(data)
 
 
 def merge_saved_record(current: MapRecord, saved: MapRecord) -> MapRecord:
     """Reuse human-entered values while retaining freshly read map and save data."""
-    if (
-        current.mod_metadata_name,
-        current.map_file,
-        current.save_slot,
-    ) != (
-        saved.mod_metadata_name,
-        saved.map_file,
-        saved.save_slot,
+    if current.mod_metadata_name != saved.mod_metadata_name or (
+        current.map_file != saved.map_file
+        if current.map_file is not None and saved.map_file is not None
+        else current.map_name != saved.map_name
     ):
-        raise ValueError('Cannot merge records for different Mods, maps, or save slots.')
-
-    record_values = {table: dict(values) for table, values in current.record_values.items()}
-    for table, values in saved.record_values.items():
-        retained = {
-            title: value for title, value in values.items() if title in MANUAL_RECORD_FIELD_TITLES
-        }
-        if retained:
-            record_values.setdefault(table, {}).update(retained)
+        raise ValueError('Cannot merge records for different Mods or maps.')
 
     return current.model_copy(
         update={
+            'local_id': saved.local_id,
+            'record_number': saved.record_number,
+            'created_at': saved.created_at,
+            'map_name': saved.map_name,
+            'mod_name': saved.mod_name,
+            'mod_url': saved.mod_url,
+            'video_url': saved.video_url,
             'authors': saved.authors,
             'difficulty': saved.difficulty,
-            'mod_updated_at': saved.mod_updated_at or current.mod_updated_at,
-            'record_values': record_values,
+            'mod_updated_at': saved.mod_updated_at,
+            **{
+                name: getattr(saved, name)
+                for name in (
+                    'status',
+                    'tags',
+                    'perceived_difficulty',
+                    'perceived_difficulty_tier',
+                    'rated_difficulty',
+                    'rated_difficulty_tier',
+                    'started_at',
+                    'finished_at',
+                    'save_load_usage',
+                    'rating',
+                    'notes',
+                )
+            },
         }
     )

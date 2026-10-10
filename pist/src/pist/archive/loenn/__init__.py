@@ -21,7 +21,7 @@ LOENN_ENTITIES_DIRNAME = 'entities'
 LOENN_LANG_DIRNAME = 'lang'
 LANG_FILE_EXT = '.lang'
 DEFAULT_LANGUAGE = 'en_gb'
-BUILTIN_TEMPLATES_PATH = ('data', 'loenn_builtin_templates.toml')
+BUILTIN_TEMPLATES_FILE = 'builtin_templates.toml'
 
 LANG_ENTRY_PATTERN = re.compile(r'(?m)^(?P<key>[^#=\r\n][^=\r\n]*)=(?P<value>.*)$')
 MOD_LANGUAGE_PATTERN = re.compile(r'^mods\.(?P<name>.+)\.name$')
@@ -96,7 +96,9 @@ class LoennRegistry:
 
 
 def _builtin_placements() -> tuple[LoennPlacement, ...]:
-    content = files('pist').joinpath(*BUILTIN_TEMPLATES_PATH).read_text(encoding='utf-8')
+    content = (
+        files('pist.archive.loenn').joinpath(BUILTIN_TEMPLATES_FILE).read_text(encoding='utf-8')
+    )
     data = tomllib.loads(content)
     templates = data.get('template')
     if not isinstance(templates, list):

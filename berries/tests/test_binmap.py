@@ -6,6 +6,12 @@ from berries.game import binmap
 from berries.game.binmap import BadMapBin, parse_map_bin, parse_map_meta
 
 
+@pytest.fixture(autouse=True)
+def isolated_depth_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep parser tests independent of the caller's depth configuration."""
+    monkeypatch.delenv('BERRIES_MAX_MAP_DEPTH', raising=False)
+
+
 def test_element_child_matches_only_first_exact_direct_child() -> None:
     nested = binmap.BinElement('target', {}, ())
     first = binmap.BinElement('target', {'id': 1}, ())
@@ -50,6 +56,114 @@ def _varlen(value: int) -> bytes:
 def _string(value: str) -> bytes:
     encoded = value.encode()
     return _varlen(len(encoded)) + encoded
+
+
+def _nested_map_data(depth: int, *, meta_first: bool) -> bytes:
+    """Build a chain reaching the given zero-based depth beside root metadata."""
+    lookup = ('Map', 'node', 'meta', 'Icon', 'test-icon')
+    header = _string('CELESTE MAP') + _string('Test') + pack('<H', len(lookup))
+    header += b''.join(map(_string, lookup))
+    chain = pack('<HBH', 1, 0, 1) * (depth - 1) + pack('<HBH', 1, 0, 0)
+    meta = pack('<HBHBHH', 2, 1, 3, 5, 4, 0)
+    children = meta + chain if meta_first else chain + meta
+    return header + pack('<HBH', 0, 0, 2) + children
+
+
+@pytest.mark.parametrize('depth', (400, 600, 999, 1000, 1001))
+@pytest.mark.parametrize('meta_first', (False, True))
+def test_nested_map_parsing_obeys_declared_depth_limit(depth: int, meta_first: bool) -> None:
+    data = _nested_map_data(depth, meta_first=meta_first)
+    if depth >= 1000:
+        with pytest.raises(BadMapBin, match='Map element nesting exceeds'):
+            parse_map_bin(data, max_depth=1000)
+        with pytest.raises(BadMapBin, match='Map element nesting exceeds'):
+            parse_map_meta(data, max_depth=1000)
+    else:
+        root = parse_map_bin(data, max_depth=1000).root
+        elements = list(root.walk())
+        assert len(elements) == depth + 2
+        assert elements[0].name == 'Map'
+        assert root.children[0].name == ('meta' if meta_first else 'node')
+        assert [element.name for element in elements].count('node') == depth
+        assert parse_map_meta(data, max_depth=1000) == {'Icon': 'test-icon'}
+
+
+def test_metadata_early_return_does_not_validate_unread_payload() -> None:
+    data = _nested_map_data(1001, meta_first=True)
+    assert parse_map_meta(data, allow_trailing=True) == {'Icon': 'test-icon'}
+    with pytest.raises(BadMapBin, match='Map element nesting exceeds'):
+        parse_map_meta(_nested_map_data(1001, meta_first=False), allow_trailing=True)
+
+
+@pytest.mark.parametrize('metadata_only', (False, True))
+def test_default_depth_limit_and_explicit_override(metadata_only: bool) -> None:
+    parser = parse_map_meta if metadata_only else parse_map_bin
+    assert parser(_nested_map_data(binmap.DEFAULT_MAX_DEPTH - 1, meta_first=False))
+    data = _nested_map_data(binmap.DEFAULT_MAX_DEPTH, meta_first=False)
+    with pytest.raises(BadMapBin, match='Map element nesting exceeds'):
+        parser(data)
+    assert parser(data, max_depth=binmap.DEFAULT_MAX_DEPTH + 1)
+
+
+@pytest.mark.parametrize('max_depth', (0, -1, True))
+def test_depth_limit_must_be_a_positive_integer(max_depth: int) -> None:
+    data = _nested_map_data(1, meta_first=False)
+    with pytest.raises(ValueError, match='positive integer'):
+        parse_map_bin(data, max_depth=max_depth)
+    with pytest.raises(ValueError, match='positive integer'):
+        parse_map_meta(data, max_depth=max_depth)
+
+
+@pytest.mark.parametrize('metadata_only', (False, True))
+def test_environment_depth_limit_and_explicit_precedence(
+    monkeypatch: pytest.MonkeyPatch, metadata_only: bool
+) -> None:
+    parser = parse_map_meta if metadata_only else parse_map_bin
+    monkeypatch.setenv('BERRIES_MAX_MAP_DEPTH', '2')
+    data = _nested_map_data(2, meta_first=False)
+    with pytest.raises(BadMapBin, match='Map element nesting exceeds 2 levels'):
+        parser(data)
+    assert parser(data, max_depth=3)
+    monkeypatch.setenv('BERRIES_MAX_MAP_DEPTH', '3')
+    assert parser(data)
+
+
+@pytest.mark.parametrize('value', ('invalid', '0', '-1', '2.5'))
+def test_invalid_environment_limit_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv('BERRIES_MAX_MAP_DEPTH', value)
+    data = _nested_map_data(1, meta_first=False)
+    for parser in (parse_map_bin, parse_map_meta):
+        with pytest.raises(ValueError, match='positive integer') as caught:
+            parser(data)
+        assert not isinstance(caught.value, BadMapBin)
+        assert parser(data, max_depth=2)
+
+
+@pytest.mark.parametrize('metadata_only', (False, True))
+def test_deep_truncated_map_has_diagnostic_error(metadata_only: bool) -> None:
+    parser = parse_map_meta if metadata_only else parse_map_bin
+    with pytest.raises(BadMapBin, match='Unexpected end'):
+        parser(_nested_map_data(600, meta_first=False)[:-1], max_depth=1000)
+
+
+@pytest.mark.parametrize('metadata_only', (False, True))
+def test_element_count_limit_includes_skipped_descendants(
+    monkeypatch: pytest.MonkeyPatch, metadata_only: bool
+) -> None:
+    monkeypatch.setattr(binmap, 'MAX_ELEMENT_COUNT', 4)
+    parser = parse_map_meta if metadata_only else parse_map_bin
+    with pytest.raises(BadMapBin, match='Map element count exceeds'):
+        parser(_nested_map_data(3, meta_first=False))
+
+
+def test_walk_preserves_depth_first_sibling_order() -> None:
+    leaf = binmap.BinElement('leaf', {}, ())
+    first = binmap.BinElement('first', {}, (leaf,))
+    second = binmap.BinElement('second', {}, ())
+    root = binmap.BinElement('root', {}, (first, second))
+    assert [element.name for element in root.walk()] == ['root', 'first', 'leaf', 'second']
 
 
 def test_parse_map_bin_decodes_nested_elements_and_all_value_types() -> None:

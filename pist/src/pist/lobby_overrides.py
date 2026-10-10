@@ -1,4 +1,4 @@
-"""Load explicit Campaign projections for Collab lobby sides."""
+"""Validate and persist explicit lobby Campaign overrides for Pist's map browser."""
 
 import tomllib
 from pathlib import Path
