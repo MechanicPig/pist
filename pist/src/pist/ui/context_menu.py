@@ -24,7 +24,7 @@ class ContextMenuScreen[Result](ModalScreen[Result]):
         self.query_one('.context-menu-dialog', Vertical).styles.offset = Offset(
             self._screen_x, self._screen_y
         )
-        self.call_after_refresh(self._position_dialog)
+        self.call_after_refresh(self._position_dialog)  # pyright: ignore[reportUnusedCallResult]
 
     def _position_dialog(self) -> None:
         dialog = self.query_one('.context-menu-dialog', Vertical)
@@ -41,4 +41,4 @@ class ContextMenuScreen[Result](ModalScreen[Result]):
         screen_x = event.x if event.screen_x is None else event.screen_x
         screen_y = event.y if event.screen_y is None else event.screen_y
         if not dialog.region.contains(screen_x, screen_y):
-            self.dismiss()
+            self.dismiss()  # pyright: ignore[reportUnusedCallResult]

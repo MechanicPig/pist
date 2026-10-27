@@ -7,7 +7,8 @@ from pydantic import ValidationError
 
 from berries.models import FrozenModel
 from berries.types import NonEmptyStr
-from pist.credentials.backend import credential_backend
+
+from .backend import credential_backend
 
 SERVICE_NAME = 'pist.tencent_docs'
 DIRECT_CREDENTIALS_KEY = 'direct_credentials'

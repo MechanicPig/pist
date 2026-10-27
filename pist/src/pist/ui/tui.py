@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from textual.css.errors import StylesheetError
 
-from pist.ui.messages import DiagnosticApp
+from .messages import DiagnosticApp
 
 
 class RefreshableCssApp[ReturnType](DiagnosticApp[ReturnType]):

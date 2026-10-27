@@ -3,18 +3,21 @@
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from catalog_factory import make_campaign_catalog
 from rich.text import Text
-from sheet_factory import FakeSheet
+from sheet_factory import FakeSheet, make_sheet_fields
 from textual.widgets import Button, Checkbox, DataTable, Input
 from textual.widgets.data_table import ColumnKey
 
-from berries.game.mods import ModScanReport
-from pist.app_data import AppDataStores
+from berries.game.duration import Duration
+from pist.data_stores import DataStores
+from pist.records.batch import RecordSyncBatch
 from pist.records.models import MapRecord
 from pist.records.store import RecordSheetLink, RecordStore, RecordSyncState
-from pist.records.sync import RecordSyncService
+from pist.records.sync import RecordSyncCheck, RecordSyncService
 from pist.settings import PistSettings, RecordListMaxWidths, SettingsStore
 from pist.smartsheet.encoding import encode_record_values
 from pist.smartsheet.models import MainSheetSnapshot
@@ -22,10 +25,138 @@ from pist.ui.maps.browser.app import MapBrowserApp
 from pist.ui.records.app import RecordBrowserApp
 from pist.ui.records.editor import RecordEditorScreen
 from pist.ui.records.list import RecordListScreen
+from pist.ui.records.order import RecordOrderScreen
 from pist.ui.records.sync import RecordConflictScreen, RecordOfflineScreen, RecordSyncChoice
 from pist.ui.records.table import RecordTable
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
+
+
+@pytest.mark.parametrize('order', (False, True))
+def test_initial_conflict_cancel_discards_unsent_updates(tmp_path: Path, order: bool) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    client = FakeSheet()
+    client.fields = make_sheet_fields(
+        ('地图名', 1), ('Mod元数据名', 1), ('状态', 17), ('备注', 1), ('编号', 2)
+    )
+    records = [save_record(store, name) for name in ('First', 'Second', 'Third')]
+    for i, record in enumerate(records):
+        assert record.local_id is not None
+        values = encode_record_values(record, client.fields)
+        client.rows[str(i)] = values
+        store.confirm_sheet_record(
+            RecordSheetLink(
+                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(i)
+            ),
+            values,
+            submitted=record,
+            confirmed_at=NOW,
+        )
+    if not order:
+        store.save(records[0].model_copy(update={'notes': 'Local edit'}))
+    client.rows['2' if order else '1']['备注'] = [{'text': 'Remote edit'}]
+
+    async def run() -> None:
+        app = RecordBrowserApp(store, client=client, source='source')
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, RecordListScreen)
+            if order:
+                screen.adjust_order(
+                    local_id=records[0].local_id, target_id=records[2].local_id, before=False
+                )
+                await pilot.pause()
+                assert isinstance(app.screen, RecordOrderScreen)
+                await pilot.click('#record-order-save')
+            else:
+                await pilot.click('#record-list-sync-all')
+            await pilot.pause()
+            assert isinstance(app.screen, RecordConflictScreen)
+            assert client.writes == [] and client.update_batches == []
+            app.screen.dismiss(None)
+            await app.workers.wait_for_complete()
+            assert client.writes == [] and client.update_batches == []
+            queued_id = records[1 if order else 0].local_id
+            assert queued_id is not None
+            assert store.sync_state(queued_id) is RecordSyncState.PENDING
+            assert all(entry.confirmed_at == NOW for entry in store.list_records())
+            assert client.rows['0']['备注'] != [{'text': 'Local edit'}]
+
+    asyncio.run(run())
+
+
+def test_record_table_help_only_appears_on_relevant_headers(tmp_path: Path) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    save_record(store)
+
+    async def run() -> None:
+        app = RecordBrowserApp(store)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one(RecordTable)
+            positions: dict[str, int] = {}
+            edge = 0
+            for column in table.ordered_columns:
+                assert column.key.value is not None
+                positions[column.key.value] = edge + 1
+                edge += column.get_render_width(table)
+            for key in ('sync_state', 'confirmed_at'):
+                await pilot.hover(table, offset=(positions[key], 0))
+                assert table.tooltip is not None
+                await pilot.hover(table, offset=(positions[key], 1))
+                assert table.tooltip is None
+            await pilot.hover(table, offset=(positions['map_name'], 0))
+            assert table.tooltip is None
+            await pilot.hover(table, offset=(positions['sync_state'], 0))
+            await pilot.hover('#record-search')
+            assert table.tooltip is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('size', ((120, 40), (80, 24)))
+def test_confirmation_time_column_survives_local_edits(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    confirmed = save_record(store, 'Confirmed')
+    save_record(store, 'Never checked')
+    assert confirmed.local_id is not None
+    store.confirm_sheet_record(
+        RecordSheetLink(
+            local_id=confirmed.local_id, file_id='file', sheet_id='main', record_id='row'
+        ),
+        {},
+        submitted=confirmed,
+        confirmed_at=NOW,
+    )
+
+    async def run() -> None:
+        app = RecordBrowserApp(store)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, RecordListScreen)
+            table = screen.query_one(DataTable)
+            expected = NOW.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            assert table.get_row_at(0)[-1].plain == expected
+            assert table.get_row_at(0)[-2].plain == '无本地变更'
+            table.move_cursor(row=1)
+            await pilot.pause()
+            assert table.get_row_at(1)[-1].plain == '尚未核对'
+            assert table.get_row_at(1)[-2].plain == '待推送'
+            store.save(confirmed.model_copy(update={'notes': 'Offline edit'}))
+            screen.reload_records()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            assert table.get_row_at(0)[-1].plain == expected
+            assert table.get_row_at(0)[-2].plain == '待推送'
+            screen.query_one('#record-search', Input).value = 'No matching record'
+            await pilot.pause()
+            assert table.row_count == 0
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('conflict', (False, True))
@@ -33,9 +164,9 @@ def test_sync_all_ignores_filters_and_stops_on_cancel(tmp_path: Path, conflict: 
     store = RecordStore(tmp_path / 'records.sqlite3')
     client = FakeSheet()
     records = [save_record(store, name) for name in ('First', 'Second', 'Third')]
-    for index, record in enumerate(records):
+    for i, record in enumerate(records):
         assert record.local_id is not None
-        row_id = str(index)
+        row_id = str(i)
         values = encode_record_values(record, client.fields)
         client.rows[row_id] = values
         store.confirm_sheet_record(
@@ -83,7 +214,7 @@ def test_sync_all_ignores_filters_and_stops_on_cancel(tmp_path: Path, conflict: 
             if not conflict:
                 assert client.writes[0][0] == '1'
                 assert client.rows['1']['备注'] == [{'type': 'text', 'text': 'Local change'}]
-                assert screen.query_one('#record-list-sync-all', Button).disabled
+                assert not screen.query_one('#record-list-sync-all', Button).disabled
             assert screen.query_one(DataTable).row_count == 0
 
     asyncio.run(run())
@@ -115,29 +246,126 @@ def test_sync_all_read_failure_preserves_records_and_restores_actions(tmp_path: 
 def test_sync_all_uses_one_read_and_no_writes_for_equal_rows(tmp_path: Path) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
     client = FakeSheet()
-    for index in range(3):
-        record = save_record(store, f'Map {index}')
+    for i in range(3):
+        record = save_record(store, f'Map {i}')
         assert record.local_id is not None
         values = encode_record_values(record, client.fields)
-        client.rows[str(index)] = values
+        client.rows[str(i)] = values
         store.confirm_sheet_record(
             RecordSheetLink(
-                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(index)
+                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(i)
             ),
             values,
             submitted=record,
             confirmed_at=NOW,
         )
-        store.save(record)
 
     async def run() -> None:
         app = RecordBrowserApp(store, client=client, source='source')
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            assert not app.screen.query_one('#record-list-sync-all', Button).disabled
             await pilot.click('#record-list-sync-all')
             await app.workers.wait_for_complete()
             assert all(entry.sync_state is RecordSyncState.SYNCED for entry in store.list_records())
             assert client.reads == 1 and client.writes == []
+            assert all(
+                entry.confirmed_at is not None and entry.confirmed_at > NOW
+                for entry in store.list_records()
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('choice', (None, RecordSyncChoice.REMOTE))
+def test_sync_all_checks_remote_changes_even_without_local_changes(
+    tmp_path: Path, choice: RecordSyncChoice | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    client = FakeSheet()
+    records = [save_record(store, name) for name in ('First', 'Changed', 'Last')]
+    for i, record in enumerate(records):
+        assert record.local_id is not None
+        values = encode_record_values(record, client.fields)
+        client.rows[str(i)] = values
+        store.confirm_sheet_record(
+            RecordSheetLink(
+                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(i)
+            ),
+            values,
+            submitted=record,
+            confirmed_at=NOW,
+        )
+    client.rows['1']['备注'] = [{'text': 'Remote edit'}]
+
+    async def run() -> None:
+        app = RecordBrowserApp(store, client=client, source='source')
+        notify = Mock(wraps=app.notify)
+        monkeypatch.setattr(app, 'notify', notify)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one('#record-pending', Checkbox).value = True
+            await pilot.pause()
+            assert screen.query_one(DataTable).row_count == 0
+            assert not screen.query_one('#record-list-sync-all', Button).disabled
+            await pilot.click('#record-list-sync-all')
+            await pilot.pause()
+            assert isinstance(app.screen, RecordConflictScreen)
+            assert client.writes == []
+            app.screen.dismiss(choice)
+            await app.workers.wait_for_complete()
+            entries = store.list_records()
+            assert entries[0].confirmed_at is not None and entries[0].confirmed_at > NOW
+            if choice is None:
+                assert entries[1].record.notes == 'Before'
+                assert entries[1].confirmed_at == NOW and entries[2].confirmed_at == NOW
+                assert any('已完成 1 / 3' in call.args[0] for call in notify.call_args_list)
+            else:
+                assert entries[1].record.notes == 'Remote edit'
+                assert all(
+                    entry.confirmed_at is not None and entry.confirmed_at > NOW for entry in entries
+                )
+            assert client.writes == []
+
+    asyncio.run(run())
+
+
+def test_clean_record_does_not_count_as_success_after_save_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    record = save_record(store)
+    assert record.local_id is not None
+    client = FakeSheet()
+    values = encode_record_values(record, client.fields)
+    client.rows['row'] = values
+    store.confirm_sheet_record(
+        RecordSheetLink(local_id=record.local_id, file_id='file', sheet_id='main', record_id='row'),
+        values,
+        submitted=record,
+        confirmed_at=NOW,
+    )
+
+    async def fail_save(self: RecordSyncBatch, record: MapRecord, check: RecordSyncCheck) -> None:
+        raise ValueError('Confirmation failed')
+
+    monkeypatch.setattr(RecordSyncBatch, 'save', fail_save)
+
+    async def run() -> None:
+        app = RecordBrowserApp(store, client=client, source='source')
+        notify = Mock(wraps=app.notify)
+        monkeypatch.setattr(app, 'notify', notify)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.click('#record-list-sync-all')
+            await pilot.pause()
+            assert isinstance(app.screen, RecordOfflineScreen)
+            app.screen.dismiss(None)
+            await app.workers.wait_for_complete()
+            assert any('已完成 0 / 1' in call.args[0] for call in notify.call_args_list)
+            assert store.list_records()[0].confirmed_at == NOW
+            assert client.writes == []
 
     asyncio.run(run())
 
@@ -203,6 +431,7 @@ def test_drag_scrolled_empty_table_captures_mouse_and_clamps_minimum(tmp_path: P
             await pilot.pause()
             table = app.screen.query_one(RecordTable)
             assert table.row_count == 0
+            assert app.screen.query_one('#record-list-sync-all', Button).disabled
             table.scroll_to(x=30, animate=False)
             await pilot.pause()
             edge = (
@@ -222,18 +451,52 @@ def test_drag_scrolled_empty_table_captures_mouse_and_clamps_minimum(tmp_path: P
     asyncio.run(run())
 
 
+def test_unchanged_resize_keeps_cells_but_release_commits_width(tmp_path: Path) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    save_record(store)
+    settings = SettingsStore(tmp_path / 'settings.json')
+    settings.save(PistSettings())
+
+    async def run() -> None:
+        app = RecordBrowserApp(store, settings_store=settings)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one(RecordTable)
+            key = table.ordered_rows[0].key
+            before = table.get_row(key)[0]
+            edge = sum(column.get_render_width(table) for column in table.ordered_columns[:2]) - 2
+            await pilot.mouse_down(table, offset=(edge, 0))
+            for y in range(1, 5):
+                await pilot.hover(table, offset=(edge, y))
+                assert table.get_row(key)[0] is before
+            await pilot.hover(table, offset=(edge - 8, 2))
+            resized = table.get_row(key)[0]
+            assert resized is not before
+            for y in range(1, 5):
+                await pilot.hover(table, offset=(edge - 8, y))
+                assert table.get_row(key)[0] is resized
+            assert settings.load().record_list_max_widths.map_name == 40
+            await pilot.mouse_up(table, offset=(edge - 8, 4))
+            await pilot.pause()
+            assert settings.load().record_list_max_widths.map_name == 32
+            assert table.get_row(key)[0] is resized
+            assert app.mouse_captured is None
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('entry', ('records', 'maps'))
 def test_drag_column_persists_on_release_and_restores_on_reopen(tmp_path: Path, entry: str) -> None:
-    stores = AppDataStores(tmp_path / 'records.sqlite3')
+    stores = DataStores(tmp_path / 'records.sqlite3')
     record = save_record(stores.records, '中文地图' * 20)
     save_record(stores.records)
     settings_store = SettingsStore(tmp_path / 'settings.json')
-    settings_store.save(PistSettings(theme='textual-light', dialog_languages=('en',)))
+    settings_store.save(PistSettings(theme='textual-light', dialog_lang='en'))
     app = (
         RecordBrowserApp(stores.records, settings_store=settings_store)
         if entry == 'records'
         else MapBrowserApp(
-            ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[]),
+            make_campaign_catalog(mods=[], game_dir=tmp_path),
             data_stores=stores,
             settings_store=settings_store,
         )
@@ -255,7 +518,7 @@ def test_drag_column_persists_on_release_and_restores_on_reopen(tmp_path: Path, 
             await pilot.pause()
             settings = settings_store.load()
             assert settings.record_list_max_widths.map_name == 32
-            assert settings.theme == 'textual-light' and settings.dialog_languages == ('en',)
+            assert settings.theme == 'textual-light' and settings.dialog_lang == 'en'
             assert table.cursor_row == 1
             assert isinstance(app.screen, RecordListScreen)
             await pilot.press('escape')
@@ -305,17 +568,19 @@ def test_drag_column_restores_width_after_settings_save_failure(
 
 @pytest.mark.parametrize('entry', ('records', 'maps'))
 def test_record_list_entries_use_persisted_column_widths(tmp_path: Path, entry: str) -> None:
-    stores = AppDataStores(tmp_path / 'records.sqlite3')
+    stores = DataStores(tmp_path / 'records.sqlite3')
     save_record(stores.records, '中文地图' * 20)
     settings_store = SettingsStore(tmp_path / 'settings.json')
     settings_store.save(
-        PistSettings(record_list_max_widths=RecordListMaxWidths(map_name=10, mod_name=4))
+        PistSettings(
+            record_list_max_widths=RecordListMaxWidths(map_name=10, mod_name=4, confirmed_at=12)
+        )
     )
     if entry == 'records':
         app = RecordBrowserApp(stores.records, settings_store=settings_store)
     else:
         app = MapBrowserApp(
-            ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[]),
+            make_campaign_catalog(mods=[], game_dir=tmp_path),
             data_stores=stores,
             settings_store=settings_store,
         )
@@ -331,6 +596,7 @@ def test_record_list_entries_use_persisted_column_widths(tmp_path: Path, entry: 
             assert map_name.cell_len <= 10 and map_name.plain.endswith('…')
             assert mod_name.cell_len <= 4 and mod_name.plain.endswith('…')
             assert settings_store.load().record_list_max_widths.map_name == 10
+            assert app.screen.query_one(DataTable).columns[ColumnKey('confirmed_at')].width == 12
 
     asyncio.run(run())
 
@@ -365,10 +631,10 @@ def test_long_names_are_ellipsized_but_full_names_remain_searchable(tmp_path: Pa
 
 
 def test_maps_browser_opens_shared_history_without_installed_maps(tmp_path: Path) -> None:
-    stores = AppDataStores(tmp_path / 'records.sqlite3')
+    stores = DataStores(tmp_path / 'records.sqlite3')
     save_record(stores.records)
     app = MapBrowserApp(
-        ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[]),
+        make_campaign_catalog(mods=[], game_dir=tmp_path),
         data_stores=stores,
     )
 
@@ -392,7 +658,7 @@ def save_record(store: RecordStore, name: str = 'Uninstalled Map') -> MapRecord:
             map_name=name,
             mod_metadata_name='AbsentMod',
             map_file='Maps/Missing.bin',
-            time_played='0:01:00',
+            time_played=Duration.from_dotnet_ticks(600000000),
             deaths=3,
             save_slot=0,
             status='进行中',

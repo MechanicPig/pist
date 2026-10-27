@@ -12,10 +12,16 @@ from pydantic import Field, ValidationError, field_validator
 from tomlkit.exceptions import ParseError
 
 from berries.containers import FrozenCaseFoldSet
-from berries.game import maps
-from berries.game.content import ContentPath
-from berries.game.saves import settings_dir
 from berries.models import ExternalModel, FrozenModel
+
+from . import maps
+from .content import ContentPath
+from .saves import settings_dir
+
+try:
+    from yaml import CBaseLoader as _BaseLoader
+except ImportError:
+    from yaml import BaseLoader as _BaseLoader
 
 type MapHiderTarget = Literal['source', 'campaign']
 type MapHiderMatch = Literal['exact', 'casefold']
@@ -86,7 +92,9 @@ class KnownMapHiderTargets:
 class UnknownMapHiderTargets:
     """A reader cannot safely determine whether its rule should hide maps."""
 
-    diagnostic: str
+    path: Path
+    stage: Literal['read', 'parse', 'validate']
+    cause: Exception
 
 
 type MapHiderReaderResult = KnownMapHiderTargets | UnknownMapHiderTargets
@@ -106,11 +114,19 @@ class ActiveMapHiderRule:
 
 
 @dataclass(frozen=True, slots=True)
+class MapHiderIssue:
+    """One active hider rule whose settings could not be resolved."""
+
+    rule: MapHiderRule
+    failure: UnknownMapHiderTargets
+
+
+@dataclass(frozen=True, slots=True)
 class MapHiderResolution:
-    """All confirmed active rules plus once-per-read diagnostics."""
+    """All confirmed active rules and failures for unresolved settings."""
 
     rules: tuple[ActiveMapHiderRule, ...]
-    diagnostics: tuple[str, ...]
+    issues: tuple[MapHiderIssue, ...]
 
     def hides(self, *, source: str, map_file: ContentPath) -> bool:
         """Return whether any confirmed rule hides this final active map."""
@@ -122,7 +138,11 @@ type MapHiderReader = Callable[[MapHiderRule, Path], MapHiderReaderResult]
 
 
 class MapHiderRules:
-    """Resolve configured map hiding against Pist's Everest load simulation."""
+    """Resolve packaged or explicitly supplied rules against loaded Everest Mods.
+
+    Dynamic readers use Helper settings stored in the game installation, never
+    application-specific configuration or data directories.
+    """
 
     def __init__(
         self,
@@ -137,19 +157,19 @@ class MapHiderRules:
         """Resolve active rules without allowing unknown settings to hide maps."""
         active_names = frozenset(active_mod_names)
         rules: list[ActiveMapHiderRule] = []
-        diagnostics: list[str] = []
+        issues: list[MapHiderIssue] = []
         for rule in self._rules:
             if rule.hider not in active_names:
                 continue
             result = _MAP_HIDER_READERS[rule.reader](rule, self._game_dir)
             if isinstance(result, UnknownMapHiderTargets):
-                diagnostics.append(f'[{rule.id}] {result.diagnostic}')
+                issues.append(MapHiderIssue(rule, result))
                 continue
             values: frozenset[str] | FrozenCaseFoldSet = result.targets
             if rule.match == 'casefold':
                 values = FrozenCaseFoldSet(values)
             rules.append(ActiveMapHiderRule(rule.target, values))
-        return MapHiderResolution(tuple(rules), tuple(diagnostics))
+        return MapHiderResolution(tuple(rules), tuple(issues))
 
 
 def _load_rules(path: Path) -> tuple[MapHiderRule, ...]:
@@ -188,16 +208,16 @@ def _chronia_map_hider_reader(rule: MapHiderRule, game_dir: Path) -> MapHiderRea
         content = path.read_text(encoding='utf-8')
     except FileNotFoundError:
         return KnownMapHiderTargets(frozenset(rule.builtin_targets))
-    except OSError as error:
-        return UnknownMapHiderTargets(f'无法读取 ChroniaHelper 地图隐藏设置：{path}（{error}）')
+    except (OSError, UnicodeDecodeError) as error:
+        return UnknownMapHiderTargets(path, 'read', error)
     try:
-        raw = yaml.load(content, Loader=yaml.BaseLoader)
+        raw = yaml.load(content, Loader=_BaseLoader)
     except yaml.YAMLError as error:
-        return UnknownMapHiderTargets(f'无法解析 ChroniaHelper 地图隐藏设置：{path}（{error}）')
+        return UnknownMapHiderTargets(path, 'parse', error)
     try:
         settings = _ChroniaMapHiderSettings.model_validate({} if raw is None else raw)
-    except ValidationError:
-        return UnknownMapHiderTargets(f'ChroniaHelper 地图隐藏设置结构无效：{path}')
+    except ValidationError as error:
+        return UnknownMapHiderTargets(path, 'validate', error)
     if settings.targets is None:
         return KnownMapHiderTargets(frozenset(rule.builtin_targets))
     return KnownMapHiderTargets(frozenset(settings.targets))
@@ -212,16 +232,16 @@ def _scug_showcase_reader(rule: MapHiderRule, game_dir: Path) -> MapHiderReaderR
         content = path.read_text(encoding='utf-8')
     except FileNotFoundError:
         return KnownMapHiderTargets(frozenset(rule.values))
-    except OSError as error:
-        return UnknownMapHiderTargets(f'无法读取 ScugHelper 设置：{path}（{error}）')
+    except (OSError, UnicodeDecodeError) as error:
+        return UnknownMapHiderTargets(path, 'read', error)
     try:
-        raw = yaml.load(content, Loader=yaml.BaseLoader)
+        raw = yaml.load(content, Loader=_BaseLoader)
     except yaml.YAMLError as error:
-        return UnknownMapHiderTargets(f'无法解析 ScugHelper 设置：{path}（{error}）')
+        return UnknownMapHiderTargets(path, 'parse', error)
     try:
         settings = _ScugHelperSettings.model_validate({} if raw is None else raw)
-    except ValidationError:
-        return UnknownMapHiderTargets(f'ScugHelper 隐藏地图设置无效：{path}')
+    except ValidationError as error:
+        return UnknownMapHiderTargets(path, 'validate', error)
     if settings.hide_showcase_maps is not True:
         return KnownMapHiderTargets(frozenset())
     return KnownMapHiderTargets(frozenset(rule.values))

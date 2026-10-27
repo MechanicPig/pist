@@ -309,8 +309,8 @@ def _associated_mods(table: LuaTable) -> tuple[str, ...]:
         return ()
     return tuple(
         value
-        for index, value in sorted(associated_mods.fields.items())
-        if type(index) is int and isinstance(value, str)
+        for i, value in sorted(associated_mods.fields.items())
+        if type(i) is int and isinstance(value, str)
     )
 
 

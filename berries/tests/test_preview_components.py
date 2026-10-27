@@ -55,6 +55,32 @@ def test_nested_local_sprite_overrides_builtins(tmp_path: Path) -> None:
     assert assets.sprite('silverberry.png') is not None
 
 
+def test_nested_sprites_are_available_through_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = tmp_path / 'nested'
+    nested.mkdir()
+    (nested / 'seed.png').write_bytes(b'nested sprite')
+    urls: list[str] = []
+    monkeypatch.setattr(
+        'berries.map_preview.session.webbrowser.open', lambda url: urls.append(url) or True
+    )
+    session = PreviewSession(PreviewAssets('berries.map_preview', sprite_dir=tmp_path))
+
+    async def check() -> None:
+        task = asyncio.create_task(session.run(()))
+        async with preview_url(task, urls) as url:
+            async with ClientSession() as client:
+                async with client.get(f'{url}/game-assets/nested/seed.png') as response:
+                    assert response.status == 200
+                    assert await response.read() == b'nested sprite'
+                async with client.get(f'{url}/game-assets/C:/outside.png') as response:
+                    assert response.status == 404
+            session.close()
+
+    asyncio.run(check())
+
+
 def test_session_releases_its_listener_when_the_browser_cannot_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

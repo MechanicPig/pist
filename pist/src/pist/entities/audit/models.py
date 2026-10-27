@@ -2,20 +2,24 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from typing_extensions import Sentinel as sentinel
 
-from berries.entities.rules import EntityRuleConditions
+from berries.entities.rules import (
+    EntityRule,
+    EntityRuleLayer,
+)
+from berries.entities.values import TypedAttrsKey
 from berries.game.binmap import AttrValue
-from berries.game.map_source import MapSource
 from berries.models import ExternalModel, FrozenModel
 
 LOCATION_ATTR_NAMES = frozenset({'id', 'x', 'y', 'width', 'height', 'originX', 'originY'})
 META_ATTR_PREFIX = '@meta.'
 UNKNOWN = sentinel('UNKNOWN')
 
-type DefaultValue = AttrValue | None | UNKNOWN
+type DefaultValue = AttrValue | UNKNOWN | None
 
 
 class EntityAuditStatus(StrEnum):
@@ -68,7 +72,7 @@ class ObservationStatus(StrEnum):
 class AuditSource(ExternalModel):
     """The package source of one scanned entity occurrence."""
 
-    scope: MapSource
+    scope: Literal['vanilla', 'mod']
     map_file: str
     map_name: str
     mod_name: str | None = None
@@ -116,6 +120,15 @@ class EntityAuditSummary:
     status: EntityAuditStatus
     map_files: tuple[str, ...]
     unreviewed_variant_count: int = 0
+    rules_complete: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuleGenerationResult:
+    """Generated rules and candidates that still prevent complete publication."""
+
+    layer: EntityRuleLayer
+    incomplete_entities: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,14 +194,29 @@ class EntityVariant:
     meta: dict[str, AttrValue]
     occurrence_count: int
     observations: tuple[VariantObservation, ...]
+    equivalent_observations: tuple[VariantObservation, ...] = ()
+
+    @property
+    def classification(self) -> tuple[ObservationStatus, str | None] | None:
+        """Resolve direct and equivalent classification evidence conservatively."""
+        evidence = (*self.observations, *self.equivalent_observations)
+        if any(item.status is ObservationStatus.CONFLICT for item in evidence):
+            return None
+        outcomes = {
+            (item.status, item.kind)
+            for item in evidence
+            if item.question is ObservationQuestion.ENTITY_CLASSIFICATION
+            and item.status in {ObservationStatus.CONFIRMED, ObservationStatus.NOT_COLLECTIBLE}
+        }
+        return outcomes.pop() if len(outcomes) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
 class EntityVariantSignature:
     """The classification-relevant portion of one raw entity variant."""
 
-    attrs: tuple[tuple[str, AttrValue], ...]
-    meta: tuple[tuple[str, AttrValue], ...]
+    attrs: TypedAttrsKey
+    meta: TypedAttrsKey
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,28 +234,9 @@ class EntityAuditDetail:
 
 @dataclass(frozen=True, slots=True)
 class RuleCandidate:
-    """One condition inferred from confirmed behavior observations."""
+    """One inferred public rule with its audit evidence and review flags."""
 
-    kind: str | None
-    when: dict[str, AttrValue]
-    meta: dict[str, AttrValue]
+    rule: EntityRule
     variant_count: int
     fallback: bool = False
     provisional: bool = False
-    missing: tuple[str, ...] = ()
-    missing_meta: tuple[str, ...] = ()
-
-    @property
-    def exclude(self) -> bool:
-        """Return whether this candidate is a terminal non-collectible outcome."""
-        return self.kind is None
-
-    @property
-    def conditions(self) -> EntityRuleConditions:
-        """Return this candidate's complete value and presence conditions."""
-        return EntityRuleConditions(
-            tuple(sorted(self.when.items())),
-            tuple(sorted(self.meta.items())),
-            tuple(sorted(self.missing)),
-            tuple(sorted(self.missing_meta)),
-        )

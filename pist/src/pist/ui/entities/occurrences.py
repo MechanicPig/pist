@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import TypeAdapter
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -13,12 +14,13 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, ListItem, ListView, Static
 
-from berries.game.content import CONTENT_DIRNAME
-from berries.game.map_source import MapSource
-from berries.game.maps import MapInfo
+from berries.game.content import CONTENT_DIRNAME, ContentPath
+from berries.game.maps import MapFilePath
 from berries.game.mods import MODS_DIRNAME
-from berries.map_layout import MapLayout, MapPreviewEntity, load_map_layout_from_path
+from berries.map_layout import MapLayout, MapPreviewEntity
 from pist.entities.audit import AuditMapOccurrences, AuditSource, RawEntityOccurrence
+from pist.entities.config import load_entity_rule_layers
+from pist.map_entrances import load_map_entrance_rule_layers
 
 OCCURRENCE_MAP_LIST_ID = 'occurrence-map-list'
 OCCURRENCE_ROOM_LIST_ID = 'occurrence-room-list'
@@ -38,15 +40,15 @@ class MapOccurrenceItem(ListItem):
         self.data = data
         text = Text(data.source.map_name, style='bold')
         if data.source.mod_name is not None:
-            text.append(f' [{data.source.mod_name}]', style='dark_orange')
-        text.append(f'\n{data.count} instances · {data.source.map_file}', style='dim')
+            text.append(f' [{data.source.mod_name}]', style='dark_orange')  # pyright: ignore[reportUnusedCallResult]
+        text.append(f'\n{data.count} instances · {data.source.map_file}', style='dim')  # pyright: ignore[reportUnusedCallResult]
         super().__init__(Static(text))
 
     @on(events.Click)
     def preview_on_double_click(self, event: events.Click) -> None:
         """Request a preview without overriding ListItem's selection callback."""
         if event.chain == 2:
-            self.post_message(self.PreviewRequested(self))
+            self.post_message(self.PreviewRequested(self))  # pyright: ignore[reportUnusedCallResult]
 
 
 class OccurrenceScreen(ModalScreen[None]):
@@ -95,8 +97,8 @@ class OccurrenceScreen(ModalScreen[None]):
         if not isinstance(event.item, MapOccurrenceItem):
             return
         rooms = self.query_one(f'#{OCCURRENCE_ROOM_LIST_ID}', ListView)
-        rooms.clear()
-        rooms.extend(
+        rooms.clear()  # pyright: ignore[reportUnusedCallResult]
+        rooms.extend(  # pyright: ignore[reportUnusedCallResult]
             ListItem(Static(f'{room or "未命名房间"} · {count} instances'))
             for room, count in event.item.data.rooms
         )
@@ -108,16 +110,16 @@ class OccurrenceScreen(ModalScreen[None]):
 
     @on(Button.Pressed, '#occurrence-close')
     def close(self) -> None:
-        self.dismiss()
+        self.dismiss()  # pyright: ignore[reportUnusedCallResult]
 
 
-def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[MapInfo, MapLayout]:
+def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[ContentPath, MapLayout]:
     """Locate one immutable audit source without rescanning or decoding other maps."""
     map_file = source.map_file
     match source.scope:
-        case MapSource.VANILLA:
+        case 'vanilla':
             root = game_dir / CONTENT_DIRNAME
-        case MapSource.MOD:
+        case 'mod':
             if not source.mod_file:
                 raise ValueError(f'审计报告缺少 Mod 文件名：{source.map_file}')
             root = game_dir / MODS_DIRNAME / source.mod_file
@@ -125,8 +127,13 @@ def load_occurrence_map(game_dir: Path, source: AuditSource) -> tuple[MapInfo, M
             raise ValueError(f'不支持预览此审计来源：{source.scope}')
     if not root.exists():
         raise ValueError(f'地图包已不存在：{root}')
-    map_info = MapInfo.model_validate({'file_path': map_file})
-    return map_info, load_map_layout_from_path(root, map_file)
+    map_info = TypeAdapter(MapFilePath).validate_python(map_file)
+    return map_info, MapLayout.from_path(
+        root,
+        map_file,
+        entity_rules=load_entity_rule_layers(),
+        entrance_rules=load_map_entrance_rule_layers(),
+    )
 
 
 def occurrence_preview_entities(

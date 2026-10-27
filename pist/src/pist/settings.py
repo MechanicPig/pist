@@ -2,14 +2,14 @@
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Annotated, Literal
+from typing import Annotated
 
 from annotated_types import MinLen
 from pydantic import Field, ValidationError
 
-from berries.game.dialog import DIALOG_LANGUAGES
 from berries.models import FrozenModel
-from pist.paths import PIST_DIR
+
+from .paths import PIST_DIR
 
 SETTINGS_PATH = PIST_DIR / 'settings.json'
 
@@ -24,14 +24,15 @@ class RecordListMaxWidths(FrozenModel):
     mod_name: ColumnWidth = 32
     status: ColumnWidth = 12
     save_slot: ColumnWidth = 6
-    sync_state: ColumnWidth = 8
+    sync_state: ColumnWidth = 10
+    confirmed_at: ColumnWidth = 19
 
 
 class PistSettings(FrozenModel):
     """Persisted local presentation settings for pist."""
 
-    theme: Literal['textual-dark', 'textual-light'] = 'textual-dark'
-    dialog_languages: Annotated[tuple[str, ...], MinLen(1)] = DIALOG_LANGUAGES
+    theme: Annotated[str, MinLen(1)] = 'textual-dark'
+    dialog_lang: Annotated[str, MinLen(1)] = 'zh-cn'
     game_dir: Path | None = None
     smartsheet_url: str | None = None
     record_list_max_widths: RecordListMaxWidths = RecordListMaxWidths()
@@ -60,8 +61,8 @@ class SettingsStore:
                 mode='w', encoding='utf-8', dir=self._path.parent, prefix='.settings-', delete=False
             ) as candidate:
                 candidate_path = Path(candidate.name)
-                candidate.write(settings.model_dump_json(indent=2))
-            candidate_path.replace(self._path)
+                candidate.write(settings.model_dump_json(indent=2))  # pyright: ignore[reportUnusedCallResult]
+            candidate_path.replace(self._path)  # pyright: ignore[reportUnusedCallResult]
         finally:
             if candidate_path is not None:
                 candidate_path.unlink(missing_ok=True)

@@ -68,7 +68,9 @@ def test_same_user_failed_write_keeps_existing_value() -> None:
 
 def test_existing_stale_copy_is_not_changed_or_used_for_current_user() -> None:
     backend = MemoryWinVault()
-    backend._set_password('user@test-service', 'user', 'stale')
+    backend.entries['user@test-service'] = DecodingCredential(
+        UserName='user', CredentialBlob='stale'.encode('utf-16')
+    )
     backend.set_password('test-service', 'user', 'current')
     backend.set_password('test-service', 'user', 'latest')
 

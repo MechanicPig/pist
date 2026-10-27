@@ -58,6 +58,52 @@ def _string(value: str) -> bytes:
     return _varlen(len(encoded)) + encoded
 
 
+@pytest.mark.parametrize('location', ('package', 'lookup', 'attribute'))
+@pytest.mark.parametrize('raw', (b'M\xfcn', b'\xf0\x9f', b'\xed\xa0\x80', b'\xff'))
+def test_malformed_utf8_matches_game_fallback_and_preserves_diagnostics(
+    location: str, raw: bytes
+) -> None:
+    def raw_string(value: bytes) -> bytes:
+        return _varlen(len(value)) + value
+
+    lookup = (b'Map', b'meta', b'text', raw if location == 'lookup' else b'value')
+    data = _string('CELESTE MAP')
+    data += raw_string(raw) if location == 'package' else _string('Example')
+    data += pack('<H', len(lookup)) + b''.join(map(raw_string, lookup))
+    value = b'\x06' + raw_string(raw) if location == 'attribute' else b'\x05' + pack('<H', 3)
+    data += pack('<HBH', 0, 0, 1) + pack('<HBH', 1, 1, 2) + value + pack('<H', 0)
+    expected = raw.decode('utf-8', errors='replace')
+    for parse in (parse_map_bin, parse_map_meta):
+        with pytest.warns(binmap.MapStringDecodeWarning) as captured:
+            parsed = parse(data)
+        assert len(captured) == 1
+        warning = captured[0].message
+        assert isinstance(warning, binmap.MapStringDecodeWarning)
+        assert warning.raw == raw
+        assert data[warning.offset : warning.offset + len(raw)] == raw
+        if isinstance(parsed, binmap.BinMap):
+            meta = parsed.root.child('meta')
+            assert meta is not None
+            metadata = meta.attrs
+        else:
+            metadata = parsed
+        assert metadata == {'text': expected if location != 'package' else 'value'}
+        if isinstance(parsed, binmap.BinMap):
+            assert parsed.package == (expected if location == 'package' else 'Example')
+    with (
+        pytest.raises(BadMapBin, match='Unexpected end'),
+        pytest.warns(binmap.MapStringDecodeWarning),
+    ):
+        parse_map_bin(data[:-1])
+
+
+def test_rle_bytes_are_characters_not_utf8() -> None:
+    data = _string('CELESTE MAP') + _string('Example') + pack('<H', 2)
+    data += _string('Map') + _string('text')
+    data += pack('<HBHBH', 0, 1, 1, 7, 4) + b'\x02\xfc\x01\xff' + pack('<H', 0)
+    assert parse_map_bin(data).root.attrs == {'text': 'üüÿ'}
+
+
 def _nested_map_data(depth: int, *, meta_first: bool) -> bytes:
     """Build a chain reaching the given zero-based depth beside root metadata."""
     lookup = ('Map', 'node', 'meta', 'Icon', 'test-icon')

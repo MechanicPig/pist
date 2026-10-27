@@ -8,7 +8,7 @@ from textual.containers import Horizontal
 from textual.geometry import Region
 from textual.screen import ModalScreen
 from textual.widgets import Static
-from textual.widgets._toast import Toast
+from textual.widgets._toast import Toast  # noqa: PLC2701
 
 from pist.ui.toast_compositor import ToastCompositor
 from pist.ui.tui import RefreshableCssApp
@@ -43,7 +43,7 @@ def test_cjk_toast_preserves_glyphs_and_background_after_refresh_and_resize(moda
             if modal:
                 await app.push_screen(ToastTestModal())
             await pilot.pause()
-            compositor = app.screen._compositor
+            compositor = app.screen._compositor  # noqa: SLF001
             assert isinstance(compositor, ToastCompositor)
             message = '本地记录 75 已保存并同步。'
             for width in (100, 86, 111):
@@ -68,7 +68,7 @@ def test_cjk_toast_preserves_glyphs_and_background_after_refresh_and_resize(moda
                 partial = compositor.render_partial_update()
                 assert partial is not None and message in partial.render_segments(app.console)
                 # A one-cell damage span ending halfway through the first CJK glyph.
-                compositor._dirty_regions.add(Region(region.x + 2, region.y + 2, 1, 1))
+                compositor._dirty_regions.add(Region(region.x + 2, region.y + 2, 1, 1))  # noqa: SLF001
                 partial = compositor.render_partial_update()
                 assert partial is not None and message in partial.render_segments(app.console)
                 await pilot.click(toast)
@@ -90,7 +90,7 @@ def test_translucent_toast_keeps_normal_composition_boundaries() -> None:
             toast = app.screen.query_one(Toast)
             toast.styles.opacity = 0.5
             await pilot.pause()
-            compositor = app.screen._compositor
+            compositor = app.screen._compositor  # noqa: SLF001
             row = toast.region.y + 1
             assert any(toast.region.x < cut < toast.region.right for cut in compositor.cuts[row])
 

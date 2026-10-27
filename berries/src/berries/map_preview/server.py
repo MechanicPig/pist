@@ -1,18 +1,23 @@
 """Read-only loopback browser preview for Celeste maps."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from aiohttp import web
 from pydantic import Field
 
 from berries import map_layout
-from berries.game.binmap import AttrValue
-from berries.game.levels import Level, LevelSide, Map
-from berries.game.maps import MapInfo
-from berries.map_preview.navigation import EntranceResp, OpenMapReq, PreviewNavigation, map_title
-from berries.map_preview.session import PreviewAssets, PreviewSession
+from berries.entities.rules import EntityRules
+from berries.game.binmap import AttrValue, MapStringDecodeWarning
+from berries.game.content import ContentPath
+from berries.game.levels import Level, LevelSide
+from berries.game.localization import Localization
+from berries.game.maps import Map
+from berries.map_entrances import MapEntranceRules
 from berries.models import FrozenModel
+
+from .navigation import EntranceResp, OpenMapReq, PreviewNavigation
+from .session import PreviewAssets, PreviewSession
 
 
 class _EntityResp(FrozenModel):
@@ -25,11 +30,6 @@ class _EntityResp(FrozenModel):
     attrs: dict[str, AttrValue] | None = None
 
 
-class _RespawnResp(FrozenModel):
-    x: int | float
-    y: int | float
-
-
 class _RoomResp(FrozenModel):
     name: str
     x: int | None
@@ -39,7 +39,7 @@ class _RoomResp(FrozenModel):
     background: tuple[str, ...]
     solids: tuple[str, ...]
     entities: tuple[_EntityResp, ...]
-    respawns: tuple[_RespawnResp, ...]
+    respawns: tuple[map_layout.MapRespawn, ...]
 
 
 class _StateResp(FrozenModel):
@@ -53,30 +53,36 @@ class _StateResp(FrozenModel):
 
 @dataclass(frozen=True, slots=True)
 class _PreviewPage:
-    map_info: MapInfo
+    map_file: ContentPath
     title: str
     layout: map_layout.MapLayout
 
 
 class MapPreview:
-    """Serve one short-lived, read-only map preview on loopback."""
+    """Serve a read-only loopback preview, borrowing the supplied Dialog mapping."""
 
     def __init__(
         self,
-        map_source: MapInfo | Map,
+        map_source: ContentPath | Map,
         layout: map_layout.MapLayout,
         *,
         title: str | None = None,
         dialogs: Mapping[str, Mapping[str, str]] | None = None,
         routable_maps: Mapping[str, tuple[Level, LevelSide]] | None = None,
         extra_entities: Mapping[str, tuple[map_layout.MapPreviewEntity, ...]] | None = None,
+        on_map_warning: Callable[[Map, MapStringDecodeWarning], None] | None = None,
+        entity_rules: EntityRules | None = None,
+        entrance_rules: MapEntranceRules | None = None,
     ) -> None:
-        map_info = map_source.map_info if isinstance(map_source, Map) else map_source
-        self._dialogs = dialogs or {}
+        map_file = map_source.file_path if isinstance(map_source, Map) else map_source
+        self._dialogs = {} if dialogs is None else dialogs
         self._navigation = PreviewNavigation(
-            _PreviewPage(map_info, title or map_title(map_info, self._dialogs), layout),
+            _PreviewPage(map_file, title or Localization(self._dialogs).map_name(map_file), layout),
             dialogs=self._dialogs,
             maps=routable_maps,
+            on_map_warning=on_map_warning,
+            entity_rules=entity_rules,
+            entrance_rules=entrance_rules,
         )
         self._extra_entities = {} if extra_entities is None else dict(extra_entities)
         self._session = PreviewSession(PreviewAssets('berries.map_preview'))
@@ -134,7 +140,7 @@ class MapPreview:
                 )
                 for entity in entities
             ),
-            respawns=tuple(_RespawnResp(x=item.x, y=item.y) for item in room.respawns),
+            respawns=room.respawns,
         )
 
     async def _open(self, req: web.Request) -> web.Response:
@@ -154,8 +160,8 @@ class MapPreview:
         target = target_level[target_side]
         self._navigation.append(
             _PreviewPage(
-                target.map_info,
-                target_level.display_name(target_side, self._dialogs, ('zh-cn', 'en')),
+                target.file_path,
+                self._navigation.localization.level_name(target_level),
                 layout,
             )
         )

@@ -38,7 +38,7 @@ class RecordAddRecoveryScreen(ModalScreen[str | RecordAddRecoveryChoice | None])
                 Text(
                     f'上次新增结果未确认：{self.recovery.attempt.mod_metadata_name} / '
                     f'{self.recovery.attempt.map_name}\n'
-                    '请选择实际新增的远端行。关联后仍需核对数据，不会直接认定已同步。'
+                    '请选择实际新增的远端行。关联后仍需核对数据，不会直接认定无本地变更。'
                 )
             )
             with VerticalScroll(id='record-add-candidates'):
@@ -78,13 +78,13 @@ class RecordAddRecoveryScreen(ModalScreen[str | RecordAddRecoveryChoice | None])
             case 'record-add-bind':
                 target = self.query_one('#record-add-target', Select).value
                 if isinstance(target, str):
-                    self.dismiss(target)
+                    self.dismiss(target)  # pyright: ignore[reportUnusedCallResult]
             case 'record-add-retry':
-                self.dismiss(RecordAddRecoveryChoice.RETRY)
+                self.dismiss(RecordAddRecoveryChoice.RETRY)  # pyright: ignore[reportUnusedCallResult]
             case 'record-add-local':
-                self.dismiss(RecordAddRecoveryChoice.ONLY_LOCAL)
+                self.dismiss(RecordAddRecoveryChoice.ONLY_LOCAL)  # pyright: ignore[reportUnusedCallResult]
             case _:
-                self.dismiss(None)
+                self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordAddRetryScreen(ModalScreen[bool]):
@@ -108,4 +108,4 @@ class RecordAddRetryScreen(ModalScreen[bool]):
 
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == 'record-add-retry-confirmed')
+        self.dismiss(event.button.id == 'record-add-retry-confirmed')  # pyright: ignore[reportUnusedCallResult]

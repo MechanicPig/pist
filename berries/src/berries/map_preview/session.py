@@ -6,7 +6,6 @@ import webbrowser
 from collections.abc import Iterable
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import cast
 
 from aiohttp import web
 
@@ -98,11 +97,11 @@ class PreviewSession:
     async def run(self, routes: Iterable[web.RouteDef]) -> None:
         self._result = asyncio.get_running_loop().create_future()
         app = web.Application()
-        app.add_routes(
+        app.add_routes(  # pyright: ignore[reportUnusedCallResult]
             (
                 web.get(self.base_path, self.assets.page),
                 web.get(f'{self.base_path}/assets/{{name}}', self.assets.asset),
-                web.get(f'{self.base_path}/game-assets/{{name}}', self.assets.game_asset),
+                web.get(f'{self.base_path}/game-assets/{{name:.*}}', self.assets.game_asset),
                 *routes,
             )
         )
@@ -111,10 +110,10 @@ class PreviewSession:
             await runner.setup()
             site = web.TCPSite(runner, '127.0.0.1', 0)
             await site.start()
-            sockets = cast(asyncio.Server, site._server).sockets if site._server else ()
-            if not sockets:
+            addresses = runner.addresses
+            if not addresses:
                 raise MapPreviewError('无法启动本地地图预览服务。')
-            url = f'http://127.0.0.1:{sockets[0].getsockname()[1]}{self.base_path}'
+            url = f'http://127.0.0.1:{addresses[0][1]}{self.base_path}'
             if not await asyncio.to_thread(webbrowser.open, url):
                 raise MapPreviewError(f'无法打开浏览器：{url}')
             await self._result

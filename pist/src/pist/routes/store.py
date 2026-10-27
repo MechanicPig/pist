@@ -5,8 +5,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from pist.routes.models import MapRoute
 from pist.sqlite_store import LOCAL_DATA_PATH, SQLiteStore
+
+from .models import MapRoute
 
 
 class RouteStore(SQLiteStore):
@@ -15,7 +16,7 @@ class RouteStore(SQLiteStore):
     def __init__(self, path: Path = LOCAL_DATA_PATH) -> None:
         super().__init__(path)
         with self.connect() as conn:
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 """
                 CREATE TABLE IF NOT EXISTS map_routes (
                     map_file TEXT PRIMARY KEY,
@@ -27,7 +28,7 @@ class RouteStore(SQLiteStore):
 
     def save(self, route: MapRoute) -> None:
         with self.connect() as conn:
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 """
                 INSERT INTO map_routes (map_file, updated_at, payload)
                 VALUES (?, ?, ?)

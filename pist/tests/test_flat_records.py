@@ -9,8 +9,9 @@ import pytest
 from sheet_factory import FakeSheet, make_sheet_fields
 from textual.app import App
 from textual.widgets import Button, Input, Select, TextArea
-from textual.widgets._select import InvalidSelectValueError
+from textual.widgets.select import InvalidSelectValueError
 
+from berries.game.duration import Duration
 from berries.game.levels import LevelSide
 from pist.records.fields import RECORD_ATTRIBUTES
 from pist.records.models import MapRecord
@@ -25,7 +26,7 @@ from pist.smartsheet.models import (
     RecordWriteOptions,
     SmartSheetRecord,
 )
-from pist.ui.records.editor import RecordEditorScreen
+from pist.ui.records.editor import RECORD_FIELD_ORDER, RecordEditorScreen
 
 NOW = datetime(2026, 10, 10, 12, 34, 56, 123000, tzinfo=UTC)
 CSS = Path(__file__).parents[1] / 'src/pist/ui/styles/maps_browser.tcss'
@@ -46,7 +47,7 @@ def full_record() -> MapRecord:
         side=LevelSide.A,
         save_slot=2,
         difficulty='Game difficulty',
-        time_played='1:02:03',
+        time_played=Duration.from_dotnet_ticks(37230000000),
         deaths=0,
         completed=False,
         n_strawberries=0,
@@ -68,17 +69,21 @@ def full_record() -> MapRecord:
     )
 
 
-def test_flat_storage_round_trips_all_fields_without_payload(tmp_path: Path) -> None:
+@pytest.mark.parametrize('side', tuple(LevelSide))
+def test_flat_storage_round_trips_all_fields_without_payload(
+    tmp_path: Path, side: LevelSide
+) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
-    record = full_record()
+    record = full_record().model_copy(update={'side': side})
     local_id = store.save(record)
     saved = store.load(local_id)
-    assert saved.side is LevelSide.A
+    assert saved.side is side
     assert saved == record.model_copy(update={'local_id': local_id, 'record_number': 1})
     assert set(RECORD_COLUMNS) == set(MapRecord.model_fields) - {'local_id'}
     with store.connect() as conn:
         assert (
-            conn.execute('SELECT side FROM records WHERE id = ?', (local_id,)).fetchone()[0] == 'A'
+            conn.execute('SELECT side FROM records WHERE id = ?', (local_id,)).fetchone()[0]
+            == side.name
         )
         columns = {row[1] for row in conn.execute('PRAGMA table_info(records)')}
         assert columns == set(RECORD_COLUMNS) | {'id', 'sync_state'}
@@ -167,10 +172,12 @@ def test_observed_formula_and_unknown_cells_do_not_advance_confirmation(tmp_path
         fields=schema,
         records=(SmartSheetRecord.model_validate({'recordID': 'row', 'values': values}),),
     )
-    store.observe_sheet(snapshot, read_at=NOW)
+    read_at = NOW.replace(day=11)
+    store.observe_sheet(snapshot, read_at=read_at)
     observed = store.sheet_snapshots(record.local_id)[0]
-    assert observed.values == values and observed.fields == schema and observed.read_at == NOW
+    assert observed.values == values and observed.fields == schema and observed.read_at == read_at
     assert store.sheet_links(record.local_id)[0].confirmed_values == {'备注': [{'text': 'A'}]}
+    assert store.list_records()[0].confirmed_at == NOW
     assert store.sync_state(record.local_id) is RecordSyncState.SYNCED
     assert load_sheet_fields().issues(schema) == ('尚未支持的表格字段：新列',)
     assert '草莓数' not in encode_record_values(record, schema)
@@ -219,18 +226,18 @@ def test_editor_exposes_every_public_field_and_clears_values() -> None:
             screen = RecordEditorScreen(record)
             app.push_screen(screen, results.append)
             await pilot.pause()
-            for field in screen._manual_fields:
-                control = screen.query_one(f'#{screen._manual_field_id(field)}')
-                if field.title == '标签':
+            for i, title in enumerate(RECORD_FIELD_ORDER):
+                control = screen.query_one(f'#record-manual-{i}')
+                if title == '标签':
                     assert isinstance(control, Input)
                     control.value = 'New tag,Another tag'
-                elif field.title in {'作者', '备注', '结束日期', '评分'}:
+                elif title in {'作者', '备注', '结束日期', '评分'}:
                     if isinstance(control, TextArea):
                         control.load_text('')
                     else:
                         assert isinstance(control, Input)
                         control.value = ''
-                elif field.title == '磁带':
+                elif title == '磁带':
                     assert isinstance(control, Select)
                     with pytest.raises(InvalidSelectValueError):
                         control.clear()
@@ -290,8 +297,7 @@ def test_editor_rejects_room_placeholders_and_allows_clearing_by_keyboard() -> N
             app.push_screen(screen, results.append)
             await pilot.pause()
             fields = [
-                screen.query_one(f'#{screen._manual_field_id(field)}')
-                for field in screen._manual_fields
+                screen.query_one(f'#record-manual-{i}') for i in range(len(RECORD_FIELD_ORDER))
             ]
             ordered = sorted(fields, key=lambda field: (field.region.y, field.region.x))
             for previous, following in pairwise(ordered):
@@ -299,9 +305,9 @@ def test_editor_rejects_room_placeholders_and_allows_clearing_by_keyboard() -> N
                     assert previous.region.right <= following.region.x
                 else:
                     assert previous.region.bottom <= following.region.y
-            field = screen._manual_field('主房间数')
-            assert field is not None
-            control = screen.query_one(f'#{screen._manual_field_id(field)}', Input)
+            control = screen.query_one(
+                f'#record-manual-{RECORD_FIELD_ORDER.index("主房间数")}', Input
+            )
             for placeholder in ('-1', '0'):
                 control.value = placeholder
                 screen.query_one('#record-confirm-save', Button).press()

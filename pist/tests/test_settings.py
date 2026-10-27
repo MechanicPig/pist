@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from pist.__main__ import default_game_dir, default_sheet_source, set_default_setting
+from pist.__main__ import (
+    default_game_dir,
+    default_sheet_source,
+    set_default_setting,
+    set_dialog_lang,
+)
 from pist.settings import PistSettings, RecordListMaxWidths, SettingsStore
 
 
@@ -39,9 +44,24 @@ def test_failed_settings_replace_preserves_previous_configuration(
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_settings_reject_empty_dialog_language_order() -> None:
+def test_settings_reject_empty_dialog_lang() -> None:
     with pytest.raises(ValueError):
-        PistSettings(dialog_languages=())
+        PistSettings(dialog_lang='')
+
+
+def test_dialog_lang_setting_uses_one_language(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / 'settings.json')
+    assert store.load().dialog_lang == 'zh-cn'
+    set_dialog_lang(store, ' JA ')
+    assert store.load().dialog_lang == 'ja'
+    with pytest.raises(ValueError, match='language code'):
+        set_dialog_lang(store, ' ')
+    assert store.load().dialog_lang == 'ja'
+
+
+def test_settings_reject_empty_theme_name() -> None:
+    with pytest.raises(ValueError):
+        PistSettings(theme='')
 
 
 def test_settings_store_uses_dark_theme_until_saved(tmp_path: Path) -> None:
@@ -54,9 +74,9 @@ def test_settings_store_uses_dark_theme_until_saved(tmp_path: Path) -> None:
 
     assert store.load().theme == 'textual-light'
 
-    store.save(PistSettings(theme='textual-light', dialog_languages=('ja', 'en')))
+    store.save(PistSettings(theme='textual-light', dialog_lang='ja'))
 
-    assert store.load().dialog_languages == ('ja', 'en')
+    assert store.load().dialog_lang == 'ja'
 
 
 def test_default_game_and_sheet_settings_can_be_set_and_cleared(tmp_path: Path) -> None:

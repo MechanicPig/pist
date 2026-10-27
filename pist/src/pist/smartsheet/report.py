@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 
 from pist.records.fields import RECORD_ATTRIBUTES
-from pist.smartsheet.models import FieldsResult, FieldType, InspectionReport
+
+from .models import FieldsResult, FieldType, InspectionReport
 
 FIELD_TYPES: dict[int, str] = {
     FieldType.TEXT: '文本',
@@ -17,6 +18,7 @@ FIELD_TYPES: dict[int, str] = {
 }
 
 FIELD_SOURCES = {
+    '编号': ('当前记录', '本地正式记录编号；由顺序调整流程维护'),
     'Mod元数据名': ('当前记录', 'everest.yaml'),
     'Mod名': ('计划自动', 'GameBanana 标题和链接'),
     '地图名': ('当前记录', 'Dialog 本地化名称'),
@@ -69,12 +71,12 @@ def manual_fields_for_schema(fields: FieldsResult) -> tuple[ManualRecordField, .
         ManualRecordField(
             field.field_title,
             field.field_type,
-            ()
-            if field.property_single_select is None
-            else tuple(option.text for option in field.property_single_select.options),
+            tuple(option.text for option in field.select_options),
         )
         for field in fields.fields
-        if field.field_title in RECORD_ATTRIBUTES and field.property_formula is None
+        if field.field_title in RECORD_ATTRIBUTES
+        and field.field_title != '编号'
+        and field.property_formula is None
     )
 
 

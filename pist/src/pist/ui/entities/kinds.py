@@ -7,7 +7,7 @@ from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.widgets import Tree
-from textual.widgets._tree import NodeID, TreeNode
+from textual.widgets.tree import NodeID, TreeNode
 
 from berries.entities.rules import EntityRules
 from pist.ui.mouse import DOUBLE_CLICK_COUNT, LEFT_MOUSE_BUTTON, RIGHT_MOUSE_BUTTON
@@ -55,26 +55,26 @@ class KindTree(Tree[str]):
         if event.button == RIGHT_MOUSE_BUTTON:
             node = self._context_node_for(event)
             parent = None if node is None else node.data
-            self.post_message(self.ContextRequested(parent))
-            event.prevent_default()
-            event.stop()
+            self.post_message(self.ContextRequested(parent))  # pyright: ignore[reportUnusedCallResult]
+            event.prevent_default()  # pyright: ignore[reportUnusedCallResult]
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
             return
         await super()._on_mouse_down(event)
 
     async def _on_click(self, event: events.Click) -> None:
         if event.button == RIGHT_MOUSE_BUTTON:
-            event.prevent_default()
-            event.stop()
+            event.prevent_default()  # pyright: ignore[reportUnusedCallResult]
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
             return
         if event.button == LEFT_MOUSE_BUTTON:
             node = self._click_node_for(event)
             if node is not None:
                 if event.chain >= DOUBLE_CLICK_COUNT and node.data is not None:
-                    self.post_message(self.KindConfirmed(node.data))
+                    self.post_message(self.KindConfirmed(node.data))  # pyright: ignore[reportUnusedCallResult]
                 else:
                     self._toggle_node(node)
-                event.prevent_default()
-                event.stop()
+                event.prevent_default()  # pyright: ignore[reportUnusedCallResult]
+                event.stop()  # pyright: ignore[reportUnusedCallResult]
                 return
         await super()._on_click(event)
 

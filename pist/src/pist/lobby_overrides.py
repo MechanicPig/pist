@@ -5,13 +5,20 @@ from pathlib import Path
 from typing import Annotated
 
 import tomlkit
-from pydantic import AfterValidator, ValidationError, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from berries.game.content import MAPS_DIR, ContentPath
 from berries.game.levels import LevelSide
 from berries.models import FrozenModel
 from berries.types import NonEmptyStr
-from pist.paths import PIST_DIR, SHARED_DATA_DIR, SOURCE_ROOT
+
+from .paths import PIST_DIR, SHARED_DATA_DIR, SOURCE_ROOT
 
 SHARED_COLLAB_LOBBIES_PATH = SHARED_DATA_DIR / 'collab_lobbies.toml'
 LOCAL_COLLAB_LOBBIES_PATH = PIST_DIR / 'collab_lobbies.toml'
@@ -46,6 +53,20 @@ class CollabLobbyOverride(FrozenModel):
     lobby: CollabLobbySID
     side: LevelSide
     campaigns: tuple[CampaignRef, ...]
+
+    @field_validator('side', mode='before')
+    @classmethod
+    def parse_side(cls, value: object) -> LevelSide:
+        """Read the TOML side name without accepting numeric position encodings."""
+        if isinstance(value, LevelSide):
+            return value
+        if isinstance(value, str) and (side := LevelSide.__members__.get(value)) is not None:
+            return side
+        raise ValueError('Expected side A, B or C.')
+
+    @field_serializer('side', when_used='json')
+    def serialize_side(self, side: LevelSide) -> str:
+        return side.name
 
     @field_validator('campaigns')
     @classmethod
@@ -212,7 +233,7 @@ class CollabLobbyOverrideStore:
     def _write(path: Path, overrides: CollabLobbyOverrides) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = overrides.model_dump(mode='json')
-        path.write_text(tomlkit.dumps(data), encoding='utf-8')
+        path.write_text(tomlkit.dumps(data), encoding='utf-8')  # pyright: ignore[reportUnusedCallResult]
 
 
 DEFAULT_COLLAB_LOBBY_OVERRIDES = load_collab_lobby_overrides(SHARED_COLLAB_LOBBIES_PATH)

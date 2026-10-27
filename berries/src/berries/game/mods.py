@@ -1,22 +1,28 @@
-"""Offline discovery of enabled Mods."""
+"""Offline Mod package discovery, enabled selection and content reading."""
 
-import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from hashlib import sha256
+from enum import StrEnum
+from logging import INFO, WARNING, getLogger
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 from zipfile import BadZipFile
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from berries.containers import CaseFoldDict
-from berries.game import content, dialog, everest
-from berries.game.binmap import BadMapBin, parse_map_meta
-from berries.game.maps import MapInfo, split_map_side_suffix
-from berries.models import FrozenModel
+
+from . import content, dialog, everest
+from .maps import MapFilePath
+
+_LOGGER = getLogger(__name__)
+
+try:
+    from yaml import CBaseLoader as _BaseLoader
+except ImportError:
+    from yaml import BaseLoader as _BaseLoader
 
 COLLAB_ID_FILENAME = 'CollabUtils2CollabID.txt'
 MODS_DIRNAME = 'Mods'
@@ -25,9 +31,6 @@ MANIFEST_FILENAME = 'everest.yaml'
 MANIFEST_FALLBACK_FILENAME = 'everest.yml'
 MANIFEST_FILENAMES = (MANIFEST_FILENAME, MANIFEST_FALLBACK_FILENAME)
 IGNORED_DEPENDENCY_NAMES = frozenset({'Celeste', 'Everest', 'EverestCore'})
-MAP_SIDE_SUFFIX_ORDER = {None: 0, 'B': 1, 'C': 2}
-NATURAL_PART_PATTERN = re.compile(r'(\d+)')
-COLLAB_JOURNAL_ICON_PATTERN = re.compile(r'.*/\d+-.*')
 
 
 class InstalledMod(BaseModel, ABC):
@@ -42,7 +45,7 @@ class InstalledMod(BaseModel, ABC):
     manifest: everest.Manifest = Field(min_length=1)
     collab_id: str | None = None
     dialogs: dict[str, dialog.DialogEntries] = Field(default_factory=dict)
-    maps: list[MapInfo] = Field(default_factory=list)
+    map_files: list[MapFilePath] = Field(default_factory=list)
 
     @abstractmethod
     def open(self) -> content.ContentEntry:
@@ -69,11 +72,6 @@ class InstalledMod(BaseModel, ABC):
         """Return every metadata name provided by this package."""
         return tuple(metadata.name for metadata in self.manifest)
 
-    @property
-    def map_files(self) -> tuple[content.ContentPath, ...]:
-        """Return the map paths discovered in this package."""
-        return tuple(map_info.file_path for map_info in self.maps)
-
     def iter_dependencies(self) -> Iterator[everest.Dependency]:
         """Yield required dependencies declared by every manifest entry."""
         for metadata in self.manifest:
@@ -88,8 +86,6 @@ class InstalledMod(BaseModel, ABC):
 class DirMod(InstalledMod):
     """One directory Mod package."""
 
-    source: Literal['directory'] = 'directory'
-
     def open(self) -> content.DirContentEntry:
         return content.DirContentEntry(self.path)
 
@@ -97,31 +93,54 @@ class DirMod(InstalledMod):
 class ZipMod(InstalledMod):
     """One ZIP Mod package."""
 
-    source: Literal['zip'] = 'zip'
-
     def open(self) -> content.ZipContentEntry:
         return content.ZipContentEntry(self.path)
 
 
-type ScannedMod = Annotated[DirMod | ZipMod, Field(discriminator='source')]
+class ModScanStage(StrEnum):
+    """The content operation associated with one scan failure."""
+
+    PACKAGE = 'package'
+    MANIFEST = 'manifest'
+    TEXT = 'text'
+    DIALOG = 'dialog'
+    MAPS = 'maps'
+    ZIP_MEMBER = 'zip_member'
 
 
-class ModScanWarning(FrozenModel):
-    """One non-fatal problem encountered while scanning a Mod."""
+class ModScanError(Exception):
+    """A package scan failure with its physical source, operation and original cause."""
 
-    mod_filename: str
-    file_path: str
-    message: str
+    def __init__(
+        self,
+        path: Path,
+        file_path: str,
+        stage: ModScanStage,
+        cause: Exception,
+        *,
+        disabled: bool = False,
+    ) -> None:
+        self.path = path
+        self.file_path = file_path
+        self.stage = stage
+        self.cause = cause
+        self.disabled = disabled
+        super().__init__(f'{stage}: {path} / {file_path}: {cause}')
 
 
 class ModScanReport(BaseModel):
-    """Persisted result of an offline scan of locally enabled Mods."""
+    """In-memory scan facts, exportable as JSON inventory but not a package reload format."""
 
     mods_dir: str
     disabled_filenames: list[str]
     disabled_mod_names: list[str] = Field(default_factory=list)
-    warnings: list[ModScanWarning] = Field(default_factory=list)
-    mods: list[ScannedMod]
+    mods: list[InstalledMod]
+
+    @property
+    def enabled_mods(self) -> tuple[InstalledMod, ...]:
+        """Return only selected packages, even when disabled content was also scanned."""
+        disabled = set(self.disabled_filenames)
+        return tuple(mod for mod in self.mods if mod.filename not in disabled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,94 +152,18 @@ class DisabledMod:
 
 
 @dataclass(frozen=True, slots=True)
-class ModScanPreparation:
-    """The local packages discovered before an enabled-Mod scan begins."""
+class ModScanProgress:
+    """Scan progress, initially zero and then updated after each physical package."""
 
-    candidates: tuple[Path, ...]
-    disabled_candidates: tuple[Path, ...]
-
-
-def _natural_path_key(path: str) -> tuple[tuple[int, int | str], ...]:
-    """Return a case-insensitive natural sort key for a map path."""
-    return tuple(
-        (0, int(part)) if part.isdecimal() else (1, part.casefold())
-        for part in NATURAL_PART_PATTERN.split(path)
-    )
+    completed: int
+    total: int
+    path: Path | None = None
+    disabled: bool = False
 
 
 def is_mod_dependency(name: str) -> bool:
     """Return whether a manifest dependency belongs in the local Mod graph."""
     return name not in IGNORED_DEPENDENCY_NAMES
-
-
-def is_collab_submission_map(map_info: MapInfo) -> bool:
-    """Return whether a Collab map path is neither a lobby nor a Gym."""
-    parts = (part.casefold() for part in map_info.file_path.parts)
-    return not any('lobb' in part or 'gym' in part for part in parts)
-
-
-def collab_journal_map_order(mod: InstalledMod, maps: Iterable[MapInfo]) -> list[MapInfo]:
-    """Order one Collab lobby's maps as CollabUtils2 orders its journal entries."""
-    map_list = list(maps)
-    try:
-        icons = dict(iter_collab_journal_map_icons(mod, map_list))
-    except BadMapBin, content.BadContentEntry, BadZipFile, FileNotFoundError, KeyError:
-        return map_list
-    return collab_journal_map_order_from_icons(map_list, icons)
-
-
-def collab_journal_map_order_from_icons(
-    maps: Iterable[MapInfo], icons: Mapping[content.ContentPath, str | None]
-) -> list[MapInfo]:
-    """Order maps from cached Collab journal icon paths when they are all usable."""
-    map_list = list(maps)
-    if not all(
-        (icon := icons.get(map_info.file_path)) is not None
-        and COLLAB_JOURNAL_ICON_PATTERN.fullmatch(icon)
-        for map_info in map_list
-    ):
-        return map_list
-    return sorted(
-        map_list,
-        key=lambda map_info: (
-            split_map_side_suffix(map_info.file_path)[0].stem == 'ZZ-HeartSide',
-            str(icons[map_info.file_path]).casefold(),
-            map_info.file_path.as_posix().casefold(),
-        ),
-    )
-
-
-def iter_collab_journal_map_icons(
-    mod: InstalledMod, maps: Iterable[MapInfo]
-) -> Iterator[tuple[content.ContentPath, str | None]]:
-    """Yield Collab journal icon paths one map at a time without loading layouts."""
-    with mod.open() as root:
-        for map_info in maps:
-            icon = parse_map_meta(
-                root.joinpath(map_info.file_path).read_bytes(), allow_trailing=True
-            ).get('Icon')
-            yield map_info.file_path, icon if isinstance(icon, str) else None
-
-
-def collab_journal_icon_fingerprint(mod: InstalledMod, maps: Iterable[MapInfo]) -> str:
-    """Return a fingerprint that changes when a source map package changes."""
-    map_files = sorted(map_info.file_path for map_info in maps)
-    digest = sha256()
-    with mod.open() as root:
-        for map_file in map_files:
-            entry = root.joinpath(map_file)
-            digest.update(f'{map_file}\0{content.entry_fingerprint(entry)}\0'.encode())
-    return digest.hexdigest()
-
-
-def _validation_error_detail(error: ValidationError) -> str:
-    """Format boundary validation failures without Pydantic's developer metadata."""
-    details: list[str] = []
-    for issue in error.errors(include_url=False, include_context=False, include_input=False):
-        location = '.'.join(str(part) for part in issue['loc'])
-        message = issue['msg'].removeprefix('Value error, ')
-        details.append(f'{location}：{message}' if location else message)
-    return '；'.join(details)
 
 
 class ModScanner:
@@ -233,65 +176,59 @@ class ModScanner:
         whitelist_path: Path | None = None,
         temporary_blacklist_path: Path | None = None,
         whitelist_full_override: bool = False,
+        on_error: Callable[[ModScanError], None] | None = None,
+        on_path_notice: Callable[[Path, str, Literal['info', 'warning'], bool], None] | None = None,
     ) -> None:
         self._mods_dir = game_dir / MODS_DIRNAME
         self._whitelist_path = whitelist_path
         self._temporary_blacklist_path = temporary_blacklist_path
         self._whitelist_full_override = whitelist_full_override
-        self._warnings: list[ModScanWarning] = []
+        self._on_error = on_error
+        self._on_path_notice = on_path_notice
 
-    def scan(self) -> ModScanReport:
-        """Read every enabled Mod package and return its finished scan report."""
-        preparation = self.prepare()
-        return self.build_report(
-            (
-                mod
-                for candidate in preparation.candidates
-                if (mod := self.scan_mod(candidate)) is not None
-            ),
-            (self.scan_disabled_mod(candidate) for candidate in preparation.disabled_candidates),
-        )
+    def scan(
+        self,
+        *,
+        include_disabled: bool = False,
+        read_dialogs: bool = True,
+        on_progress: Callable[[ModScanProgress], None] | None = None,
+    ) -> ModScanReport:
+        """Discover packages in Everest order and read their declared content.
 
-    def prepare(self) -> ModScanPreparation:
-        """Discover the packages Everest would load without opening any package."""
-        self._warnings.clear()
+        Disabled packages normally contribute metadata names only. include_disabled
+        includes their content too; read_dialogs independently controls language reads.
+        Failures raise by default. The constructor's on_error callback may return to
+        continue using the documented fallback or skip the failed input, or raise to abort.
+        Progress callbacks run outside error handlers; their exceptions propagate unchanged.
+        Ignored ZIP paths use on_path_notice(root, raw_path, severity, disabled),
+        or standard logging when no handler is supplied. Notices never register
+        the ignored path; handler exceptions propagate without being swallowed.
+        """
         if not self._mods_dir.is_dir():
             raise ValueError(f'Game Mods directory does not exist: {self._mods_dir!r}')
 
         blacklist = self._read_blacklist()
         temporary_blacklist = self._read_optional_list(self._temporary_blacklist_path)
         whitelist = self._read_optional_list(self._whitelist_path)
-        pkgs = (*self._zip_mod_paths(), *self._directory_mod_paths())
-        return ModScanPreparation(
-            candidates=tuple(
-                pkg
-                for pkg in pkgs
-                if self._should_load(pkg.name, blacklist, temporary_blacklist, whitelist)
-            ),
-            disabled_candidates=tuple(
-                pkg
-                for pkg in pkgs
-                if not self._should_load(pkg.name, blacklist, temporary_blacklist, whitelist)
-            ),
-        )
-
-    def scan_mod(self, path: Path) -> ScannedMod | None:
-        """Scan one candidate prepared by :meth:`prepare`."""
-        return self._read_mod(path)
-
-    def scan_disabled_mod(self, path: Path) -> DisabledMod:
-        """Read the minimal metadata needed to identify one disabled Mod."""
-        return DisabledMod(
-            filename=path.name,
-            disabled_mod_names=self._read_metadata_names(path),
-        )
-
-    def build_report(
-        self, mods: Iterable[ScannedMod], disabled_mods: Iterable[DisabledMod]
-    ) -> ModScanReport:
-        """Build a completed report from scanned Mod results."""
-        disabled = tuple(disabled_mods)
-        scanned_mods = list(mods)
+        pkgs = (*self._zip_mod_paths(), *self._dir_mod_paths())
+        scanned_mods: list[InstalledMod] = []
+        disabled: list[DisabledMod] = []
+        if on_progress is not None:
+            on_progress(ModScanProgress(0, len(pkgs)))
+        for i, pkg in enumerate(pkgs, start=1):
+            enabled = self._should_load(pkg.name, blacklist, temporary_blacklist, whitelist)
+            if enabled or include_disabled:
+                mod = self.read_mod(pkg, read_dialogs=read_dialogs, disabled=not enabled)
+                if mod is not None:
+                    scanned_mods.append(mod)
+                if not enabled:
+                    disabled.append(
+                        DisabledMod(pkg.name, () if mod is None else mod.metadata_names)
+                    )
+            else:
+                disabled.append(DisabledMod(pkg.name, self._read_metadata_names(pkg)))
+            if on_progress is not None:
+                on_progress(ModScanProgress(i, len(pkgs), pkg, not enabled))
         return ModScanReport(
             mods_dir=str(self._mods_dir),
             disabled_filenames=[mod.filename for mod in disabled],
@@ -299,20 +236,13 @@ class ModScanner:
                 {name for mod in disabled for name in mod.disabled_mod_names},
                 key=str.casefold,
             ),
-            warnings=self._warnings.copy(),
             mods=scanned_mods,
         )
 
-    def scan_all(self) -> tuple[ScannedMod, ...]:
-        """Return every valid Mod package, including disabled ones."""
-        self._warnings.clear()
-        if not self._mods_dir.is_dir():
-            raise ValueError(f'Game Mods directory does not exist: {self._mods_dir!r}')
-        return tuple(
-            mod
-            for candidate in (*self._zip_mod_paths(), *self._directory_mod_paths())
-            if (mod := self._read_mod(candidate, read_dialogs=False)) is not None
-        )
+    def _report_error(self, error: ModScanError) -> None:
+        if self._on_error is None:
+            raise error from error.cause
+        self._on_error(error)
 
     def _zip_mod_paths(self) -> tuple[Path, ...]:
         """Return ZIP packages in the order Everest loads them."""
@@ -327,7 +257,7 @@ class ModScanner:
             )
         )
 
-    def _directory_mod_paths(self) -> tuple[Path, ...]:
+    def _dir_mod_paths(self) -> tuple[Path, ...]:
         """Return Mod directories in the order Everest loads them."""
         return tuple(
             sorted(
@@ -375,7 +305,7 @@ class ModScanner:
     @staticmethod
     def _parse_manifest(text: str, *, source: Path) -> everest.Manifest:
         try:
-            parsed = yaml.load(text, Loader=yaml.BaseLoader)
+            parsed = yaml.load(text, Loader=_BaseLoader)
         except yaml.YAMLError as error:
             raise ValueError(f'Invalid {MANIFEST_FILENAME} in {source!r}: {error}') from error
         if not isinstance(parsed, list) or not parsed:
@@ -384,80 +314,77 @@ class ModScanner:
             )
         return everest.MANIFEST_ADAPTER.validate_python(parsed)
 
-    def _read_mod(self, path: Path, *, read_dialogs: bool = True) -> ScannedMod | None:
+    def read_mod(
+        self, path: Path, *, read_dialogs: bool = True, disabled: bool = False
+    ) -> InstalledMod | None:
+        """Read one package independently of enabled selection; missing manifests return None.
+
+        A returning on_error callback permits partial content and Everest's dummy
+        manifest fallback. Map paths retain content traversal order, not display order.
+        """
         try:
-            with content.ContentEntry(path) as mod_path:
-                mod_type = ZipMod if isinstance(mod_path, content.ZipContentEntry) else DirMod
-                manifest_path = self._find_manifest(mod_path)
-                self._warn_invalid_zip_members(mod_path, mod_filename=path.name)
-                if manifest_path is None:
-                    return None
-                manifest_text = self._read_text(manifest_path, mod_filename=path.name)
-                if manifest_text is None:
-                    return None
-                try:
-                    manifest = self._parse_manifest(manifest_text, source=path)
-                except (ValueError, ValidationError) as error:
-                    self._warn_invalid_manifest(path, manifest_path, error)
-                    manifest = self._fallback_manifest(
-                        path, archive=isinstance(mod_path, content.ZipContentEntry)
-                    )
-                collab_id_path = self._find_child(mod_path, COLLAB_ID_FILENAME)
-                collab_id = (
-                    text.strip()
-                    if collab_id_path is not None
-                    and (text := self._read_text(collab_id_path, mod_filename=path.name))
-                    is not None
-                    else None
-                )
-                maps_dir = self._find_child(mod_path, content.MAPS_DIR.name)
-                map_files: list[content.ContentPath] = []
-                if maps_dir is not None:
-                    for directory, _, filenames in maps_dir.walk():
-                        for filename in filenames:
-                            map_path = directory / filename
-                            if map_path.at.suffix == '.bin':
-                                map_files.append(content.ContentPath(map_path.at))
-                    map_files.sort(key=self._map_sort_key)
-                maps = [MapInfo(file_path=map_file) for map_file in map_files]
-                dialogs: dict[str, CaseFoldDict[str]] = {}
-                if read_dialogs:
-                    dialogs = self._read_dialogs(mod_path, mod_filename=path.name)
-                return mod_type(
-                    filename=path.name,
-                    path=path,
-                    manifest=manifest,
-                    collab_id=collab_id or None,
-                    dialogs=dialogs,
-                    maps=maps,
-                )
-        except content.BadZipContentEntry as error:
-            raise ValueError(f'Invalid Mod archive: {path!r}') from error
-        except content.BadContentEntry:
+            mod_path = content.ContentEntry(path)
+        except (content.BadContentEntry, OSError, BadZipFile) as error:
+            self._report_error(
+                ModScanError(path, '', ModScanStage.PACKAGE, error, disabled=disabled)
+            )
             return None
-        except FileNotFoundError:
-            return None
+        with mod_path:
+            mod_type = ZipMod if isinstance(mod_path, content.ZipContentEntry) else DirMod
+            manifest_path = self._find_manifest(mod_path)
+            self._report_zip_paths(mod_path, disabled=disabled)
+            if manifest_path is None:
+                return None
+            manifest_text = self._read_text(manifest_path, disabled=disabled)
+            if manifest_text is None:
+                return None
+            try:
+                manifest = self._parse_manifest(manifest_text, source=path)
+            except ValueError as error:
+                self._report_invalid_manifest(path, manifest_path, error, disabled=disabled)
+                manifest = self._fallback_manifest(
+                    path, archive=isinstance(mod_path, content.ZipContentEntry)
+                )
+            collab_id_path = self._find_child(mod_path, COLLAB_ID_FILENAME)
+            collab_id = (
+                text.strip()
+                if collab_id_path is not None
+                and (text := self._read_text(collab_id_path, disabled=disabled)) is not None
+                else None
+            )
+            map_files = self._read_map_paths(mod_path, disabled=disabled)
+            dialogs = self._read_dialogs(mod_path, disabled=disabled) if read_dialogs else {}
+            return mod_type(
+                filename=path.name,
+                path=path,
+                manifest=manifest,
+                collab_id=collab_id or None,
+                dialogs=dialogs,
+                map_files=list(map_files),
+            )
 
     def _read_metadata_names(self, path: Path) -> tuple[str, ...]:
         try:
-            with content.ContentEntry(path) as mod_path:
-                manifest_path = self._find_manifest(mod_path)
-                self._warn_invalid_zip_members(mod_path, mod_filename=path.name, disabled=True)
-                if manifest_path is None:
-                    return ()
-                text = self._read_text(manifest_path, mod_filename=path.name)
-                if text is None:
-                    return ()
-                try:
-                    manifest = self._parse_manifest(text, source=path)
-                except (ValueError, ValidationError) as error:
-                    self._warn_invalid_manifest(path, manifest_path, error, disabled=True)
-                    return ()
-                return tuple(metadata.name for metadata in manifest)
-        except content.BadContentEntry, content.BadZipContentEntry, FileNotFoundError:
+            mod_path = content.ContentEntry(path)
+        except (content.BadContentEntry, OSError, BadZipFile) as error:
+            self._report_error(ModScanError(path, '', ModScanStage.PACKAGE, error, disabled=True))
             return ()
+        with mod_path:
+            manifest_path = self._find_manifest(mod_path)
+            self._report_zip_paths(mod_path, disabled=True)
+            if manifest_path is None:
+                return ()
+            text = self._read_text(manifest_path, disabled=True)
+            if text is None:
+                return ()
+            try:
+                manifest = self._parse_manifest(text, source=path)
+            except ValueError as error:
+                self._report_invalid_manifest(path, manifest_path, error, disabled=True)
+                return ()
+            return tuple(metadata.name for metadata in manifest)
 
-    def _warn_invalid_manifest(
+    def _report_invalid_manifest(
         self,
         path: Path,
         manifest_path: content.ContentEntry,
@@ -465,36 +392,40 @@ class ModScanner:
         *,
         disabled: bool = False,
     ) -> None:
-        """Record malformed manifest metadata without aborting the package scan."""
-        prefix = '禁用 Mod 元数据无效' if disabled else 'Mod 元数据无效'
-        detail = (
-            _validation_error_detail(error) if isinstance(error, ValidationError) else str(error)
-        )
-        self._warnings.append(
-            ModScanWarning(
-                mod_filename=path.name,
-                file_path=manifest_path.at.as_posix(),
-                message=f'{prefix}：{detail}',
+        """Offer malformed manifest metadata to the caller's failure policy."""
+        self._report_error(
+            ModScanError(
+                path, manifest_path.at.as_posix(), ModScanStage.MANIFEST, error, disabled=disabled
             )
         )
 
-    def _warn_invalid_zip_members(
+    def _report_zip_paths(
         self,
         root: content.ContentEntry,
         *,
-        mod_filename: str,
         disabled: bool = False,
     ) -> None:
-        """Record ZIP members ignored because they cannot name virtual content."""
-        prefix = '禁用 Mod' if disabled else 'Mod'
-        for member_path in content.invalid_archive_member_paths(root):
-            self._warnings.append(
-                ModScanWarning(
-                    mod_filename=mod_filename,
-                    file_path=member_path,
-                    message=f'{prefix} 包含无效成员路径，已忽略。',
-                )
+        """Report skipped paths separately from input failures requiring recovery."""
+        if not isinstance(root, content.ZipContentEntry):
+            return
+        for member_path in root.zip_file.member_index.invalid_paths:
+            virtual = member_path.replace('\\', '/')
+            if any(part.startswith('.') and part not in {'.', '..'} for part in virtual.split('/')):
+                continue
+            severity: Literal['info', 'warning'] = (
+                'info'
+                if '//' not in virtual and any(part in {'.', '..'} for part in virtual.split('/'))
+                else 'warning'
             )
+            if self._on_path_notice is not None:
+                self._on_path_notice(root.root, member_path, severity, disabled)
+            else:
+                _LOGGER.log(
+                    INFO if severity == 'info' else WARNING,
+                    '%s / %s: ignored noncanonical ZIP path',
+                    root.root,
+                    member_path,
+                )
 
     @staticmethod
     def _fallback_manifest(path: Path, *, archive: bool) -> everest.Manifest:
@@ -504,23 +435,8 @@ class ModScanner:
         return (
             everest.ModMetadata(
                 name=f'{prefix}{name}',
-                version=everest.Version.parse('0.0.0-dummy'),
+                version=everest.DUMMY_VERSION,
             ),
-        )
-
-    @staticmethod
-    def _map_sort_key(
-        map_file: content.ContentPath,
-    ) -> tuple[int, tuple[tuple[int, int | str], ...], int, str]:
-        """Sort map paths naturally, keeping B/C sides after their A-side."""
-        base_file, side_suffix = split_map_side_suffix(map_file)
-        base_path = base_file.with_suffix('').as_posix()
-        is_heart_side = base_file.stem == 'ZZ-HeartSide'
-        return (
-            int(is_heart_side),
-            _natural_path_key(base_path),
-            MAP_SIDE_SUFFIX_ORDER[side_suffix],
-            map_file.as_posix().casefold(),
         )
 
     @staticmethod
@@ -543,33 +459,80 @@ class ModScanner:
         )
 
     def _read_dialogs(
-        self, mod_path: content.ContentEntry, *, mod_filename: str
+        self, mod_path: content.ContentEntry, *, disabled: bool = False
     ) -> dict[str, CaseFoldDict[str]]:
-        dialog_dir = next(
-            (
-                child
-                for child in mod_path.iterdir()
-                if child.name == content.DIALOG_DIR.name and child.is_dir()
-            ),
-            None,
-        )
+        try:
+            dialog_dir = next(
+                (
+                    child
+                    for child in mod_path.iterdir()
+                    if child.name == content.DIALOG_DIR.name and child.is_dir()
+                ),
+                None,
+            )
+        except (OSError, BadZipFile, KeyError) as error:
+            self._report_error(
+                ModScanError(
+                    mod_path.root,
+                    content.DIALOG_DIR.as_posix(),
+                    ModScanStage.DIALOG,
+                    error,
+                    disabled=disabled,
+                )
+            )
+            return {}
         if dialog_dir is None:
             return {}
-        return dialog.read_dialogs(
-            dialog_dir.iterdir(),
-            read_text=lambda path: self._read_text(path, mod_filename=mod_filename),
-        )
 
-    def _read_text(self, path: content.ContentEntry, *, mod_filename: str) -> str | None:
+        def report_error(error: dialog.DialogReadError) -> None:
+            self._report_error(
+                ModScanError(
+                    error.root,
+                    error.file_path.as_posix(),
+                    ModScanStage.DIALOG,
+                    error.cause,
+                    disabled=disabled,
+                )
+            )
+
+        return dialog.read_dialogs(dialog_dir, strict=True, on_error=report_error)
+
+    def _read_text(self, path: content.ContentEntry, *, disabled: bool = False) -> str | None:
         """Read one Mod text file, retaining decoding failures as scan diagnostics."""
         try:
             return path.read_text()
-        except UnicodeDecodeError as error:
-            self._warnings.append(
-                ModScanWarning(
-                    mod_filename=mod_filename,
-                    file_path=path.at.as_posix(),
-                    message=f'无法以 UTF-8 解码：{error.reason}',
+        except (UnicodeDecodeError, OSError, BadZipFile, KeyError) as error:
+            self._report_error(
+                ModScanError(
+                    path.root, path.at.as_posix(), ModScanStage.TEXT, error, disabled=disabled
                 )
             )
             return None
+
+    def _read_map_paths(
+        self, root: content.ContentEntry, *, disabled: bool
+    ) -> list[content.ContentPath]:
+        """Discover map files without parsing layouts, retaining any completed traversal."""
+        paths: list[content.ContentPath] = []
+        try:
+            maps_dir = self._find_child(root, content.MAPS_DIR.name)
+            if maps_dir is not None:
+                for directory, dirnames, filenames in maps_dir.walk():
+                    dirnames[:] = [name for name in dirnames if not name.startswith('.')]
+                    for filename in filenames:
+                        if filename.startswith('.'):
+                            continue
+                        map_path = directory / filename
+                        if map_path.at.suffix == '.bin':
+                            paths.append(content.ContentPath(map_path.at))
+        except (OSError, BadZipFile, KeyError) as error:
+            self._report_error(
+                ModScanError(
+                    root.root,
+                    content.MAPS_DIR.as_posix(),
+                    ModScanStage.MAPS,
+                    error,
+                    disabled=disabled,
+                )
+            )
+        return paths

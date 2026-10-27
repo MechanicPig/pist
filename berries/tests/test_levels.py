@@ -1,19 +1,20 @@
+from operator import index
 from pathlib import Path
 
 import pytest
 
 from berries.game import collab
 from berries.game.binmap import BinElement, BinMap
-from berries.game.content import ContentPath, GameContent
+from berries.game.content import ContentPath
 from berries.game.levels import (
     Level,
     LevelSide,
-    Map,
     assemble_mod_levels,
     assemble_vanilla_levels,
     local_sid_for_map_file,
 )
-from berries.game.maps import MapInfo
+from berries.game.localization import Localization
+from berries.game.maps import Map, ModMap, VanillaMap
 from test_support.mod_factory import make_installed_mod
 
 
@@ -25,28 +26,83 @@ def _mod_map(path: str) -> Map:
         metadata_name='Example',
         metadata_version='1.0.0',
     )
-    return Map(MapInfo(file_path=ContentPath(path)), mod)
+    return ModMap(ContentPath(path), mod)
 
 
 def _vanilla_map(path: str) -> Map:
-    return Map(MapInfo(file_path=ContentPath(path)), GameContent(Path('Content')))
+    return VanillaMap(ContentPath(path), Path('Content'))
+
+
+@pytest.mark.parametrize(
+    ('side', 'i', 'name'),
+    ((LevelSide.A, 0, 'A'), (LevelSide.B, 1, 'B'), (LevelSide.C, 2, 'C')),
+)
+def test_side_is_a_sequence_index_with_an_explicit_text_name(
+    side: LevelSide, i: int, name: str
+) -> None:
+    assert index(side) == i
+    assert LevelSide(i) is side and LevelSide[name] is side
+    assert ('a', 'b', 'c')[side] == name.lower()
+    assert not isinstance(side, str)
+
+
+@pytest.mark.parametrize(
+    ('path', 'expected'),
+    [
+        ('Maps/1-ForsakenCity.bin', 'AREA_1'),
+        ('Maps/1H-ForsakenCity.bin', 'AREA_1'),
+        ('Maps/1X-ForsakenCity.bin', 'AREA_1'),
+        ('Maps/LostLevels.bin', 'AREA_10'),
+    ],
+)
+def test_level_dialog_key_distinguishes_original_content_from_same_named_mod(
+    path: str, expected: str
+) -> None:
+    original = assemble_vanilla_levels((_vanilla_map(path),))[0]
+    mod = assemble_mod_levels((_mod_map(path),))[0]
+    assert original.dialog_key == expected
+    assert mod.dialog_key == mod.maps[0].dialog_key
+    assert original.dialog_key != mod.dialog_key
+
+
+def test_map_info_key_keeps_side_suffix_while_level_key_uses_assembled_base() -> None:
+    a_map = _mod_map('Maps/Example/Map.bin')
+    b_map = _mod_map('Maps/Example/Map-B.bin')
+    assert b_map.dialog_key == 'Example_Map_B'
+    assert assemble_mod_levels((a_map, b_map))[0].dialog_key == 'Example_Map'
+    assert assemble_mod_levels((b_map,))[0].dialog_key == 'Example_Map_B'
+
+
+def test_level_names_are_base_names_without_side_formatting() -> None:
+    level = Level(
+        'Example/Map',
+        (
+            _mod_map('Maps/Example/Map.bin'),
+            _mod_map('Maps/Example/Map-B.bin'),
+        ),
+    )
+    dialogs = {'en': {'Example_Map': 'English'}, 'zh-cn': {'Example_Map': '名称'}}
+    resolver = Localization(dialogs, 'zh-cn')
+    assert resolver.level_names(level) == {'en': 'English', 'zh-cn': '名称'}
+    assert resolver.level_name(level) == '名称'
+    assert resolver.level_fallback(level) == 'Example_Map'
+    assert Localization({}, 'en').level_name(level) == resolver.level_fallback(level)
 
 
 def test_level_owns_an_immutable_consecutive_side_tuple() -> None:
     a_map = _mod_map('Maps/Example/Map.bin')
-    assert a_map.file_path is a_map.map_info.file_path
     maps = [a_map]
 
-    level = Level('Example/Map', 'Example_Map', tuple(maps))
+    level = Level('Example/Map', tuple(maps))
     maps.append(_mod_map('Maps/Example/Map-B.bin'))
 
     assert level.maps == (a_map,)
     assert level.sides == (LevelSide.A,)
     assert level[LevelSide.A] is a_map
     assert level.map(LevelSide.B) is None
-    assert tuple(side.position for side in LevelSide) == (0, 1, 2)
+    assert tuple(int(side) for side in LevelSide) == (0, 1, 2)
     with pytest.raises(ValueError, match='between one and three'):
-        Level('Example/Map', 'Example_Map', ())
+        Level('Example/Map', ())
 
 
 def test_local_sid_for_map_file_keeps_the_exact_file_stem() -> None:
@@ -145,7 +201,6 @@ def test_vanilla_levels_keep_a_c_combination_independent() -> None:
 def test_collab_lobby_identity_excludes_only_the_prologue() -> None:
     level = Level(
         'Example/0-Lobbies/1-Beginner',
-        'Example_0_Lobbies_1_Beginner',
         (_mod_map('Maps/Example/0-Lobbies/1-Beginner.bin'),),
     )
 
@@ -153,7 +208,7 @@ def test_collab_lobby_identity_excludes_only_the_prologue() -> None:
     assert not collab.is_lobby_sid('Example/0-Lobbies/0-Prologue', ('Example',))
 
 
-def test_journal_references_preserve_source_order_and_report_invalid_triggers(
+def test_journal_refs_preserve_source_order_and_report_invalid_triggers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / 'Maps/Example/0-Lobbies/1-Beginner.bin'
@@ -166,7 +221,7 @@ def test_journal_references_preserve_source_order_and_report_invalid_triggers(
         metadata_name='Example',
         metadata_version='1.0.0',
     )
-    loaded_map = Map(MapInfo(file_path=ContentPath('Maps/Example/0-Lobbies/1-Beginner.bin')), mod)
+    loaded_map = ModMap(ContentPath('Maps/Example/0-Lobbies/1-Beginner.bin'), mod)
     triggers = (
         *(
             BinElement('CollabUtils2/JournalTrigger', {'levelset': value}, ())
@@ -180,20 +235,17 @@ def test_journal_references_preserve_source_order_and_report_invalid_triggers(
         BinElement('CollabUtils2/JournalTrigger', {}, ()),
     )
     monkeypatch.setattr(
-        'berries.game.map_data.binmap.parse_map_bin',
+        'berries.game.map_data.parse_map_bin',
         lambda *_args, **_kwargs: BinMap('Example', BinElement('Map', {}, triggers)),
     )
 
-    assert collab.journal_references(loaded_map) == collab.JournalReferences(
+    assert collab.JournalRefs.from_map(loaded_map) == collab.JournalRefs(
         ('Example/1-Beginner', 'Example/2-Advanced'),
         2,
     )
-    assert collab.journal_references(loaded_map).diagnostics == (
-        '发现 2 个没有有效 levelset 的日志入口。',
-    )
 
 
-def test_journal_references_normalize_invalid_content_source(tmp_path: Path) -> None:
+def test_journal_refs_normalize_invalid_content_source(tmp_path: Path) -> None:
     archive = tmp_path / 'Example.zip'
     archive.write_bytes(b'not a zip')
     mod = make_installed_mod(
@@ -203,7 +255,7 @@ def test_journal_references_normalize_invalid_content_source(tmp_path: Path) -> 
         metadata_name='Example',
         metadata_version='1.0.0',
     )
-    loaded_map = Map(MapInfo(file_path=ContentPath('Maps/Example/0-Lobbies/1-Beginner.bin')), mod)
+    loaded_map = ModMap(ContentPath('Maps/Example/0-Lobbies/1-Beginner.bin'), mod)
 
     with pytest.raises(ValueError, match='Invalid content source for map'):
-        collab.journal_references(loaded_map)
+        collab.JournalRefs.from_map(loaded_map)

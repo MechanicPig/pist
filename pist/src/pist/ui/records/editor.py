@@ -19,11 +19,15 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
-from berries.entities.classification import CollectedEntityRuleIssue, CollectedEntityRuleIssueStatus
+from berries.entities.classification import CollectedEntityRuleIssueStatus
 from berries.game.binmap import AttrValue
+from berries.game.content import ContentPath
+from berries.game.duration import GAME_TIMER_FORMAT, Duration
 from berries.gamebanana import GameBananaSubmission
+from pist.entities.collected import CollectedEntityReviewIssue, UnreviewedCollectedEntity
 from pist.records.fields import RECORD_ATTRIBUTES
 from pist.records.models import MapRecord, MapRecordProgress
+from pist.routes.models import MapRoute
 from pist.smartsheet.fields import load_sheet_fields
 from pist.smartsheet.models import FieldType
 from pist.smartsheet.report import ManualRecordField
@@ -68,7 +72,6 @@ COLLECTED_ENTITY_ISSUE_REASONS = MappingProxyType(
     {
         CollectedEntityRuleIssueStatus.UNMATCHED: '尚无匹配规则',
         CollectedEntityRuleIssueStatus.EXCLUDED: '与现有排除规则冲突',
-        CollectedEntityRuleIssueStatus.UNREVIEWED_VARIANT: '出现尚未审查的属性变体',
     }
 )
 
@@ -80,7 +83,7 @@ def _tags_text(tags: tuple[str, ...]) -> str:
     return output.getvalue().removesuffix('\n')
 
 
-def _reference_summary(title: str, content: str, *, limit: int = 120) -> str:
+def _ref_summary(title: str, content: str, *, limit: int = 120) -> str:
     value = ' '.join(content.split())
     if len(value) > limit:
         value = f'{value[:limit].rstrip()}…'
@@ -138,19 +141,19 @@ class DatePickerScreen(ModalScreen[str | None]):
     def select_date(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == 'date-picker-cancel':
-            self.dismiss(None)
+            self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
         elif button_id == 'date-picker-previous':
             self._year, self._month = (
                 (self._year - 1, 12) if self._month == 1 else (self._year, self._month - 1)
             )
-            self.refresh(recompose=True)
+            self.refresh(recompose=True)  # pyright: ignore[reportUnusedCallResult]
         elif button_id == 'date-picker-next':
             self._year, self._month = (
                 (self._year + 1, 1) if self._month == 12 else (self._year, self._month + 1)
             )
-            self.refresh(recompose=True)
+            self.refresh(recompose=True)  # pyright: ignore[reportUnusedCallResult]
         elif button_id is not None and button_id.startswith('date-picker-day-'):
-            self.dismiss(
+            self.dismiss(  # pyright: ignore[reportUnusedCallResult]
                 date(
                     self._year, self._month, int(button_id.removeprefix('date-picker-day-'))
                 ).isoformat()
@@ -182,7 +185,7 @@ class RecordRefSummary(Static):
         disabled: bool = False,
     ) -> None:
         super().__init__(
-            _reference_summary(title, content),
+            _ref_summary(title, content),
             expand=expand,
             shrink=shrink,
             markup=markup,
@@ -196,8 +199,8 @@ class RecordRefSummary(Static):
 
     async def _on_click(self, event: events.Click) -> None:
         if event.button == LEFT_MOUSE_BUTTON and event.chain == DOUBLE_CLICK_COUNT:
-            event.stop()
-            self.post_message(self.Opened(self._title, self._content))
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
+            self.post_message(self.Opened(self._title, self._content))  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordRefScreen(ModalScreen[None]):
@@ -222,7 +225,7 @@ class RecordRefScreen(ModalScreen[None]):
 
     @on(Button.Pressed, '#record-ref-close')
     def close(self) -> None:
-        self.dismiss()
+        self.dismiss()  # pyright: ignore[reportUnusedCallResult]
 
 
 class CollectedEntityRulesResult(StrEnum):
@@ -237,7 +240,7 @@ class CollectedEntityRulesScreen(ModalScreen[CollectedEntityRulesResult]):
 
     CSS_PATH = '../styles/record_editor.tcss'
 
-    def __init__(self, issues: tuple[CollectedEntityRuleIssue, ...]) -> None:
+    def __init__(self, issues: tuple[CollectedEntityReviewIssue, ...]) -> None:
         super().__init__()
         self._issues = issues
 
@@ -248,12 +251,15 @@ class CollectedEntityRulesScreen(ModalScreen[CollectedEntityRulesResult]):
             with VerticalScroll(id='collected-entity-rules-content'):
                 for issue in self._issues:
                     entity = issue.entity_name or '未知实体'
-                    try:
-                        reason = COLLECTED_ENTITY_ISSUE_REASONS[issue.status]
-                    except KeyError as error:
-                        raise ValueError(
-                            f'Unexpected blocking collected-entity issue: {issue.status}'
-                        ) from error
+                    if isinstance(issue, UnreviewedCollectedEntity):
+                        reason = '出现尚未审查的属性变体'
+                    else:
+                        try:
+                            reason = COLLECTED_ENTITY_ISSUE_REASONS[issue.status]
+                        except KeyError as error:
+                            raise ValueError(
+                                f'Unexpected blocking collected-entity issue: {issue.status}'
+                            ) from error
                     yield Static(
                         f'{issue.collected_id.room}:{issue.collected_id.entity_id}\n'
                         f'{entity} · {reason}\n属性：{_entity_attrs_summary(issue.attrs)}'
@@ -266,11 +272,11 @@ class CollectedEntityRulesScreen(ModalScreen[CollectedEntityRulesResult]):
 
     @on(Button.Pressed, '#collected-entity-rules-close')
     def close(self) -> None:
-        self.dismiss(CollectedEntityRulesResult.CLOSE)
+        self.dismiss(CollectedEntityRulesResult.CLOSE)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, '#collected-entity-rules-refresh')
     def refresh_rules(self) -> None:
-        self.dismiss(CollectedEntityRulesResult.REFRESH)
+        self.dismiss(CollectedEntityRulesResult.REFRESH)  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordAuthorField(Static):
@@ -281,8 +287,8 @@ class RecordAuthorField(Static):
 
     async def _on_click(self, event: events.Click) -> None:
         if event.button == LEFT_MOUSE_BUTTON:
-            event.stop()
-            self.post_message(self.Clicked())
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
+            self.post_message(self.Clicked())  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordRouteField(Static):
@@ -293,12 +299,19 @@ class RecordRouteField(Static):
 
     async def _on_click(self, event: events.Click) -> None:
         if event.button == LEFT_MOUSE_BUTTON:
-            event.stop()
-            self.post_message(self.Clicked())
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
+            self.post_message(self.Clicked())  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordEditorScreen(ModalScreen[MapRecord | None]):
     """Edit one local record before writing it to local storage."""
+
+    class RouteSaved(Message):
+        """A route was saved; the matching editor can refresh its main-room count."""
+
+        def __init__(self, route: MapRoute) -> None:
+            super().__init__()
+            self.route = route
 
     CSS_PATH = '../styles/record_editor.tcss'
 
@@ -356,23 +369,23 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
 
     def _update_field_layout(self) -> None:
         for grid in self.query('#record-fields'):
-            grid.set_class(self.size.width < 120, 'record-fields-narrow')
+            grid.set_class(self.size.width < 120, 'record-fields-narrow')  # pyright: ignore[reportUnusedCallResult]
 
     @on(RecordRefSummary.Opened)
     def open_record_ref(self, event: RecordRefSummary.Opened) -> None:
         """Open the complete supplemental reference without leaving the record."""
-        self.app.push_screen(RecordRefScreen(event.title, event.content))
+        self.app.push_screen(RecordRefScreen(event.title, event.content))  # pyright: ignore[reportUnusedCallResult]
 
     @on(RecordAuthorField.Clicked)
     def edit_authors(self) -> None:
         """Reopen the source-specific author selector from the record grid."""
         if isinstance(self._author_source, GameBananaSubmission):
-            self.app.push_screen(
+            self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
                 AuthorSelectionScreen(self._author_source, selected_authors=self._record.authors),
                 self._set_authors,
             )
         elif isinstance(self._author_source, str):
-            self.app.push_screen(
+            self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
                 DialogAuthorSelectionScreen(self._author_source, authors=self._record.authors),
                 self._set_authors,
             )
@@ -382,6 +395,20 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         """Open the non-blocking route editor for this record's map."""
         if self._edit_route is not None:
             self._edit_route()
+
+    @on(RouteSaved)
+    def update_route(self, event: RouteSaved) -> None:
+        """Apply the confirmed weighted room count without replacing other edits."""
+        if self._record.map_file is None or ContentPath(self._record.map_file) != ContentPath(
+            event.route.map_file
+        ):
+            return
+        count = event.route.room_count or None
+        self._record = self._record.model_copy(update={'n_main_rooms': count})
+        field = self._manual_field('主房间数')
+        assert field is not None
+        control = self.query_one(f'#{self._manual_field_id(field)}', Input)
+        control.value = '' if count is None else str(count)
 
     def _set_authors(self, authors: tuple[str, ...] | None) -> None:
         if authors is None:
@@ -393,9 +420,9 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         author_field = self.query_one(RecordAuthorField)
         author_field.update('、'.join(authors) or '单击选择作者')
         if authors:
-            author_field.remove_class('record-author-placeholder')
+            author_field.remove_class('record-author-placeholder')  # pyright: ignore[reportUnusedCallResult]
         else:
-            author_field.add_class('record-author-placeholder')
+            author_field.add_class('record-author-placeholder')  # pyright: ignore[reportUnusedCallResult]
 
     def _record_field_widgets(self) -> ComposeResult:
         """Group map information, experience data and personal assessments for editing."""
@@ -469,7 +496,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
             )
             control.tooltip = self._field_hints.get(field.title)
             if field.title in self._field_hints:
-                control.add_class('record-field-warning')
+                control.add_class('record-field-warning')  # pyright: ignore[reportUnusedCallResult]
             yield control
 
     def _pair(
@@ -490,7 +517,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         hint = self._field_hints.get(title) if value is None else None
         field = Static(self._display_value(value) if hint is None else hint)
         if hint is not None:
-            field.add_class('record-field-warning')
+            field.add_class('record-field-warning')  # pyright: ignore[reportUnusedCallResult]
         return field
 
     def _manual_field(self, title: str) -> ManualRecordField | None:
@@ -592,6 +619,8 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
 
     def _table_value(self, title: str) -> CellValue | None:
         value = getattr(self._record, RECORD_ATTRIBUTES[title])
+        if isinstance(value, Duration):
+            return str(value)
         if isinstance(value, date):
             return value.isoformat()
         return value
@@ -612,15 +641,10 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
     def confirm(self, event: Button.Pressed) -> None:
         """Return the record only after the user explicitly confirms it."""
         if event.button.id == 'record-confirm-cancel':
-            self.dismiss(None)
+            self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
             return
         if event.button.id == 'record-confirm-save':
             video_url = self.query_one('#record-video-url', Input).value.strip() or None
-            try:
-                MapRecord.validate_http_url(video_url)
-            except ValueError:
-                self.notify('视频链接请使用完整的 HTTP 或 HTTPS 地址。', severity='warning')
-                return
             manual_values = self._manual_values()
             if manual_values is None:
                 return
@@ -646,7 +670,7 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
                 )
                 self.notify(f'记录内容无效：{issues}', severity='warning')
                 return
-            self.dismiss(result)
+            self.dismiss(result)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed)
     def open_date_picker(self, event: Button.Pressed) -> None:
@@ -661,8 +685,8 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         except ValueError:
             self.notify('日期请使用 YYYY-MM-DD 格式。', severity='warning')
             return
-        event.stop()
-        self.app.push_screen(
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
+        self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
             DatePickerScreen(selected),
             lambda value: self._set_date_value(field_id, value),
         )
@@ -681,9 +705,9 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
         """Return a DOM-safe ID for a selected inspected field."""
         return f'record-manual-{self._manual_fields.index(field)}'
 
-    def _manual_values(self) -> dict[str, CellValue | date | None] | None:
+    def _manual_values(self) -> dict[str, CellValue | date | Duration | None] | None:
         """Read all editable values, preserving explicit clearing and false values."""
-        values: dict[str, CellValue | date | None] = {}
+        values: dict[str, CellValue | date | Duration | None] = {}
         for field in self._manual_fields:
             attribute = RECORD_ATTRIBUTES[field.title]
             control = self.query_one(f'#{self._manual_field_id(field)}')
@@ -717,6 +741,14 @@ class RecordEditorScreen(ModalScreen[MapRecord | None]):
                             )
                     elif not text.strip():
                         values[attribute] = None
+                    elif attribute == 'time_played':
+                        previous = self._record.time_played
+                        # Default display truncates to milliseconds, not the stored precision.
+                        values[attribute] = (
+                            previous
+                            if previous is not None and text == str(previous)
+                            else Duration.from_format(text, GAME_TIMER_FORMAT)
+                        )
                     elif field.field_type == FieldType.DATE:
                         values[attribute] = date.fromisoformat(text)
                     elif field.field_type == FieldType.NUMBER:
@@ -795,7 +827,7 @@ class RecordSaveModeScreen(ModalScreen[int | None]):
                 )
 
     def on_mount(self) -> None:
-        self.query_one(
+        self.query_one(  # pyright: ignore[reportUnusedCallResult]
             '#record-save-update' if self._same_slot else '#record-save-add', Button
         ).focus()
 
@@ -821,17 +853,17 @@ class RecordSaveModeScreen(ModalScreen[int | None]):
     @on(Button.Pressed)
     def choose_record(self, event: Button.Pressed) -> None:
         if event.button.id == 'record-save-add':
-            self.dismiss(0)
+            self.dismiss(0)  # pyright: ignore[reportUnusedCallResult]
         elif event.button.id == 'record-save-update':
             selected = self.query_one('#record-save-target', Select).value
             assert isinstance(selected, int)
-            self.dismiss(selected)
+            self.dismiss(selected)  # pyright: ignore[reportUnusedCallResult]
         elif event.button.id == 'record-save-cancel':
-            self.dismiss(None)
+            self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
 
 
 class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
-    """Let the player select author entries from raw GameBanana Credits."""
+    """Let the player select authors from GameBanana Credits and the submitter."""
 
     CSS_PATH = '../styles/record_editor.tcss'
 
@@ -841,12 +873,18 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         self, submission: GameBananaSubmission, *, selected_authors: tuple[str, ...] = ()
     ) -> None:
         super().__init__()
-        self._choices = submission.author_choices
+        self._choices = tuple(
+            (author.name, credit.group_name, author.role)
+            for credit in submission.credits
+            for author in credit.authors
+        )
+        if submission.submitter.strip():
+            self._choices += ((submission.submitter, '提交者', ''),)
         self._selected_authors = frozenset(selected_authors)
 
     def compose(self) -> ComposeResult:
         with Vertical(id='author-select'):
-            yield Static('选择要记为作者的 Credits 条目：')
+            yield Static('从 Credits 和提交者中选择要记为作者的条目：')
             with VerticalScroll(id='author-select-list'):
                 for i, (name, group, role) in enumerate(self._choices):
                     label = f'{name}  [{group}]'
@@ -866,7 +904,7 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
     def confirm(self, event: Button.Pressed) -> None:
         """Return only the names explicitly selected by the player."""
         if event.button.id == 'author-select-cancel':
-            self.dismiss(None)
+            self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
             return
         authors = tuple(
             dict.fromkeys(
@@ -875,7 +913,7 @@ class AuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
                 if self.query_one(f'#record-author-{i}', Checkbox).value
             )
         )
-        self.dismiss(authors)
+        self.dismiss(authors)  # pyright: ignore[reportUnusedCallResult]
 
 
 class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
@@ -912,7 +950,7 @@ class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
         """Add a selected span or return the accumulated author names."""
         button_id = event.button.id
         if button_id == 'dialog-author-cancel':
-            self.dismiss(None)
+            self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
         elif button_id == 'dialog-author-add':
             await self.action_add_author()
         elif button_id is not None and button_id.startswith('dialog-author-remove-'):
@@ -921,7 +959,7 @@ class DialogAuthorSelectionScreen(ModalScreen[tuple[str, ...] | None]):
             await self._refresh_authors()
         else:
             self._sync_authors()
-            self.dismiss(tuple(self._authors))
+            self.dismiss(tuple(self._authors))  # pyright: ignore[reportUnusedCallResult]
 
     async def action_add_author(self) -> None:
         """Add the currently selected Dialog text as one editable author."""

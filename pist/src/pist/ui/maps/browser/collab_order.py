@@ -1,19 +1,21 @@
 """Coordinate Collab journal ordering, caching, and save-aware list refreshes."""
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from zipfile import BadZipFile
 
 from textual.dom import DOMNode
 
-from berries.game import mods
-from berries.game.binmap import BadMapBin
-from berries.game.campaigns import CampaignCatalog
+from berries.game import collab, mods
+from berries.game.binmap import BadMapBin, MapStringDecodeWarning
 from berries.game.content import BadContentEntry, ContentPath
 from berries.game.levels import Level, LevelSide
-from berries.game.saves import SaveSlot
+from berries.game.maps import Map, ModMap
+from pist import catalog_fingerprint, save_progress
 from pist.catalog_cache import CatalogCache, CollabJournalIconPaths
+from pist.saves import SaveProgress
 
 from .collab_list import CollabMapList
 from .map_list import MapItem, MapList, SideMapItem
@@ -29,12 +31,19 @@ class _ModMapGroup:
 
 def maps_by_progress(
     maps: Iterable[tuple[Level, LevelSide]],
-    save_slot: SaveSlot | None,
+    save_slot: SaveProgress | None,
 ) -> tuple[tuple[Level, LevelSide], ...]:
     """Order Collab maps by this slot's progress, preserving icon order within ties."""
     if save_slot is None:
         return tuple(maps)
-    return tuple(sorted(maps, key=lambda item: save_slot.map_progress(*item)))
+    return tuple(
+        sorted(
+            maps,
+            key=lambda item: save_progress.map_progress(
+                save_slot.get_map_stats(item[0].sid, item[1])
+            ),
+        )
+    )
 
 
 def maps_by_campaign_icon_order(
@@ -48,9 +57,9 @@ def maps_by_campaign_icon_order(
         group_maps = tuple(group)
         maps_by_file = {level[side].file_path: (level, side) for level, side in group_maps}
         result.extend(
-            maps_by_file[map_info.file_path]
-            for map_info in mods.collab_journal_map_order_from_icons(
-                (level[side].map_info for level, side in group_maps), content_icons
+            maps_by_file[map_info]
+            for map_info in collab.collab_journal_map_order_from_icons(
+                (level[side].file_path for level, side in group_maps), content_icons
             )
         )
     return tuple(result)
@@ -59,9 +68,14 @@ def maps_by_campaign_icon_order(
 class CollabMapOrderController:
     """Own the asynchronous journal-order lifecycle for mounted Collab lists."""
 
-    def __init__(self, cache: CatalogCache, catalog: CampaignCatalog) -> None:
+    def __init__(
+        self,
+        cache: CatalogCache,
+        *,
+        on_map_warning: Callable[[Map, MapStringDecodeWarning], None] | None = None,
+    ) -> None:
         self._cache = cache
-        self._catalog = catalog
+        self._on_map_warning = on_map_warning
         self._task: asyncio.Task[None] | None = None
 
     def start(self, root: DOMNode) -> None:
@@ -73,7 +87,7 @@ class CollabMapOrderController:
     def cancel(self) -> None:
         """Cancel the active loading pass, if any."""
         if self._task is not None:
-            self._task.cancel()
+            self._task.cancel()  # pyright: ignore[reportUnusedCallResult]
             self._task = None
 
     async def _load_all(self, root: DOMNode) -> None:
@@ -101,21 +115,23 @@ class CollabMapOrderController:
         groups: dict[int, _ModMapGroup] = {}
         for level, side in map_list.maps:
             source = level[side]
-            mod = self._catalog.mod_for(source)
-            if mod is None:
+            if not isinstance(source, ModMap):
                 map_list.icon_order = map_list.maps
                 await self._finish_loading(map_list)
                 return
+            mod = source.mod
             group = groups.setdefault(id(mod), _ModMapGroup(mod))
             group.maps.append((level, side))
         icons: CollabJournalIconPaths = {}
         completed = 0
         try:
             for group in groups.values():
-                group_infos = tuple(level[side].map_info for level, side in group.maps)
-                content_paths = tuple(sorted(map_info.file_path for map_info in group_infos))
+                group_infos = tuple(level[side].file_path for level, side in group.maps)
+                content_paths = tuple(sorted(map_info for map_info in group_infos))
                 map_files = tuple(path.as_posix() for path in content_paths)
-                fingerprint = mods.collab_journal_icon_fingerprint(group.mod, group_infos)
+                fingerprint = catalog_fingerprint.collab_journal_icon_fingerprint(
+                    group.mod, group_infos
+                )
                 cached = self._cache.load_icons(str(group.mod.path), map_files, fingerprint)
                 if cached is not None:
                     icons.update(cached)
@@ -123,7 +139,15 @@ class CollabMapOrderController:
                     map_list.set_progress(completed)
                     continue
                 group_icons: CollabJournalIconPaths = {}
-                for map_file, icon in mods.iter_collab_journal_map_icons(group.mod, group_infos):
+                loaded_maps = {level[side].file_path: level[side] for level, side in group.maps}
+
+                for map_file, icon in collab.iter_collab_journal_map_icons(
+                    group.mod,
+                    group_infos,
+                    on_warning=partial(self._report_icon_warning, loaded_maps)
+                    if self._on_map_warning is not None
+                    else None,
+                ):
                     group_icons[map_file.as_posix()] = icon
                     completed += 1
                     map_list.set_progress(completed)
@@ -137,6 +161,15 @@ class CollabMapOrderController:
         map_list.icon_order = ordered_maps
         await self._finish_loading(map_list)
 
+    def _report_icon_warning(
+        self,
+        loaded_maps: Mapping[ContentPath, Map],
+        map_info: ContentPath,
+        warning: MapStringDecodeWarning,
+    ) -> None:
+        if self._on_map_warning is not None:
+            self._on_map_warning(loaded_maps[map_info], warning)
+
     async def _finish_loading(self, map_list: CollabMapList) -> None:
         """Mount the initially ordered list and apply the latest save slot."""
         assert map_list.icon_order is not None
@@ -144,20 +177,20 @@ class CollabMapOrderController:
         await map_list.mount(
             MapList(
                 maps_by_progress(map_list.icon_order, map_list.save_slot),
-                map_list.languages,
+                map_list.lang,
                 map_list.dialogs,
                 map_list.save_slot,
                 map_list.source_name_for,
                 extra_items=map_list.extra_items,
             )
         )
-        await self.refresh_list(map_list, map_list.save_slot)
+        await self.refresh_list(map_list, map_list.save_slot)  # pyright: ignore[reportUnusedCallResult]
         map_list.finish_loading()
 
     async def refresh_list(
         self,
         collab_map_list: CollabMapList,
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
     ) -> MapList | None:
         """Reorder a loaded Collab list for one save slot while retaining UI state."""
         collab_map_list.save_slot = save_slot
@@ -172,13 +205,13 @@ class CollabMapOrderController:
         highlighted = current_list.highlighted_child
         highlighted_key = highlighted.state_key if isinstance(highlighted, MapItem) else None
         selected_side_files = {
-            item.state_key: item.map_info.file_path
+            item.state_key: item.file_path
             for item in current_list.map_items
             if isinstance(item, SideMapItem)
         }
         replacement = MapList(
             ordered_maps,
-            collab_map_list.languages,
+            collab_map_list.lang,
             collab_map_list.dialogs,
             save_slot,
             collab_map_list.source_name_for,

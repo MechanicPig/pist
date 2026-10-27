@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from berries.entities.rules import EntityRuleConditions
+from berries.entities.rules import EntityRule, EntityRuleConditions
 from berries.game.binmap import AttrValue
 
 from .models import (
@@ -26,23 +26,12 @@ class _Classification:
     kind: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class _Candidate:
-    """One deduplicated rule candidate with its represented variant count."""
-
-    when: dict[str, AttrValue]
-    meta: dict[str, AttrValue]
-    variant_count: int
-
-
 def rule_candidates_for_detail(detail: EntityAuditDetail) -> tuple[RuleCandidate, ...]:
     """Suggest candidates from a detail payload already read for the audit UI."""
     if detail.kind_confirmation is not None:
         return (
             RuleCandidate(
-                detail.kind_confirmation.kind,
-                {},
-                {},
+                EntityRule(kind=detail.kind_confirmation.kind),
                 len(detail.variants),
             ),
         )
@@ -54,13 +43,12 @@ def rule_candidates_for_detail(detail: EntityAuditDetail) -> tuple[RuleCandidate
     }
     classifications: list[_Classification] = []
     for variant in detail.variants:
-        if any(
-            observation.status is ObservationStatus.CONFLICT for observation in variant.observations
-        ):
+        evidence = (*variant.observations, *variant.equivalent_observations)
+        if any(observation.status is ObservationStatus.CONFLICT for observation in evidence):
             continue
         outcomes = {
             observation.kind if observation.status is ObservationStatus.CONFIRMED else None
-            for observation in variant.observations
+            for observation in evidence
             if observation.status
             in {ObservationStatus.CONFIRMED, ObservationStatus.NOT_COLLECTIBLE}
         }
@@ -68,29 +56,26 @@ def rule_candidates_for_detail(detail: EntityAuditDetail) -> tuple[RuleCandidate
             classifications.append(_Classification(variant.attrs, variant.meta, outcomes.pop()))
     if len(classifications) != len(detail.variants):
         return ()
-    candidates: dict[tuple[str | None, EntityRuleConditions], _Candidate] = {}
+    candidates: dict[tuple[str | None, EntityRuleConditions], int] = {}
     for classification in classifications:
         conditions = _kind_conditions(classification, classifications, affecting_names)
         if conditions is None:
-            continue
+            return ()
         key = classification.kind, conditions
-        previous = candidates.get(key)
-        candidates[key] = _Candidate(
-            dict(conditions.when),
-            dict(conditions.meta),
-            1 if previous is None else previous.variant_count + 1,
-        )
+        candidates[key] = candidates.get(key, 0) + 1
     rule_candidates = tuple(
         RuleCandidate(
-            kind,
-            candidate.when,
-            candidate.meta,
-            candidate.variant_count,
+            EntityRule(
+                kind=kind,
+                when=dict(conditions.when),
+                meta=dict(conditions.meta),
+                missing=conditions.missing,
+                missing_meta=conditions.missing_meta,
+            ),
+            variant_count,
             provisional=provisional,
-            missing=conditions.missing,
-            missing_meta=conditions.missing_meta,
         )
-        for (kind, conditions), candidate in sorted(
+        for (kind, conditions), variant_count in sorted(
             candidates.items(),
             key=lambda item: _rule_candidate_sort_key(*item[0]),
         )
@@ -133,8 +118,15 @@ def _kind_conditions(
         tuple(sorted(attr_names - classification.attrs.keys())),
         tuple(sorted(meta_names - classification.meta.keys())),
     )
+    rule = EntityRule(
+        kind=classification.kind,
+        when=dict(conditions.when),
+        meta=dict(conditions.meta),
+        missing=conditions.missing,
+        missing_meta=conditions.missing_meta,
+    )
     if any(
-        other.kind != classification.kind and _conditions_match(other, conditions)
+        other.kind != classification.kind and rule.matches(other.attrs, other.meta)
         for other in classifications
     ):
         return None
@@ -156,31 +148,27 @@ def _default_fallback_candidates(
     }
     fallbacks: dict[tuple[str | None, EntityRuleConditions], RuleCandidate] = {}
     for candidate in candidates:
-        when, meta = _drop_default_conditions(candidate.when, candidate.meta, defaults)
-        if (when, meta) == (candidate.when, candidate.meta):
+        rule = candidate.rule
+        when, meta = _drop_default_conditions(rule.when, rule.meta, defaults)
+        if (when, meta) == (rule.when, rule.meta):
             continue
         if _fallback_hides_unclassified_values(candidate, when, meta, candidates):
             continue
-        if not _fallback_is_safe(candidate, when, meta, classifications, candidates):
-            continue
-        key = (
-            candidate.kind,
-            EntityRuleConditions(
-                tuple(sorted(when.items())),
-                tuple(sorted(meta.items())),
-                candidate.missing,
-                candidate.missing_meta,
-            ),
+        fallback = EntityRule(
+            kind=rule.kind,
+            when=when,
+            meta=meta,
+            missing=rule.missing,
+            missing_meta=rule.missing_meta,
         )
+        if not _fallback_is_safe(fallback, classifications, candidates):
+            continue
+        key = fallback.kind, fallback.conditions
         fallbacks[key] = RuleCandidate(
-            candidate.kind,
-            when,
-            meta,
+            fallback,
             candidate.variant_count,
             fallback=True,
             provisional=provisional,
-            missing=candidate.missing,
-            missing_meta=candidate.missing_meta,
         )
     return tuple(
         fallbacks[key]
@@ -197,17 +185,18 @@ def _fallback_hides_unclassified_values(
     meta: Mapping[str, AttrValue],
     candidates: Iterable[RuleCandidate],
 ) -> bool:
-    """Avoid broad fallbacks when an explicit missing-value rule already exists.
+    r"""Avoid broad fallbacks when an explicit missing-value rule already exists.
 
     Dropping a confirmed default such as ``moon = false`` produces an unconditional
     fallback. If the audit already has a ``missing = [\"moon\"]`` rule, absence is
     represented precisely; the broad rule would additionally classify every unseen
     value of ``moon`` without evidence, preventing it from surfacing for review.
     """
-    dropped_attrs = candidate.when.keys() - when.keys()
-    dropped_meta = candidate.meta.keys() - meta.keys()
+    dropped_attrs = candidate.rule.when.keys() - when.keys()
+    dropped_meta = candidate.rule.meta.keys() - meta.keys()
     return any(
-        bool(dropped_attrs & set(other.missing)) or bool(dropped_meta & set(other.missing_meta))
+        bool(dropped_attrs & set(other.rule.missing))
+        or bool(dropped_meta & set(other.rule.missing_meta))
         for other in candidates
     )
 
@@ -218,69 +207,42 @@ def _drop_default_conditions(
     defaults: Mapping[str, AttrValue | None],
 ) -> tuple[dict[str, AttrValue], dict[str, AttrValue]]:
     return (
-        {name: value for name, value in when.items() if defaults.get(name) != value},
+        {
+            name: value
+            for name, value in when.items()
+            if type(defaults.get(name)) is not type(value) or defaults.get(name) != value
+        },
         {
             name: value
             for name, value in meta.items()
-            if defaults.get(f'{META_ATTR_PREFIX}{name}') != value
+            if type(defaults.get(f'{META_ATTR_PREFIX}{name}')) is not type(value)
+            or defaults.get(f'{META_ATTR_PREFIX}{name}') != value
         },
     )
 
 
 def _fallback_is_safe(
-    candidate: RuleCandidate,
-    when: dict[str, AttrValue],
-    meta: dict[str, AttrValue],
+    fallback: EntityRule,
     classifications: Iterable[_Classification],
     candidates: Iterable[RuleCandidate],
 ) -> bool:
     """Require known competing outcomes to be covered by stricter rules."""
-    fallback = RuleCandidate(
-        candidate.kind,
-        when,
-        meta,
-        candidate.variant_count,
-        missing=candidate.missing,
-        missing_meta=candidate.missing_meta,
-    )
-    specificity = _candidate_specificity(fallback)
+    specificity = fallback.conditions.specificity
     has_competing_kind = False
     for classification in classifications:
-        if classification.kind == candidate.kind or not _candidate_matches(
-            fallback, classification
+        if classification.kind == fallback.kind or not fallback.matches(
+            classification.attrs, classification.meta
         ):
             continue
         has_competing_kind = True
         if not any(
-            other.kind == classification.kind
-            and _candidate_specificity(other) > specificity
-            and _candidate_matches(other, classification)
+            other.rule.kind == classification.kind
+            and other.rule.conditions.specificity > specificity
+            and other.rule.matches(classification.attrs, classification.meta)
             for other in candidates
         ):
             return False
     return has_competing_kind
-
-
-def _attrs_match(
-    actual: Mapping[str, AttrValue], expected: Iterable[tuple[str, AttrValue]]
-) -> bool:
-    return all(
-        name in actual and type(actual[name]) is type(value) and actual[name] == value
-        for name, value in expected
-    )
-
-
-def _conditions_match(classification: _Classification, conditions: EntityRuleConditions) -> bool:
-    return (
-        _attrs_match(classification.attrs, conditions.when)
-        and _attrs_match(classification.meta, conditions.meta)
-        and all(name not in classification.attrs for name in conditions.missing)
-        and all(name not in classification.meta for name in conditions.missing_meta)
-    )
-
-
-def _candidate_specificity(candidate: RuleCandidate) -> int:
-    return candidate.conditions.specificity
 
 
 def _rule_candidate_sort_key(
@@ -299,7 +261,3 @@ def _rule_candidate_sort_key(
         conditions.missing,
         conditions.missing_meta,
     )
-
-
-def _candidate_matches(candidate: RuleCandidate, classification: _Classification) -> bool:
-    return _conditions_match(classification, candidate.conditions)

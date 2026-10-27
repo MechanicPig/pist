@@ -10,13 +10,22 @@ import pytest
 from aiohttp import ClientSession
 from pydantic import Field
 
+from berries.game.duration import Duration
 from berries.models import ExternalModel
 from pist.credentials.store import CredentialStore
+from pist.records.batch import RecordSyncBatch
 from pist.records.models import MapRecord
+from pist.records.order import plan_record_move
 from pist.records.store import RecordStore, RecordSyncState
 from pist.records.sync import RecordSyncConflict, RecordSyncService
 from pist.smartsheet.client import REQUEST_TIMEOUT, TencentSmartSheetClient
-from pist.smartsheet.models import JsonObject, MainSheetSnapshot, TencentApiResp
+from pist.smartsheet.models import (
+    FieldsResult,
+    JsonObject,
+    MainSheetSnapshot,
+    SmartSheetRecord,
+    TencentApiResp,
+)
 
 TEST_FILE_TITLE = 'Pist 同步测试（合成数据）'
 
@@ -29,30 +38,33 @@ class TestFileMetadata(ExternalModel):
     type: str
 
 
-class InterruptedConfirmationClient(TencentSmartSheetClient):
-    """Fail only the first confirmation read after a successful real write."""
+class OnlineSheetClient(TencentSmartSheetClient):
+    """Track exceptional schema-only refreshes during real synthetic writes."""
 
     def __init__(self) -> None:
         super().__init__(CredentialStore())
+        self.field_refreshes = 0
+
+    async def read_fields(self, file_id: str, sheet_id: str) -> FieldsResult:
+        self.field_refreshes += 1
+        return await super().read_fields(file_id, sheet_id)
+
+
+class IncompleteResponseClient(OnlineSheetClient):
+    """Omit one confirmation cell after the first successful real write."""
+
+    def __init__(self) -> None:
+        super().__init__()
         self.interrupt_next_write = True
-        self.interrupt_read = False
 
     async def write_record(
         self, snapshot: MainSheetSnapshot, values: JsonObject, *, record_id: str | None
-    ) -> str:
-        remote_id = await super().write_record(snapshot, values, record_id=record_id)
+    ) -> SmartSheetRecord:
+        response = await super().write_record(snapshot, values, record_id=record_id)
         if self.interrupt_next_write:
             self.interrupt_next_write = False
-            self.interrupt_read = True
-        return remote_id
-
-    async def read_main_sheet(
-        self, source: str, *, record_ids: tuple[str, ...] | None = None
-    ) -> MainSheetSnapshot:
-        if self.interrupt_read:
-            self.interrupt_read = False
-            raise RuntimeError('Synthetic confirmation-read failure')
-        return await super().read_main_sheet(source, record_ids=record_ids)
+            response.values.pop('备注', None)
+        return response
 
 
 def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
@@ -67,10 +79,21 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
             'Client-Id': credentials.client_id,
             'Open-Id': credentials.open_id,
         }
-        client = TencentSmartSheetClient(CredentialStore())
+        client = OnlineSheetClient()
         snapshot = await client.read_main_sheet(source)
         store = RecordStore(tmp_path / 'online-records.sqlite3')
         service = RecordSyncService(store, client, source)
+
+        async def verify_saved(saved: MapRecord) -> None:
+            """Only online tests independently compare accepted cells to live storage."""
+            assert saved.local_id is not None
+            link = store.sheet_links(saved.local_id)[0]
+            live = await client.read_main_sheet(source, record_ids=(link.record_id,))
+            assert len(live.records) == 1
+            expected = service.fields.comparable(link.confirmed_values or {}, live.fields)
+            actual = service.fields.comparable(live.records[0].values, live.fields)
+            assert expected == actual
+
         async with ClientSession(headers=headers, timeout=REQUEST_TIMEOUT) as session:
             async with session.get(
                 f'https://docs.qq.com/openapi/drive/v2/files/{snapshot.file_id}/metadata'
@@ -96,7 +119,7 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                 authors=('测试选项A', '测试选项B'),
                 tags=('测试选项A', '测试选项B'),
                 mod_updated_at=datetime(2026, 10, 10, tzinfo=UTC).date(),
-                time_played='0:01:23',
+                time_played=Duration.from_dotnet_ticks(830000000),
                 deaths=7,
                 n_strawberries=3,
                 n_moonberries=1,
@@ -121,9 +144,13 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                 result = await service.save(record, await service.check(record))
                 assert result.synced, result.error
                 saved = result.record
+                await verify_saved(saved)
                 assert saved.local_id is not None
                 assert store.sync_state(saved.local_id) is RecordSyncState.SYNCED
-                remote_id = store.sheet_links(saved.local_id)[0].record_id
+                link = store.sheet_links(saved.local_id)[0]
+                remote_id = link.record_id
+                assert link.confirmed_values is not None
+                assert link.confirmed_values['编号'] == saved.record_number
 
                 edited = saved.model_copy(
                     update={
@@ -132,14 +159,17 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                         'n_moonberries': 0,
                         'cassette': False,
                         'rating': 0,
-                        'tags': ('测试选项B',),
+                        'tags': ('测试选项B', f'合成新选项-{token}'),
                         'notes': '已修改的合成记录',
                         'video_url': None,
                     }
                 )
+                before_refresh = client.field_refreshes
                 result = await service.save(edited, await service.check(edited))
                 assert result.synced, result.error
+                assert client.field_refreshes == before_refresh + 1
                 assert store.sheet_links(saved.local_id)[0].record_id == remote_id
+                await verify_saved(result.record)
 
                 optional_attributes = {
                     'mod_name',
@@ -150,7 +180,6 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                     'deaths',
                     'n_strawberries',
                     'n_moonberries',
-                    'cassette',
                     'heart',
                     'n_main_rooms',
                     'perceived_difficulty',
@@ -168,10 +197,12 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                         **dict.fromkeys(optional_attributes),
                         'authors': (),
                         'tags': (),
+                        'cassette': False,
                     }
                 )
                 result = await service.save(cleared, await service.check(cleared))
                 assert result.synced, result.error
+                await verify_saved(result.record)
 
                 check = await service.check(cleared)
                 await client.write_record(
@@ -187,16 +218,22 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                 assert store.load(saved.local_id) == cleared
                 result = await service.save(cleared, error.value.check)
                 assert result.synced, result.error
+                await verify_saved(result.record)
 
-                interrupted = RecordSyncService(store, InterruptedConfirmationClient(), source)
+                interrupted = RecordSyncService(store, IncompleteResponseClient(), source)
                 result = await interrupted.save(retry_record, await interrupted.check(retry_record))
-                assert not result.synced and result.error == 'Synthetic confirmation-read failure'
+                assert (
+                    not result.synced
+                    and result.error is not None
+                    and '缺少提交字段' in result.error
+                )
                 retry_record = result.record
                 assert retry_record.local_id is not None
                 assert store.sync_state(retry_record.local_id) is RecordSyncState.PENDING
                 retry_id = store.sheet_links(retry_record.local_id)[0].record_id
                 result = await service.save(retry_record, await service.check(retry_record))
                 assert result.synced, result.error
+                await verify_saved(result.record)
                 observed = await client.read_main_sheet(source)
                 metadata_spec = next(
                     spec for spec in service.fields.fields if spec.title == 'Mod元数据名'
@@ -209,6 +246,39 @@ def test_online_record_roundtrip_and_conflict(tmp_path: Path) -> None:
                     and row.record_id != remote_id
                 ]
                 assert len(matches) == 1 and matches[0].record_id == retry_id
+                local_records = tuple(entry.record for entry in store.list_records())
+                plan = plan_record_move(
+                    local_records, retry_record.local_id, saved.local_id, before=True
+                )
+                original_values = {
+                    row.record_id: row.values
+                    for row in observed.records
+                    if row.record_id in (remote_id, retry_id)
+                }
+                store.apply_order(plan)
+                batch = RecordSyncBatch(service)
+                for change in plan.changes:
+                    moved = store.load(change.local_id)
+                    assert await batch.save(moved, await batch.check(moved))
+                assert await batch.finish()
+                for moved in local_records:
+                    assert moved.local_id is not None
+                    await verify_saved(store.load(moved.local_id))
+                reordered = await client.read_main_sheet(source, record_ids=(remote_id, retry_id))
+                by_id = {
+                    row.record_id: row.values
+                    for row in reordered.records
+                    if row.record_id is not None
+                }
+                assert by_id[retry_id]['编号'] == 1 and by_id[remote_id]['编号'] == 2
+                for id_, values in by_id.items():
+                    assert {key: value for key, value in values.items() if key != '编号'} == {
+                        key: value for key, value in original_values[id_].items() if key != '编号'
+                    }
+                assert all(
+                    store.sync_state(change.local_id) is RecordSyncState.SYNCED
+                    for change in plan.changes
+                )
             finally:
                 # Clean up only row IDs associated with this run's isolated local store.
                 for local_id in (*store.matching_ids(record), *store.matching_ids(retry_record)):

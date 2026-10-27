@@ -1,13 +1,18 @@
 """Asynchronous Tencent Docs Smart Sheet API client."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from types import TracebackType
+from typing import Self
 from urllib.parse import urlparse
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
 from pydantic import BaseModel
 
 from pist.credentials.store import CredentialStore
-from pist.smartsheet import models
+
+from . import models
 
 API_BASE_URL = 'https://docs.qq.com/openapi/smartbook/v2/'
 DRIVE_API_URL = 'https://docs.qq.com/openapi/drive/v2/util/converter'
@@ -34,6 +39,58 @@ def extract_file_id(source: str) -> str:
 class TencentSmartSheetClient:
     def __init__(self, store: CredentialStore) -> None:
         self._store = store
+        self._shared_session: ClientSession | None = None
+        self._reuse_session = False
+        self._session_lock = asyncio.Lock()
+        self._targets: dict[str, tuple[str, str]] = {}
+
+    async def __aenter__(self) -> Self:
+        """Reuse connections and pin resolved table identities within one workflow."""
+        if self._reuse_session:
+            raise RuntimeError('表格客户端不能重复进入会话。')
+        self._reuse_session = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Release workflow connections and forget resolved table identities."""
+        try:
+            if self._shared_session is not None:
+                await self._shared_session.close()
+        finally:
+            self._shared_session = None
+            self._reuse_session = False
+            self._targets.clear()
+
+    @asynccontextmanager
+    async def _session_scope(self) -> AsyncIterator[ClientSession]:
+        if not self._reuse_session:
+            async with await self._session() as session:
+                yield session
+            return
+        async with self._session_lock:
+            if self._shared_session is None:
+                self._shared_session = await self._session()
+        yield self._shared_session
+
+    async def _main_target(self, session: ClientSession, source: str) -> tuple[str, str]:
+        """Resolve the main table once per workflow; never cache its schema or cells."""
+        key = extract_file_id(source)
+        if self._reuse_session and key in self._targets:
+            return self._targets[key]
+        file_id = await self._resolve_file_id(session, key)
+        sheets = await self._get_sheets(session, file_id)
+        matches = [sheet for sheet in sheets if sheet.title == models.MAIN_TABLE_TITLE]
+        if len(matches) != 1:
+            raise ValueError('表格必须恰好包含一个主表。')
+        target = file_id, matches[0].sheet_id
+        if self._reuse_session:
+            self._targets[key] = target
+        return target
 
     async def read_main_sheet(
         self, source: str, *, record_ids: tuple[str, ...] | None = None
@@ -49,32 +106,46 @@ class TencentSmartSheetClient:
             or len(set(record_ids)) != len(record_ids)
         ):
             raise ValueError('记录查询必须指定非空且不重复的 ID。')
-        async with await self._session() as session:
-            file_id = await self._resolve_file_id(session, extract_file_id(source))
-            sheets = await self._get_sheets(session, file_id)
-            matches = [sheet for sheet in sheets if sheet.title == models.MAIN_TABLE_TITLE]
-            if len(matches) != 1:
-                raise ValueError('表格必须恰好包含一个主表。')
-            sheet = matches[0]
-            endpoint = f'files/{file_id}/sheets/{sheet.sheet_id}'
-            fields, records = await asyncio.gather(
-                self._post_operation(
-                    session,
-                    endpoint,
-                    models.SmartSheetOperation.GET_FIELDS,
-                    models.PageOptions(offset=0, limit=FIELD_PAGE_SIZE),
-                    models.FieldsResult,
-                ),
-                self._all_records(session, endpoint, record_ids=record_ids),
-            )
+        async with self._session_scope() as session:
+            file_id, sheet_id = await self._main_target(session, source)
+            endpoint = f'files/{file_id}/sheets/{sheet_id}'
+            try:
+                fields, records = await asyncio.gather(
+                    self._post_operation(
+                        session,
+                        endpoint,
+                        models.SmartSheetOperation.GET_FIELDS,
+                        models.PageOptions(offset=0, limit=FIELD_PAGE_SIZE),
+                        models.FieldsResult,
+                    ),
+                    self._all_records(session, endpoint, record_ids=record_ids),
+                )
+            except BaseException:
+                # Forget a possibly deleted/replaced target, but never retry a request here.
+                self._targets.pop(extract_file_id(source), None)  # pyright: ignore[reportUnusedCallResult]
+                raise
         if fields.total is not None and fields.total > len(fields.fields):
             raise ValueError('主表字段超过本次读取范围，不能安全核对。')
         return models.MainSheetSnapshot(
             file_id=file_id,
-            sheet_id=sheet.sheet_id,
+            sheet_id=sheet_id,
             fields=fields,
             records=tuple(records.records),
         )
+
+    async def read_fields(self, file_id: str, sheet_id: str) -> models.FieldsResult:
+        """Refresh only the exact table's live schema, without reading any records."""
+        async with self._session_scope() as session:
+            fields = await self._post_operation(
+                session,
+                f'files/{file_id}/sheets/{sheet_id}',
+                models.SmartSheetOperation.GET_FIELDS,
+                models.PageOptions(offset=0, limit=FIELD_PAGE_SIZE),
+                models.FieldsResult,
+            )
+        if fields.total is not None and fields.total > len(fields.fields):
+            raise ValueError('主表字段超过本次读取范围，不能安全核对。')
+        return fields
 
     async def write_record(
         self,
@@ -82,13 +153,13 @@ class TencentSmartSheetClient:
         values: models.JsonObject,
         *,
         record_id: str | None,
-    ) -> str:
+    ) -> models.SmartSheetRecord:
         """Write one explicit row, or create one, without matching by map name.
 
         The caller owns reconciliation and must recheck before calling this method.
         Writes are never retried automatically, including ambiguous network failures.
         """
-        async with await self._session() as session:
+        async with self._session_scope() as session:
             result = await self._post_operation(
                 session,
                 f'files/{snapshot.file_id}/sheets/{snapshot.sheet_id}',
@@ -100,14 +171,12 @@ class TencentSmartSheetClient:
                 ),
                 models.RecordsResult,
             )
-        if record_id is not None:
-            returned = _submitted_record_id(result, fallback=record_id)
-            if returned != record_id:
-                raise RuntimeError('表格写入返回了不同的记录 ID，不能确认同步成功。')
-            return record_id
         if len(result.records) != 1 or not result.records[0].record_id:
             raise RuntimeError('表格可能已写入，但未返回唯一记录 ID；请核对后再尝试。')
-        return result.records[0].record_id
+        returned = result.records[0]
+        if record_id is not None and returned.record_id != record_id:
+            raise RuntimeError('表格写入返回了不同的记录 ID，不能确认同步成功。')
+        return returned
 
     async def _session(self) -> ClientSession:
         """Create a credentialed session that the caller must close."""
@@ -125,15 +194,15 @@ class TencentSmartSheetClient:
 
     async def update_records(
         self, snapshot: models.MainSheetSnapshot, records: tuple[models.RecordWrite, ...]
-    ) -> None:
+    ) -> tuple[models.SmartSheetRecord, ...]:
         """Submit explicit existing rows together, without retrying ambiguous failures.
 
-        An acknowledgement is not verification; the caller must read back every row.
+        Return successful rows for cell verification; missing rows are not successes.
         """
         ids = {record.record_id for record in records}
         if not records or None in ids or len(ids) != len(records):
             raise ValueError('批量更新必须指定非重复的现有记录 ID。')
-        async with await self._session() as session:
+        async with self._session_scope() as session:
             result = await self._post_operation(
                 session,
                 f'files/{snapshot.file_id}/sheets/{snapshot.sheet_id}',
@@ -142,8 +211,14 @@ class TencentSmartSheetClient:
                 models.RecordsResult,
             )
         returned = [record.record_id for record in result.records]
-        if returned and (len(set(returned)) != len(returned) or set(returned) != ids):
+        if (
+            None in returned
+            or '' in returned
+            or len(set(returned)) != len(returned)
+            or not set(returned) <= ids
+        ):
             raise RuntimeError('批量更新响应中的记录 ID 与提交值不一致，尚不能确认成功。')
+        return tuple(result.records)
 
     async def inspect(self, file_id: str, *, record_limit: int) -> models.InspectionReport:
         credentials = await self._store.load_credentials()
@@ -266,10 +341,3 @@ class TencentSmartSheetClient:
         if payload.ret != 0:
             raise RuntimeError(f'Tencent Docs API failed (ret={payload.ret}): {payload.msg}')
         return payload
-
-
-def _submitted_record_id(result: models.RecordsResult, *, fallback: str) -> str:
-    """Return the acknowledged update ID or the exact ID already selected."""
-    if result.records and (record_id := result.records[0].record_id) is not None:
-        return record_id
-    return fallback

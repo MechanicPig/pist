@@ -21,6 +21,7 @@ kind = "heart"
 aggregation = "select"
 table = "主表"
 field = "水晶之心"
+absent_value = "无"
 
 [stats.heart.values]
 end_level_heart = "通关收集"

@@ -9,8 +9,8 @@ from berries.game import content
 from berries.game.content import (
     ContentEntry,
     ContentPath,
+    ContentZipFile,
     DirContentEntry,
-    GameContent,
     ZipContentEntry,
 )
 
@@ -60,7 +60,7 @@ def test_game_content_opens_its_directory_as_a_content_tree(tmp_path: Path) -> N
     map_path.parent.mkdir(parents=True)
     map_path.write_bytes(b'map')
 
-    with GameContent(content_dir).open() as root:
+    with DirContentEntry(content_dir) as root:
         map_entry = root.joinpath('Maps/Example.bin')
 
         assert isinstance(map_entry, DirContentEntry)
@@ -74,6 +74,29 @@ def test_game_content_opens_its_directory_as_a_content_tree(tmp_path: Path) -> N
             root.joinpath('../outside.bin')
 
 
+def test_content_zip_file_exposes_selected_members_and_skipped_raw_paths(tmp_path: Path) -> None:
+    archive_path = tmp_path / 'mod.zip'
+    with ZipFile(archive_path, 'w') as archive:
+        info = ZipInfo('placeholder')
+        info.filename = r'Maps\Pack\A.bin'
+        archive.writestr(info, b'map')
+        archive.writestr('Maps/./Skipped.bin', b'ignored')
+        archive.writestr('Maps/Pack//Skipped.bin', b'ignored')
+
+    with ContentZipFile(archive_path) as archive:
+        info = archive.member_index.entries['Maps/Pack/A.bin']
+        assert info.orig_filename == r'Maps\Pack\A.bin'
+        assert archive.read(info) == b'map'
+        with archive.open(info) as stream:
+            assert stream.read() == b'map'
+        assert archive.member_index.invalid_paths == (
+            'Maps/./Skipped.bin',
+            'Maps/Pack//Skipped.bin',
+        )
+        with pytest.raises(KeyError):
+            archive.member_index.entries['Maps/Pack/Skipped.bin']
+
+
 def test_zip_content_entry_infers_directories_and_sorts_their_children(tmp_path: Path) -> None:
     archive_path = tmp_path / 'mod.zip'
     with ZipFile(archive_path, 'w') as archive:
@@ -83,6 +106,7 @@ def test_zip_content_entry_infers_directories_and_sorts_their_children(tmp_path:
 
     with ContentEntry(archive_path) as root:
         assert isinstance(root, ZipContentEntry)
+        assert isinstance(root.zip_file, ContentZipFile)
         assert root.zip_file.filename is not None
         assert Path(root.zip_file.filename) == archive_path
         maps = root.joinpath('Maps')
@@ -129,6 +153,78 @@ def test_zip_content_entry_reads_root_file(tmp_path: Path) -> None:
         assert manifest.read_text() == '- Name: Example\n'
 
 
+@pytest.mark.parametrize('walk_first', (False, True))
+@pytest.mark.parametrize(
+    ('explicit_dir', 'nested_file'), [(False, True), (True, True), (True, False)]
+)
+def test_zip_file_and_directory_with_the_same_name_are_both_visible(
+    tmp_path: Path, walk_first: bool, explicit_dir: bool, nested_file: bool
+) -> None:
+    archive_path = tmp_path / 'mod.zip'
+    with ZipFile(archive_path, 'w') as archive:
+        archive.writestr('Maps/Pack.bin', b'outer-map')
+        if explicit_dir:
+            archive.writestr('Maps/Pack.bin/', b'')
+        if nested_file:
+            archive.writestr('Maps/Pack.bin/A.bin', b'inner-map')
+    with ContentEntry(archive_path) as root:
+        maps = root / 'Maps'
+        if walk_first:
+            list(maps.walk())
+        else:
+            list(maps.iterdir())
+        entries = list(maps.iterdir())
+        assert [entry.at.as_posix() for entry in entries] == ['Maps/Pack.bin']
+        entry = entries[0]
+        assert entry.exists() and entry.is_file() and entry.is_dir()
+        assert entry.read_bytes() == b'outer-map'
+        expected = [
+            ('Maps', ['Pack.bin'], ['Pack.bin']),
+            ('Maps/Pack.bin', [], ['A.bin'] if nested_file else []),
+        ]
+        for _ in range(2):
+            assert [
+                (directory.at.as_posix(), dirs, files) for directory, dirs, files in maps.walk()
+            ] == expected
+        if nested_file:
+            assert (entry / 'A.bin').read_bytes() == b'inner-map'
+
+
+@pytest.mark.parametrize('separator', ('/', '\\'))
+@pytest.mark.parametrize(
+    ('names', 'expected'),
+    [
+        (['Maps/Pack/A.bin', 'Maps/Pack/A.bin'], b'first'),
+        ([r'Maps\Pack\A.bin', 'Maps/Pack/A.bin'], b'last'),
+        (['Maps/Pack/A.bin', r'Maps\Pack\A.bin'], b'last'),
+        ([r'Maps\Pack\A.bin', 'Maps/Pack/A.bin', r'Maps\Pack\A.bin'], b'first'),
+    ],
+)
+def test_zip_original_entry_index_is_independent_of_platform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    separator: str,
+    names: list[str],
+    expected: bytes,
+) -> None:
+    archive_path = tmp_path / 'raw.zip'
+    with ZipFile(archive_path, 'w') as archive:
+        for i, name in enumerate(names):
+            info = ZipInfo('placeholder')
+            info.filename = name
+            if name in names[:i]:
+                with pytest.warns(UserWarning, match='Duplicate name'):
+                    archive.writestr(info, b'first' if i == 0 else b'last')
+            else:
+                archive.writestr(info, b'first' if i == 0 else b'last')
+    monkeypatch.setattr('zipfile.os.sep', separator)
+    with ZipContentEntry(archive_path) as root:
+        entry = root / 'Maps/Pack/A.bin'
+        assert entry.exists() and entry.is_file()
+        assert entry.read_bytes() == expected
+        assert entry.zip_file.member_index.entries[entry.at.as_posix()].orig_filename == names[-1]
+
+
 def test_zip_content_entry_checks_missing_file_from_flat_index(tmp_path: Path) -> None:
     archive_path = tmp_path / 'mod.zip'
     with ZipFile(archive_path, 'w') as archive:
@@ -148,7 +244,7 @@ def test_zip_walk_bounds_member_visits_and_reuses_cached_results(
         for path in paths:
             archive.writestr(path, b'')
     visits = 0
-    descendants = content._ZipMemberIndex._descendants
+    descendants = content.ZipMemberIndex._descendants  # noqa: SLF001
 
     def counted_descendants(values: tuple[str, ...], path: str) -> Iterator[str]:
         nonlocal visits
@@ -156,7 +252,11 @@ def test_zip_walk_bounds_member_visits_and_reuses_cached_results(
             visits += 1
             yield value
 
-    monkeypatch.setattr(content._ZipMemberIndex, '_descendants', staticmethod(counted_descendants))
+    monkeypatch.setattr(
+        content.ZipMemberIndex,
+        '_descendants',
+        staticmethod(counted_descendants),
+    )
 
     with ContentEntry(archive_path) as root:
         assert isinstance(root, ZipContentEntry)

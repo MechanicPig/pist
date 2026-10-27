@@ -5,7 +5,9 @@ from sqlite3 import Row
 
 from pydantic import JsonValue
 
-from pist.records.models import MapRecord
+from berries.game.duration import Duration
+
+from .models import MapRecord
 
 RECORD_COLUMNS = {
     'record_number': 'INTEGER UNIQUE CHECK (record_number > 0)',
@@ -24,7 +26,8 @@ RECORD_COLUMNS = {
     'authors': "TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(authors))",
     'difficulty': 'TEXT',
     'save_slot': 'INTEGER CHECK (save_slot >= 0)',
-    'time_played': 'TEXT',
+    'time_played': 'INTEGER CHECK (time_played IS NULL OR '
+    "(typeof(time_played) = 'integer' AND time_played >= 0))",
     'deaths': 'INTEGER CHECK (deaths >= 0)',
     'completed': 'INTEGER CHECK (completed IN (0, 1))',
     'n_strawberries': 'INTEGER CHECK (n_strawberries >= 0)',
@@ -55,6 +58,9 @@ RECORD_TABLE_SQL = (
 def record_columns(record: MapRecord) -> dict[str, JsonValue]:
     """Encode scalar columns and the three explicitly collection-valued columns."""
     values = record.model_dump(mode='json')
+    values['time_played'] = (
+        record.time_played.to_dotnet_ticks() if record.time_played is not None else None
+    )
     return {
         name: json.dumps(values[name], ensure_ascii=False)
         if name in COLLECTION_COLUMNS
@@ -66,6 +72,11 @@ def record_columns(record: MapRecord) -> dict[str, JsonValue]:
 def record_from_row(row: Row) -> MapRecord:
     """Validate one flat SQLite row as a complete personal record."""
     values = {name: row[name] for name in RECORD_COLUMNS}
+    ticks = values['time_played']
+    if ticks is not None:
+        if type(ticks) is not int:
+            raise ValueError('Stored record time must be integer .NET ticks.')
+        values['time_played'] = Duration.from_dotnet_ticks(ticks)
     for name in COLLECTION_COLUMNS:
         values[name] = json.loads(values[name])
     values['local_id'] = row['id']

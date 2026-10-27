@@ -7,14 +7,15 @@ from pydantic import JsonValue, TypeAdapter
 from berries.models import FrozenModel
 from pist.records.fields import RECORD_ATTRIBUTES
 from pist.records.models import MapRecord
-from pist.smartsheet.models import (
+from pist.types import CellValue
+
+from .models import (
     MILLISECONDS_PER_SECOND,
     FieldsResult,
     FieldType,
     JsonObject,
     SheetTextFragment,
 )
-from pist.types import CellValue
 
 type SmartSheetSourceValue = CellValue | tuple[str, ...] | date
 
@@ -69,6 +70,8 @@ def encode_record_values(record: MapRecord, fields: FieldsResult) -> JsonObject:
                 )
             continue
         value = getattr(record, RECORD_ATTRIBUTES[title])
+        if title == '用时' and record.time_played is not None:
+            value = format(record.time_played, '%Qh:%M:%S')
         if value is None or value == '' or value == ():
             values[title] = (
                 []

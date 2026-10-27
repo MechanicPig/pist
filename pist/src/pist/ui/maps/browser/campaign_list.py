@@ -44,6 +44,6 @@ class CampaignListToggle(Static):
 
     @on(events.Click)
     def clicked(self, event: events.Click) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         if event.button == LEFT_MOUSE_BUTTON:
-            self.post_message(self.Clicked(self.direction))
+            self.post_message(self.Clicked(self.direction))  # pyright: ignore[reportUnusedCallResult]

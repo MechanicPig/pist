@@ -1,19 +1,23 @@
-"""Quota-conscious sheet synchronization with shared reads and deferred verification."""
+"""Quota-conscious sheet synchronization with shared reads and response verification."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from pist.records.models import MapRecord
-from pist.records.store import RecordSheetLink
-from pist.records.sync import (
+from aiohttp import ClientError
+
+from pist.smartsheet.encoding import encode_record_values
+from pist.smartsheet.models import MainSheetSnapshot, RecordWrite, SmartSheetRecord
+from pist.smartsheet.response import UnknownWriteOptionID
+
+from .models import MapRecord
+from .store import RecordSheetLink
+from .sync import (
     RecordSubmission,
     RecordSyncCheck,
     RecordSyncConflict,
     RecordSyncResult,
     RecordSyncService,
 )
-from pist.smartsheet.encoding import encode_record_values
-from pist.smartsheet.models import MainSheetSnapshot, RecordWrite
 
 # Application chunk size, not a claim about the remote API's maximum.
 UPDATE_BATCH_SIZE = 100
@@ -35,17 +39,14 @@ class RecordSyncBatch:
         self.service = service
         self._snapshot: MainSheetSnapshot | None = None
         self._updates: dict[int, RecordQueuedUpdate] = {}
-        self._submissions: list[RecordSubmission] = []
 
     def invalidate(self) -> None:
         """Require a fresh snapshot after a user interaction or recovery decision."""
         self._snapshot = None
 
     def awaiting_confirmation(self, local_id: int) -> bool:
-        """Whether a local update is queued or an accepted write awaits readback."""
-        return local_id in self._updates or any(
-            item.record.local_id == local_id for item in self._submissions
-        )
+        """Whether a saved local update is still queued for submission."""
+        return local_id in self._updates
 
     async def check(self, record: MapRecord) -> RecordSyncCheck:
         """Reconcile a record using the current shared snapshot."""
@@ -55,7 +56,7 @@ class RecordSyncBatch:
 
     async def save(
         self, record: MapRecord, check: RecordSyncCheck
-    ) -> RecordQueuedUpdate | RecordSubmission | RecordSyncResult:
+    ) -> RecordQueuedUpdate | RecordSyncResult:
         """Confirm equal data, queue existing updates, or submit a protected new row."""
         if self._snapshot is None:
             self._snapshot = await self.service.read_snapshot()
@@ -73,12 +74,10 @@ class RecordSyncBatch:
         if latest.remote is None:
             # New rows retain their individual durable uncertain-add protection.
             latest = await self.service.check(record, expected=check)
-        submission = await self.service._submit_checked(record, latest)
-        if isinstance(submission, RecordSyncResult):
-            return submission
-        self._submissions.append(submission)
-        # Accepted is not confirmed: persisted synchronization state remains pending.
-        return submission
+        result = await self.service.submit_checked(record, latest)
+        if latest.remote is None:
+            self.invalidate()
+        return result
 
     async def finish(self, resolve: ConflictResolver | None = None) -> bool:
         """Submit freshly reconciled batches and verify accepted writes; false on cancellation."""
@@ -101,8 +100,7 @@ class RecordSyncBatch:
                     chosen = await resolve(item.record, latest)
                     self.invalidate()
                     if chosen is None:
-                        self._updates.clear()
-                        await self.confirm()
+                        await self.abort()
                         return False
                     assert chosen.local_id is not None
                     saved = self.service.store.load(self.service.store.save(chosen))
@@ -110,7 +108,7 @@ class RecordSyncBatch:
                     break
                 assert latest.remote is not None and latest.remote.record_id is not None
                 if self.service.matches_remote(item.record, latest):
-                    await self.service._submit_checked(item.record, latest)
+                    await self.service.submit_checked(item.record, latest)  # pyright: ignore[reportUnusedCallResult]
                     assert item.record.local_id is not None
                     del self._updates[item.record.local_id]
                     continue
@@ -135,33 +133,59 @@ class RecordSyncBatch:
                     for submission in submissions:
                         assert submission.record.local_id is not None
                         del self._updates[submission.record.local_id]
-                    await self.service.client.update_records(
+                    response = await self.service.client.update_records(
                         snapshot,
                         tuple(
                             RecordWrite(record_id=item.link.record_id, values=item.values)
                             for item in submissions
                         ),
                     )
-                    self._submissions.extend(submissions)
-                    await self.confirm()
-        await self.confirm()
+                    self.invalidate()
+                    await self._confirm_responses(submissions, response, snapshot)
         return True
 
-    async def confirm(self) -> None:
-        """Read back accepted IDs together, confirming only individually matching rows."""
-        if not self._submissions:
-            return
-        snapshot = await self.service.read_snapshot(
-            record_ids=tuple(dict.fromkeys(item.link.record_id for item in self._submissions))
-        )
+    async def abort(self) -> None:
+        """Discard unsent updates; completed response confirmations remain committed."""
+        self._updates.clear()
+
+    async def _confirm_responses(
+        self,
+        submissions: list[RecordSubmission],
+        response: tuple[SmartSheetRecord, ...],
+        snapshot: MainSheetSnapshot,
+    ) -> None:
+        """Confirm each successful batch row without interpreting omissions as success."""
+        ids = [row.record_id for row in response]
+        expected = {item.link.record_id for item in submissions}
+        if any(not id_ for id_ in ids) or len(set(ids)) != len(ids) or not set(ids) <= expected:
+            raise ValueError('批量写入响应的记录 ID 无效、重复或不属于提交范围。')
+        by_id = {row.record_id: row for row in response}
+        refresh_error: ClientError | OSError | RuntimeError | None = None
+        try:
+            snapshot = await self.service.response_schema(
+                snapshot,
+                tuple(
+                    (item.values, by_id[item.link.record_id])
+                    for item in submissions
+                    if item.link.record_id in by_id
+                ),
+            )
+        except (ClientError, OSError, RuntimeError) as error:
+            # A failed lookup only removes evidence for unknown options. Rows already
+            # verifiable with the checked schema can still be confirmed independently.
+            # Schema incompatibility (ValueError) remains a batch-wide rejection.
+            refresh_error = error
         errors = []
-        for submission in self._submissions:
+        for submission in submissions:
             try:
-                self.service.confirm_submission(submission, snapshot)
+                returned = by_id.get(submission.link.record_id)
+                if returned is None:
+                    raise ValueError('批量写入响应未确认此记录。')
+                self.service.confirm_submission(submission, returned, snapshot)
+            except UnknownWriteOptionID as error:
+                detail = f'{error} 字段刷新失败：{refresh_error}' if refresh_error else str(error)
+                errors.append(f'{submission.record.map_name}：{detail}')
             except ValueError as error:
                 errors.append(f'{submission.record.map_name}：{error}')
-        self._submissions.clear()
-        # A subset must never replace the full snapshot used for unbound-row matching.
-        self.invalidate()
         if errors:
             raise ValueError('\n'.join(errors))

@@ -2,17 +2,22 @@
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
 from types import MappingProxyType
+from typing import Self
 
-from berries.entities import classification, rules
-from berries.game import binmap, content, levels
-from berries.game import map_data as source
-from berries.map_entrances import (
-    DEFAULT_MAP_ENTRANCE_RULES,
+from .entities import classification, config, rules
+from .game import map_data as source
+from .game.binmap import AttrValue, BinElement, BinMap, NumericAttrValue
+from .game.maps import Map
+from .map_entrances import (
     MapEntranceRules,
     MapEntranceSource,
+    load_default_map_entrance_rules,
 )
+
+type _StrPath = str | PathLike[str]
 
 LAYER_ENTRANCE_SOURCES = MappingProxyType(
     {
@@ -26,13 +31,13 @@ LAYER_ENTRANCE_SOURCES = MappingProxyType(
 class MapPreviewEntity:
     """One classified entity projected into a map-preview room."""
 
-    x: binmap.NumericAttrValue
-    y: binmap.NumericAttrValue
+    x: NumericAttrValue
+    y: NumericAttrValue
     kind: str
     sprite: str | None = None
     key: str | None = None
     entity_name: str | None = None
-    attrs: Mapping[str, binmap.AttrValue] | None = None
+    attrs: Mapping[str, AttrValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,13 +54,13 @@ class MapEntrance:
 
     room: str
     target_sid: str
-    x: binmap.NumericAttrValue | None = None
-    y: binmap.NumericAttrValue | None = None
-    width: binmap.NumericAttrValue | None = None
-    height: binmap.NumericAttrValue | None = None
+    x: NumericAttrValue | None = None
+    y: NumericAttrValue | None = None
+    width: NumericAttrValue | None = None
+    height: NumericAttrValue | None = None
     source: MapEntranceSource | None = None
     element_name: str | None = None
-    attrs: Mapping[str, binmap.AttrValue] | None = None
+    attrs: Mapping[str, AttrValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,42 +90,65 @@ class MapLayout:
     rooms: tuple[MapRoom, ...]
     entrances: tuple[MapEntrance, ...] = ()
 
+    @classmethod
+    def from_bin_map(
+        cls,
+        map_data: BinMap,
+        *,
+        entrance_rules: MapEntranceRules | None = None,
+        entity_rules: rules.EntityRules | None = None,
+    ) -> Self:
+        """Extract all map rooms and their editor-space bounds from a decoded map."""
+        if map_data.root.child('levels') is None:
+            return cls(())
+        rule_set = config.load_default_entity_rules() if entity_rules is None else entity_rules
+        entities = classification.classify_map_entities(map_data, rule_set=rule_set)
+        preview_entities_by_room = _preview_entities_by_room(entities)
+        rooms = tuple(
+            _map_room(room, preview_entities_by_room.get(_str_attr(room.attrs.get('name')), ()))
+            for room in map_data.iter_rooms()
+        )
+        entrance_rule_set = (
+            load_default_map_entrance_rules() if entrance_rules is None else entrance_rules
+        )
+        return cls(rooms, _map_entrances(map_data.iter_rooms(), entrance_rule_set))
+
+    @classmethod
+    def from_map(
+        cls,
+        map_file: Map,
+        *,
+        entity_rules: rules.EntityRules | None = None,
+        entrance_rules: MapEntranceRules | None = None,
+    ) -> Self:
+        """Read one active Game or Mod map through its typed content source."""
+        return cls.from_bin_map(
+            source.load_map_data(map_file), entity_rules=entity_rules, entrance_rules=entrance_rules
+        )
+
+    @classmethod
+    def from_path(
+        cls,
+        path: Path,
+        map_file: _StrPath,
+        *,
+        entity_rules: rules.EntityRules | None = None,
+        entrance_rules: MapEntranceRules | None = None,
+    ) -> Self:
+        """Read one map layout from a Mod archive, Mod directory, or Game Content directory."""
+        return cls.from_bin_map(
+            source.load_map_data_from_path(path, map_file),
+            entity_rules=entity_rules,
+            entrance_rules=entrance_rules,
+        )
+
     @property
     def room_names(self) -> frozenset[str]:
         """Return all room names available for route selection."""
         return frozenset(room.name for room in self.rooms)
 
 
-def map_layout(
-    map_data: binmap.BinMap,
-    *,
-    entrance_rules: MapEntranceRules = DEFAULT_MAP_ENTRANCE_RULES,
-    entity_rules: rules.EntityRules | None = None,
-) -> MapLayout:
-    """Extract all map rooms and their editor-space bounds from a decoded map."""
-    if map_data.root.child('levels') is None:
-        return MapLayout(())
-    rule_set = rules.load_entity_rule_layers() if entity_rules is None else entity_rules
-    entities = classification.classify_map_entities(map_data, rule_set=rule_set)
-    preview_entities_by_room = _preview_entities_by_room(entities)
-    rooms = tuple(
-        _map_room(room, preview_entities_by_room.get(_str_attr(room.attrs.get('name')), ()))
-        for room in map_data.iter_rooms()
-    )
-    return MapLayout(rooms, _map_entrances(map_data.iter_rooms(), entrance_rules))
-
-
-def load_map_layout(map_file: levels.Map) -> MapLayout:
-    """Read one active Game or Mod map through its typed content source."""
-    return map_layout(source.load_map_data(map_file))
-
-
-def load_map_layout_from_path(path: Path, map_file: content.StrPath) -> MapLayout:
-    """Read one map layout from a Mod archive, Mod directory, or Game Content directory."""
-    return map_layout(source.load_map_data_from_path(path, map_file))
-
-
-def _map_room(room: binmap.BinElement, entities: tuple[MapPreviewEntity, ...]) -> MapRoom:
+def _map_room(room: BinElement, entities: tuple[MapPreviewEntity, ...]) -> MapRoom:
     return MapRoom(
         name=_str_attr(room.attrs.get('name')),
         x=_int_attr(room.attrs.get('x')),
@@ -134,7 +162,7 @@ def _map_room(room: binmap.BinElement, entities: tuple[MapPreviewEntity, ...]) -
     )
 
 
-def _room_respawns(room: binmap.BinElement) -> tuple[MapRespawn, ...]:
+def _room_respawns(room: BinElement) -> tuple[MapRespawn, ...]:
     entities = room.child('entities')
     if entities is None:
         return ()
@@ -150,7 +178,7 @@ def _room_respawns(room: binmap.BinElement) -> tuple[MapRespawn, ...]:
 
 
 def _map_entrances(
-    rooms: Iterable[binmap.BinElement], entrance_rules: MapEntranceRules
+    rooms: Iterable[BinElement], entrance_rules: MapEntranceRules
 ) -> tuple[MapEntrance, ...]:
     """Extract configured static map entrances from room entities and triggers."""
     result: list[MapEntrance] = []
@@ -218,7 +246,7 @@ def _preview_entities_by_room(
     return {room: tuple(entities) for room, entities in result.items()}
 
 
-def _tile_rows(room: binmap.BinElement, name: str) -> tuple[str, ...]:
+def _tile_rows(room: BinElement, name: str) -> tuple[str, ...]:
     layer = room.child(name)
     if layer is None:
         return ()
@@ -234,7 +262,7 @@ def _int_attr(value: object) -> int | None:
     return value if type(value) is int else None
 
 
-def _number_attr(value: object) -> binmap.NumericAttrValue | None:
+def _number_attr(value: object) -> NumericAttrValue | None:
     if type(value) is int:
         return value
     if type(value) is float:

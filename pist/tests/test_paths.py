@@ -1,8 +1,18 @@
 from pathlib import Path
 
+import pytest
 from platformdirs import user_data_path
 
 from pist.paths import PIST_DIR, pist_dir, source_root
+
+
+@pytest.mark.parametrize(
+    'pkg_dir',
+    [Path('.'), Path('pist'), Path('src/pist'), Path(Path.cwd().anchor)],
+)
+def test_shallow_path_is_not_a_source_checkout(pkg_dir: Path) -> None:
+    assert source_root(pkg_dir) is None
+    assert pist_dir(pkg_dir, {}) == user_data_path('.pist', appauthor=False)
 
 
 def test_source_checkout_uses_repository_pist_directory(tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ class RecordOfflineScreen(ModalScreen[RecordSyncChoice | None]):
         with Vertical(id='record-offline'):
             yield Static('暂时无法同步表格。')
             yield Static(Text(self.reason))
+            yield Static('取消同步不会撤销已保存的本地修改。')
             with Horizontal(classes='record-sync-buttons'):
                 yield Button('取消', id='record-offline-cancel')
                 yield Button('仅保存本地', id='record-offline-local', variant='primary')
@@ -47,7 +48,7 @@ class RecordOfflineScreen(ModalScreen[RecordSyncChoice | None]):
         choices = {
             'record-offline-local': RecordSyncChoice.LOCAL,
         }
-        self.dismiss(choices.get(event.button.id or ''))
+        self.dismiss(choices.get(event.button.id or ''))  # pyright: ignore[reportUnusedCallResult]
 
 
 class RecordConflictScreen(ModalScreen[RecordSyncChoice | None]):
@@ -90,7 +91,14 @@ class RecordConflictScreen(ModalScreen[RecordSyncChoice | None]):
             with Horizontal(classes='record-sync-buttons'):
                 yield Button('取消', id='record-conflict-cancel')
                 yield Button('仅保存本地', id='record-conflict-only-local')
-                yield Button('采用远端', id='record-conflict-remote')
+                remote = Button(
+                    '采用远端',
+                    id='record-conflict-remote',
+                    disabled=any(item.title == '编号' for item in self.check.differences),
+                )
+                if remote.disabled:
+                    remote.tooltip = '编号由本地顺序调整维护；请选择采用本地，或取消后调整顺序。'
+                yield remote
                 yield Button('采用本地', id='record-conflict-local', variant='primary')
 
     @on(Button.Pressed)
@@ -100,4 +108,4 @@ class RecordConflictScreen(ModalScreen[RecordSyncChoice | None]):
             'record-conflict-remote': RecordSyncChoice.REMOTE,
             'record-conflict-only-local': RecordSyncChoice.ONLY_LOCAL,
         }
-        self.dismiss(choices.get(event.button.id or ''))
+        self.dismiss(choices.get(event.button.id or ''))  # pyright: ignore[reportUnusedCallResult]

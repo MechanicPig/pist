@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from berries.game.duration import Duration
 from pist.records.models import MapRecord
 from pist.records.store import (
     RecordSheetAddAttempt,
@@ -29,7 +30,7 @@ def record() -> MapRecord:
         map_name='Map',
         map_file='Maps/Example/Map.bin',
         save_slot=0,
-        time_played='0:01:00',
+        time_played=Duration.from_dotnet_ticks(600000000),
         status='进行中',
         notes='A',
     )
@@ -45,11 +46,13 @@ def test_offline_edits_preserve_confirmed_remote_baseline(
     )
     store.confirm_sheet_record(link, {'note': 'A'}, submitted=initial, confirmed_at=NOW)
     assert store.sync_state(initial.local_id) is RecordSyncState.SYNCED
+    assert store.list_records()[0].confirmed_at == NOW
     for note in ('B', 'C'):
         edited = initial.model_copy(update={'status': '进行中', 'notes': note})
         store.save(edited)
         assert store.sync_state(initial.local_id) is RecordSyncState.PENDING
         assert store.sheet_links(initial.local_id)[0].confirmed_values == {'note': 'A'}
+        assert store.list_records()[0].confirmed_at == NOW
     current = store.load(initial.local_id)
     assert current.notes == 'C'
     assert current.record_number == initial.record_number

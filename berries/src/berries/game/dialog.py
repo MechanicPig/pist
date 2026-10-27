@@ -1,13 +1,16 @@
-"""Dialog language files, parsing, merging and localized display names."""
+"""Dialog language files, parsing, merging and key conversion."""
 
 import re
-from collections.abc import Callable, Iterable, Mapping
-from typing import Annotated, Protocol
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from pathlib import Path, PurePath
+from typing import Annotated
+from zipfile import BadZipFile
 
 from pydantic import PlainSerializer, ValidateAs
 
 from berries.containers import CaseFoldDict, FrozenCaseFoldSet
-from berries.game.content import MAPS_DIR, ContentEntry, ContentPath
+
+from .content import DIALOG_DIR, MAPS_DIR, ContentEntry, ContentPath
 
 ENTRY_PATTERN = re.compile(r'^\w+=.*')
 COMMAND_PATTERN = re.compile(r'\{.*?\}')
@@ -17,8 +20,6 @@ SPECIAL_KEYS = FrozenCaseFoldSet(
     {'language', 'icon', 'order', 'font', 'split_regex', 'commas', 'periods'}
 )
 MAP_FILE_EXT = '.bin'
-
-type LocalizedNames = dict[str, str]
 
 type DialogEntries = Annotated[
     CaseFoldDict[str],
@@ -44,38 +45,6 @@ def merge_dialogs(
     return merged
 
 
-def localize_campaign_key(
-    dialog_key: str, *, dialogs: Mapping[str, Mapping[str, str]]
-) -> LocalizedNames:
-    """Look up an Everest LevelSet name with its prefixed-key priority."""
-    return {
-        lang: name
-        for lang, entries in dialogs.items()
-        if (name := entries.get(f'levelset_{dialog_key}') or entries.get(dialog_key))
-    }
-
-
-def localize_collab_names(
-    collab_id: str | None, *, dialogs: Mapping[str, Mapping[str, str]]
-) -> LocalizedNames:
-    """Return a Collab title from its lobby LevelSet Dialog keys."""
-    if collab_id is None:
-        return {}
-    dialog_key = dialog_key_for_campaign_dir(MAPS_DIR / collab_id / '0-Lobbies')
-    return localize_campaign_key(dialog_key, dialogs=dialogs)
-
-
-class DisplayNamed(Protocol):
-    """An object with localized names and a deterministic fallback name."""
-
-    @property
-    def names(self) -> Mapping[str, str]: ...
-
-    @property
-    def fallback_name(self) -> str: ...
-
-
-DIALOG_LANGUAGES = ('zh-cn', 'en')
 DIALOG_FILENAMES = {
     'pt-br': 'Brazilian Portuguese.txt',
     'en': 'English.txt',
@@ -106,50 +75,90 @@ def language_for_filename(filename: str) -> str | None:
     return _DIALOG_LANG_BY_FILENAME.get(filename.casefold())
 
 
-def _to_dialog_key(value: str) -> str:
+def to_dialog_key(value: str) -> str:
     """Apply Everest's ``Extensions.DialogKeyify`` transformation."""
     return value.translate(_DIALOG_KEY_TRANS)
 
 
-def localized_name(names: Mapping[str, str], languages: Iterable[str]) -> str | None:
-    """Return the first configured language available in a name mapping."""
-    for lang in languages:
-        if (name := names.get(lang)) is not None:
-            return name
-    return next(iter(names.values()), None)
+class DialogReadError(Exception):
+    """A Dialog directory or file could not be enumerated, read or parsed."""
+
+    def __init__(self, root: Path, file_path: PurePath, cause: Exception) -> None:
+        self.root = root
+        self.file_path = file_path
+        self.cause = cause
+        super().__init__(f'Unable to read Dialog {root} / {file_path}: {cause}')
 
 
-def display_name(value: DisplayNamed, languages: Iterable[str]) -> str:
-    """Return an object's preferred localized name or its fallback name."""
-    return localized_name(value.names, languages) or value.fallback_name
+def _handle_read_error(
+    entry: ContentEntry,
+    cause: Exception,
+    on_error: Callable[[DialogReadError], None] | None,
+) -> None:
+    error = DialogReadError(entry.root, entry.at, cause)
+    if on_error is None:
+        raise error from cause
+    on_error(error)
+
+
+def _iter_dialog_entries(
+    dialog_dir: ContentEntry, on_error: Callable[[DialogReadError], None] | None
+) -> Iterator[ContentEntry]:
+    """Report expected enumeration failures without intercepting consumer errors."""
+    try:
+        yield from dialog_dir.iterdir()
+    except (OSError, BadZipFile, KeyError) as error:
+        _handle_read_error(dialog_dir, error, on_error)
 
 
 def read_dialogs(
-    paths: Iterable[ContentEntry],
+    dialog_dir: ContentEntry,
     *,
-    read_text: Callable[[ContentEntry], str | None] = ContentEntry.read_text,
+    encoding: str = 'utf-8-sig',
+    strict: bool = False,
+    on_error: Callable[[DialogReadError], None] | None = None,
 ) -> dict[str, CaseFoldDict[str]]:
-    """Read selected language files in order without taking ownership of their source.
+    """Read supported language files directly inside one directory without closing its source.
 
-    A caller-supplied reader may record diagnostics and return None to skip a file.
-    Otherwise decoding and parsing errors propagate to the caller.
+    Missing directories return an empty mapping. Strict mode requires the exact
+    directory name Dialog, independently of error handling. Expected enumeration,
+    reading or parsing failures raise DialogReadError by default. With on_error,
+    the callback receives the source location and original cause immediately;
+    returning continues with successful files, while raising aborts the read.
+    Invalid encoding configuration and programming errors propagate unchanged.
     """
+    if strict and dialog_dir.name != DIALOG_DIR.name:
+        raise ValueError(f'Expected a directory named {DIALOG_DIR.name!r}: {dialog_dir.at!r}')
+    if not dialog_dir.is_dir():
+        if dialog_dir.exists():
+            raise NotADirectoryError(f'{dialog_dir.root} / {dialog_dir.at}')
+        return {}
     dialogs: dict[str, CaseFoldDict[str]] = {}
-    for path in paths:
-        if not path.is_file() or (lang := language_for_filename(path.name)) is None:
+    for path in _iter_dialog_entries(dialog_dir, on_error):
+        if (lang := language_for_filename(path.name)) is None:
             continue
-        text = read_text(path)
-        if text is not None:
-            entries = dialogs.get(lang)
-            if entries is None:
-                entries = CaseFoldDict()
-                dialogs[lang] = entries
-            entries.update(parse_dialog(text))
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding=encoding)
+        except (OSError, UnicodeDecodeError, BadZipFile, KeyError) as error:
+            _handle_read_error(path, error, on_error)
+            continue
+        try:
+            parsed = parse_dialog(text)
+        except ValueError as error:
+            _handle_read_error(path, error, on_error)
+            continue
+        entries = dialogs.get(lang)
+        if entries is None:
+            entries = CaseFoldDict()
+            dialogs[lang] = entries
+        entries.update(parsed)
     return dialogs
 
 
 def parse_dialog(content: str) -> CaseFoldDict[str]:
-    """Parse one UTF-8 Dialog TXT file into cleaned, display-ready strings.
+    """Parse one decoded Dialog TXT file into cleaned, display-ready strings.
 
     This follows the game's ``Language.FromTxt`` entry and continuation rules.
     """
@@ -189,7 +198,7 @@ def parse_dialog(content: str) -> CaseFoldDict[str]:
 def dialog_key_for_map_file(map_file: ContentPath) -> str:
     """Convert ``Maps/<path>.bin`` into Dialog key convention."""
     path = _map_file_path(map_file)
-    return _to_dialog_key('_'.join(path.with_suffix('').parts[1:]))
+    return to_dialog_key('_'.join(path.with_suffix('').parts[1:]))
 
 
 def _map_file_path(map_file: ContentPath) -> ContentPath:
@@ -206,7 +215,7 @@ def _map_file_path(map_file: ContentPath) -> ContentPath:
 def dialog_key_for_campaign_dir(campaign_dir: ContentPath) -> str:
     """Convert a ``Maps/<campaign>`` directory into its Dialog key."""
     path = _campaign_dir_path(campaign_dir)
-    return _to_dialog_key('_'.join(path.parts[1:]))
+    return to_dialog_key('_'.join(path.parts[1:]))
 
 
 def _campaign_dir_path(campaign_dir: ContentPath) -> ContentPath:
@@ -214,24 +223,6 @@ def _campaign_dir_path(campaign_dir: ContentPath) -> ContentPath:
     if not campaign_dir.parts or campaign_dir.parts[0] != MAPS_DIR.name:
         raise ValueError(f'Not a campaign directory: {campaign_dir!r}')
     return campaign_dir
-
-
-def default_map_name(map_file: ContentPath) -> str:
-    """Build fallback map name from its complete ``Maps``-relative path."""
-    path = _map_file_path(map_file)
-    return _default_name(path.with_suffix('').parts[1:])
-
-
-def default_campaign_name(campaign_dir: ContentPath) -> str:
-    """Build fallback campaign name from its ``Maps`` directory."""
-    path = _campaign_dir_path(campaign_dir)
-    return _default_name(path.parts[1:])
-
-
-def _default_name(parts: tuple[str, ...]) -> str:
-    return '_'.join(
-        re.sub(r'(?<=[a-z])([A-Z])', r' \1', re.sub(r'[^\w]', '_', part)) for part in parts
-    )
 
 
 def _clean_entries(entries: Mapping[str, str]) -> CaseFoldDict[str]:

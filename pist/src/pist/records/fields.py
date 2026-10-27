@@ -1,6 +1,7 @@
 """Explicit mapping between personal record attributes and public sheet columns."""
 
 RECORD_ATTRIBUTES = {
+    '编号': 'record_number',
     'Mod元数据名': 'mod_metadata_name',
     'Mod名': 'mod_name',
     '地图名': 'map_name',

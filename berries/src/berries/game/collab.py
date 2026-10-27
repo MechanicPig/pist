@@ -1,28 +1,49 @@
-"""Read CollabUtils2 lobby identities and static journal references."""
+"""Read CollabUtils2 lobby identities, journal references and map icon order."""
 
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from functools import partial
+from typing import Self
 
-from berries.game.content import entry_fingerprint
-from berries.game.levels import Map
-from berries.game.map_data import load_map_data, open_map_entry
+from .binmap import (
+    MapStringDecodeWarning,
+    map_string_warnings,
+    parse_map_meta,
+)
+from .content import ContentPath
+from .map_data import load_map_data
+from .maps import Map, split_map_side_suffix
+from .mods import InstalledMod
 
 JOURNAL_TRIGGER = 'CollabUtils2/JournalTrigger'
+COLLAB_JOURNAL_ICON_PATTERN = re.compile(r'.*/\d+-.*')
 
 
 @dataclass(frozen=True, slots=True)
-class JournalReferences:
-    """Static Campaign references and diagnostics read from one lobby map."""
+class JournalRefs:
+    """Static Campaign references and invalid-trigger count read from one lobby map."""
 
     campaign_refs: tuple[str, ...]
     invalid_count: int = 0
 
-    @property
-    def diagnostics(self) -> tuple[str, ...]:
-        """Describe malformed references without persisting presentation text."""
-        if not self.invalid_count:
-            return ()
-        return (f'发现 {self.invalid_count} 个没有有效 levelset 的日志入口。',)
+    @classmethod
+    def from_map(cls, map_file: Map) -> Self:
+        """Read exact JournalTrigger level-set identities in source order."""
+        map_data = load_map_data(map_file)
+        result: list[str] = []
+        seen: set[str] = set()
+        invalid_count = 0
+        for element in map_data.root.walk():
+            if element.name != JOURNAL_TRIGGER:
+                continue
+            value = element.attrs.get('levelset')
+            if not isinstance(value, str) or not value:
+                invalid_count += 1
+            elif value not in seen:
+                seen.add(value)
+                result.append(value)
+        return cls(tuple(result), invalid_count)
 
 
 def is_lobby_sid(sid: str, collab_ids: Iterable[str]) -> bool:
@@ -33,25 +54,37 @@ def is_lobby_sid(sid: str, collab_ids: Iterable[str]) -> bool:
     )
 
 
-def journal_references(map_file: Map) -> JournalReferences:
-    """Read exact JournalTrigger level-set identities in source order."""
-    map_data = load_map_data(map_file)
-    result: list[str] = []
-    seen: set[str] = set()
-    invalid_count = 0
-    for element in map_data.root.walk():
-        if element.name != JOURNAL_TRIGGER:
-            continue
-        value = element.attrs.get('levelset')
-        if not isinstance(value, str) or not value:
-            invalid_count += 1
-        elif value not in seen:
-            seen.add(value)
-            result.append(value)
-    return JournalReferences(tuple(result), invalid_count)
+def collab_journal_map_order_from_icons(
+    maps: Iterable[ContentPath], icons: Mapping[ContentPath, str | None]
+) -> list[ContentPath]:
+    """Order maps from cached Collab journal icon paths when they are all usable."""
+    map_list = list(maps)
+    if not all(
+        (icon := icons.get(map_info)) is not None and COLLAB_JOURNAL_ICON_PATTERN.fullmatch(icon)
+        for map_info in map_list
+    ):
+        return map_list
+    return sorted(
+        map_list,
+        key=lambda map_info: (
+            split_map_side_suffix(map_info)[0].stem == 'ZZ-HeartSide',
+            str(icons[map_info]).casefold(),
+            map_info.as_posix().casefold(),
+        ),
+    )
 
 
-def journal_fingerprint(map_file: Map) -> str:
-    """Return a cheap source fingerprint for one concrete lobby map resource."""
-    with open_map_entry(map_file) as map_entry:
-        return entry_fingerprint(map_entry)
+def iter_collab_journal_map_icons(
+    mod: InstalledMod,
+    maps: Iterable[ContentPath],
+    *,
+    on_warning: Callable[[ContentPath, MapStringDecodeWarning], None] | None = None,
+) -> Iterator[tuple[ContentPath, str | None]]:
+    """Yield Collab journal icon paths one map at a time without loading layouts."""
+    with mod.open() as root:
+        for map_info in maps:
+            with map_string_warnings(None if on_warning is None else partial(on_warning, map_info)):
+                icon = parse_map_meta(
+                    root.joinpath(map_info).read_bytes(), allow_trailing=True
+                ).get('Icon')
+            yield map_info, icon if isinstance(icon, str) else None

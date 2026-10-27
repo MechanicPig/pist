@@ -15,7 +15,14 @@ class MapEntityID:
     def parse(cls, value: str) -> Self:
         """Parse Celeste's ``room:id`` serialization."""
         room, sep, entity_id = value.rpartition(':')
-        if not sep or not room or not entity_id.isdecimal():
+        if (
+            not sep
+            or not room
+            or ':' in room
+            or not entity_id.isascii()
+            or not entity_id.isdecimal()
+            or int(entity_id) > 2**31 - 1
+        ):
             raise ValueError(f'Invalid map entity ID: {value!r}')
         return cls(room, int(entity_id))
 

@@ -6,18 +6,49 @@ Later crawls replace an earlier asset with the same virtual path.  This module
 models that content-facing view without making the UI reproduce loader rules.
 """
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Self
 
 from berries.containers import CaseFoldDict
-from berries.game import collab, content, dialog, everest, levels, maps, vanilla
-from berries.game import mods as game_mods
-from berries.game.map_hiders import MapHiderRules
-from berries.game.map_source import MapSource
+
+from . import collab, content, dialog, everest, levels, vanilla
+from . import mods as game_mods
+from .map_hiders import MapHiderIssue, MapHiderResolution, MapHiderRules
+from .maps import Map, ModMap
 
 COLLAB_UTILS2 = 'CollabUtils2'
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyIssue:
+    """An unsatisfied dependency and the version actually loaded, if present."""
+
+    dependency: everest.Dependency
+    loaded: everest.ModMetadata | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModLoadingIssue:
+    """One manifest entry excluded from loading by unresolved dependencies."""
+
+    mod: game_mods.InstalledMod
+    metadata: everest.ModMetadata
+    required: tuple[DependencyIssue, ...]
+    optional: tuple[DependencyIssue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReservedCampaignIssue:
+    """Mod maps using the reserved Celeste LevelSet, with original-map SID collisions."""
+
+    campaign: ModCampaign
+    conflicting_sids: tuple[str, ...]
+
+
+type CatalogIssue = ModLoadingIssue | ReservedCampaignIssue | MapHiderIssue
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,29 +56,42 @@ class MapOverride:
     """One map asset replaced by a later Everest content crawl."""
 
     map_file: content.ContentPath
-    previous: levels.Map
-    replacement: levels.Map
+    previous: Map
+    replacement: Map
 
 
 @dataclass(frozen=True, slots=True)
 class Campaign:
-    """One campaign directory assembled from active maps across packages."""
+    """Shared map grouping and Dialog identity for concrete campaign types."""
 
     directory: content.ContentPath
-    dialog_key: str
     levels: tuple[levels.Level, ...]
-    source: MapSource = MapSource.MOD
-    collab_id: str | None = None
+
+    @property
+    def dialog_key(self) -> str:
+        """Return the Dialog key derived from this LevelSet directory."""
+        return dialog.dialog_key_for_campaign_dir(self.directory)
+
+    @property
+    def ref(self) -> str:
+        """Return this directory in CollabUtils2 journal-reference form."""
+        return self.directory.relative_to(content.MAPS_DIR).as_posix()
 
     @property
     def map_count(self) -> int:
         """Return the number of concrete Side maps in this Campaign."""
         return sum(len(level.maps) for level in self.levels)
 
-    def iter_maps(self) -> Iterator[levels.Map]:
+    def iter_maps(self) -> Iterator[Map]:
         """Yield every Map in Level order, then A/B/C Side order."""
         for level in self.levels:
             yield from level.maps
+
+    def uses_mod(self, mod: game_mods.InstalledMod) -> bool:
+        """Return whether any map in this campaign is supplied by this physical Mod."""
+        return any(
+            isinstance(map_file, ModMap) and map_file.mod is mod for map_file in self.iter_maps()
+        )
 
     def iter_sides(self) -> Iterator[tuple[levels.Level, levels.LevelSide]]:
         """Yield every Level and available Side in stable display order."""
@@ -55,77 +99,150 @@ class Campaign:
             for side in level.sides:
                 yield level, side
 
-    @property
-    def fallback_name(self) -> str:
-        """Return a readable name when no campaign Dialog entry is available."""
-        if self.source is MapSource.VANILLA:
-            return '官图'
-        if self.directory == content.MAPS_DIR:
-            return '未分类'
-        return dialog.default_campaign_name(self.directory)
 
-    @property
-    def is_collab_lobby_campaign(self) -> bool:
-        """Return whether this is one Collab's canonical 0-Lobbies campaign."""
-        return self.collab_id is not None and self.directory == (
-            content.MAPS_DIR / self.collab_id / '0-Lobbies'
-        )
+@dataclass(frozen=True, slots=True)
+class ModCampaign(Campaign):
+    """One Mod LevelSet assembled from active maps across physical packages."""
 
     @property
     def uses_vanilla_campaign(self) -> bool:
         """Return whether Mod maps claim Everest's reserved ``Celeste`` LevelSet."""
-        return self.source is MapSource.MOD and self.directory == content.MAPS_DIR / 'Celeste'
+        return self.directory == content.MAPS_DIR / 'Celeste'
 
-    def localized_names(self, dialogs: Mapping[str, Mapping[str, str]]) -> dialog.LocalizedNames:
-        """Resolve this campaign's names from the final merged Dialog mapping."""
-        if self.is_collab_lobby_campaign:
-            return dialog.localize_collab_names(self.collab_id, dialogs=dialogs)
-        return dialog.localize_campaign_key(self.dialog_key, dialogs=dialogs)
 
-    def display_name(
-        self,
-        dialogs: Mapping[str, Mapping[str, str]],
-        languages: Iterable[str],
-    ) -> str:
-        """Resolve this campaign's user-facing name at display time."""
-        name = dialog.localized_name(self.localized_names(dialogs), languages) or self.fallback_name
-        return f'{name}（Mod）' if self.uses_vanilla_campaign else name
+@dataclass(frozen=True, slots=True)
+class VanillaCampaign(Campaign):
+    """The original game's campaign, distinct from Mod LevelSets."""
+
+    @property
+    def dialog_key(self) -> str:
+        """Return the original game's campaign key, independent of its root directory."""
+        return 'Celeste'
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollabSubCampaign(ModCampaign):
+    """A Collab LevelSet other than its hub, hidden from ordinary map selection."""
+
+    collab_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollabHubCampaign(ModCampaign):
+    """A Collab's canonical 0-Lobbies campaign, displayed under its collection title."""
+
+    collab_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class CampaignCatalog:
-    """The active Maps assets and their grouping after Everest-style loading."""
+    """The active Maps assets and their grouping after one Everest-style load.
+
+    This result does not track file changes. Its containers are not recursively
+    immutable; load a new catalog to resolve a changed installation.
+    """
 
     campaigns: tuple[Campaign, ...]
     hidden_campaigns: tuple[Campaign, ...]
     overrides: tuple[MapOverride, ...]
     unloaded_mods: tuple[game_mods.InstalledMod, ...]
     dialogs: dict[str, CaseFoldDict[str]]
-    mods_by_content_path: Mapping[Path, game_mods.InstalledMod]
-    diagnostics: tuple[str, ...] = ()
+    issues: tuple[CatalogIssue, ...] = ()
 
-    def mod_for(self, map_file: levels.Map) -> game_mods.InstalledMod | None:
-        """Return the Mod owning one map file in this catalog snapshot, if any."""
-        return self.mods_by_content_path.get(map_file.content.path)
+    @classmethod
+    def from_game_dir(
+        cls,
+        game_dir: Path,
+        *,
+        scan_report: game_mods.ModScanReport | None = None,
+        map_hider_rules: MapHiderRules | None = None,
+        on_error: Callable[[dialog.DialogReadError], None] | None = None,
+        on_scan_error: Callable[[game_mods.ModScanError], None] | None = None,
+    ) -> Self:
+        """Load original and enabled Mod content, retaining structured loading issues.
 
-    def source_name_for(self, map_file: levels.Map) -> str:
-        """Return the user-facing content source name for one map file."""
-        mod = self.mod_for(map_file)
-        return '原版' if mod is None else mod.metadata_name
+        An existing report may be reused after a progress-aware scan of the same
+        installation. Packaged hiding rules read only the game's Helper settings;
+        callers may explicitly supply other rule declarations. Dialog read failures
+        propagate unless on_error handles them and allows partial results.
+        """
+        if scan_report is None:
+            if not game_dir.is_dir():
+                raise ValueError(f'Game directory does not exist: {game_dir!r}')
+            mods_dir = game_dir / game_mods.MODS_DIRNAME
+            scan_report = (
+                game_mods.ModScanner(game_dir, on_error=on_scan_error).scan()
+                if mods_dir.exists()
+                else game_mods.ModScanReport(mods_dir=str(mods_dir), disabled_filenames=[], mods=[])
+            )
+        elif Path(scan_report.mods_dir).resolve() != (game_dir / 'Mods').resolve():
+            raise ValueError('Mod scan report belongs to a different game directory.')
+        base_dialogs = vanilla.load_dialogs(game_dir, on_error=on_error)
+        return cls._from_inputs(
+            scan_report.enabled_mods,
+            vanilla_maps=vanilla.load_maps(game_dir),
+            base_dialogs=base_dialogs,
+            map_hider_rules=map_hider_rules or MapHiderRules(game_dir),
+        )
 
-    def campaign_uses_mod(self, campaign: Campaign, mod: game_mods.InstalledMod) -> bool:
-        """Return whether any map in a campaign is supplied by one physical Mod."""
-        return any(self.mod_for(map_file) is mod for map_file in campaign.iter_maps())
+    @classmethod
+    def _from_inputs(
+        cls,
+        mods: Sequence[game_mods.InstalledMod],
+        *,
+        vanilla_maps: Iterable[Map] = (),
+        base_dialogs: Mapping[str, Mapping[str, str]] | None = None,
+        map_hider_rules: MapHiderRules | None = None,
+    ) -> Self:
+        """Assemble a catalog from read inputs without performing a second scan."""
+        loaded = _resolve_mod_loading(mods)
+        merged = _merge_mod_content(loaded.mods, base_dialogs)
+        hiders = None if map_hider_rules is None else map_hider_rules.resolve(loaded.metadata)
+        visible_maps, hidden_maps = _split_hidden_maps(merged, hiders)
+        collab_ids = frozenset(
+            mod.collab_id
+            for mod in loaded.mods
+            if COLLAB_UTILS2 in loaded.metadata and mod.collab_id is not None
+        )
+        camps, hidden_camps = _assemble_campaign_groups(visible_maps, hidden_maps, collab_ids)
+        vanilla_levels = levels.assemble_vanilla_levels(vanilla_maps)
+        issues: list[CatalogIssue] = list(loaded.issues)
+        if hiders is not None:
+            issues.extend(hiders.issues)
+        if (issue := _reserved_campaign_issue(camps, vanilla_levels)) is not None:
+            issues.append(issue)
+        if vanilla_levels:
+            camps = (
+                VanillaCampaign(content.MAPS_DIR, vanilla_levels),
+                *camps,
+            )
+        return cls(
+            campaigns=camps,
+            hidden_campaigns=hidden_camps,
+            overrides=merged.overrides,
+            unloaded_mods=tuple(mod for mod in mods if mod.path not in merged.mods_by_path),
+            dialogs=merged.dialogs,
+            issues=tuple(issues),
+        )
 
 
-def load_campaigns(
-    mods: Sequence[game_mods.InstalledMod],
-    *,
-    vanilla_maps: Iterable[levels.Map] = (),
-    base_dialogs: Mapping[str, Mapping[str, str]] | None = None,
-    map_hider_rules: MapHiderRules | None = None,
-) -> CampaignCatalog:
-    """Resolve active map files in Everest content-crawl order.
+@dataclass(frozen=True, slots=True)
+class _LoadedModContent:
+    mods: tuple[game_mods.InstalledMod, ...]
+    metadata: Mapping[str, everest.ModMetadata]
+    issues: tuple[ModLoadingIssue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MergedModContent:
+    maps: tuple[ModMap, ...]
+    overrides: tuple[MapOverride, ...]
+    dialogs: dict[str, CaseFoldDict[str]]
+    mods_by_path: Mapping[Path, game_mods.InstalledMod]
+
+
+def _resolve_mod_loading(mods: Sequence[game_mods.InstalledMod]) -> _LoadedModContent:
+    """Resolve Mod dependencies and content-crawl order.
 
     ``mods`` must retain the scanner's physical-package order: ZIP packages
     first, then directories, each ordered by file name.  This deliberately
@@ -139,23 +256,23 @@ def load_campaigns(
     """
     entries = [(mod, metadata) for mod in mods for metadata in mod.manifest]
     loaded_metadata: dict[str, everest.ModMetadata] = {}
-    content_mods: list[game_mods.InstalledMod] = []
-    content_mod_paths: set[Path] = set()
+    loaded_mods: list[game_mods.InstalledMod] = []
+    loaded_mod_paths: set[Path] = set()
     delayed: list[tuple[game_mods.InstalledMod, everest.ModMetadata]] = []
     for mod, metadata in entries:
         if _try_load_metadata(
             mod,
             metadata,
             loaded_metadata=loaded_metadata,
-            content_mods=content_mods,
-            content_mod_paths=content_mod_paths,
+            loaded_mods=loaded_mods,
+            loaded_mod_paths=loaded_mod_paths,
             enforce_optional_dependencies=True,
         ):
             delayed = _load_pending(
                 delayed,
                 loaded_metadata=loaded_metadata,
-                content_mods=content_mods,
-                content_mod_paths=content_mod_paths,
+                loaded_mods=loaded_mods,
+                loaded_mod_paths=loaded_mod_paths,
                 enforce_optional_dependencies=True,
             )
         elif metadata.name not in loaded_metadata:
@@ -163,31 +280,44 @@ def load_campaigns(
     delayed = _load_pending(
         delayed,
         loaded_metadata=loaded_metadata,
-        content_mods=content_mods,
-        content_mod_paths=content_mod_paths,
+        loaded_mods=loaded_mods,
+        loaded_mod_paths=loaded_mod_paths,
         enforce_optional_dependencies=False,
     )
-    dependency_diagnostics = tuple(
-        _unloaded_metadata_diagnostic(mod, metadata, loaded_metadata) for mod, metadata in delayed
+    issues = tuple(
+        _unloaded_metadata_issue(mod, metadata, loaded_metadata) for mod, metadata in delayed
     )
+    return _LoadedModContent(tuple(loaded_mods), loaded_metadata, issues)
 
-    dialogs = dialog.merge_dialogs((mod.dialogs for mod in content_mods), base_dialogs=base_dialogs)
-    mods_by_content_path = {mod.path: mod for mod in content_mods}
-    active_maps: dict[content.ContentPath, levels.Map] = {}
+
+def _merge_mod_content(
+    mods: Sequence[game_mods.InstalledMod],
+    base_dialogs: Mapping[str, Mapping[str, str]] | None,
+) -> _MergedModContent:
+    """Merge Dialog and replace map assets in resolved content-crawl order."""
+    dialogs = dialog.merge_dialogs((mod.dialogs for mod in mods), base_dialogs=base_dialogs)
+    mods_by_path = {mod.path: mod for mod in mods}
+    active_maps: dict[content.ContentPath, ModMap] = {}
     overrides: list[MapOverride] = []
-    for mod in content_mods:
-        for map_info in mod.maps:
-            map_file = levels.Map(map_info, mod)
-            if (previous := active_maps.get(map_info.file_path)) is not None:
-                overrides.append(MapOverride(map_info.file_path, previous, map_file))
-            active_maps[map_info.file_path] = map_file
-    map_hiders = None if map_hider_rules is None else map_hider_rules.resolve(loaded_metadata)
+    for mod in mods:
+        for path in mod.map_files:
+            map_file = ModMap(path, mod)
+            if (previous := active_maps.get(path)) is not None:
+                overrides.append(MapOverride(path, previous, map_file))
+            active_maps[path] = map_file
+    return _MergedModContent(tuple(active_maps.values()), tuple(overrides), dialogs, mods_by_path)
+
+
+def _split_hidden_maps(
+    merged: _MergedModContent, map_hiders: MapHiderResolution | None
+) -> tuple[tuple[Map, ...], tuple[Map, ...]]:
+    """Separate visible and hidden assets using only confirmed Helper rules."""
     # Everest assigns a physical package's assets to the first manifest entry
     # when it creates ``ModContent``. ``metadata_name`` models that source ID.
-    visible_maps: list[levels.Map] = []
-    hidden_maps: list[levels.Map] = []
-    for map_file in active_maps.values():
-        mod = mods_by_content_path[map_file.content.path]
+    visible_maps: list[Map] = []
+    hidden_maps: list[Map] = []
+    for map_file in merged.maps:
+        mod = map_file.mod
         is_hidden = map_hiders is not None and map_hiders.hides(
             source=mod.metadata_name,
             map_file=map_file.file_path,
@@ -196,10 +326,15 @@ def load_campaigns(
             hidden_maps.append(map_file)
         else:
             visible_maps.append(map_file)
-    collab_utils_loaded = COLLAB_UTILS2 in loaded_metadata
-    collab_ids = frozenset(
-        mod.collab_id for mod in content_mods if collab_utils_loaded and mod.collab_id is not None
-    )
+    return tuple(visible_maps), tuple(hidden_maps)
+
+
+def _assemble_campaign_groups(
+    visible_maps: Collection[Map],
+    hidden_maps: Collection[Map],
+    collab_ids: AbstractSet[str],
+) -> tuple[tuple[Campaign, ...], tuple[Campaign, ...]]:
+    """Group Mod maps and separate Collab subcampaigns from their lobby collection."""
     campaigns = _group_campaigns(levels.assemble_mod_levels(visible_maps))
     campaigns = _mark_lobby_maps(campaigns, collab_ids)
     campaigns, hidden_collab_campaigns = _split_collab_campaigns(campaigns)
@@ -210,71 +345,38 @@ def load_campaigns(
             key=lambda campaign: campaign.directory.as_posix().casefold(),
         )
     )
-    vanilla_levels = levels.assemble_vanilla_levels(vanilla_maps)
-    diagnostics = list(dependency_diagnostics)
-    if map_hiders is not None:
-        diagnostics.extend(map_hiders.diagnostics)
-    if (
-        diagnostic := _reserved_campaign_diagnostic(campaigns, vanilla_levels, mods_by_content_path)
-    ) is not None:
-        diagnostics.append(diagnostic)
-    if vanilla_levels:
-        campaigns = (
-            Campaign(
-                directory=content.MAPS_DIR,
-                dialog_key='Celeste',
-                levels=vanilla_levels,
-                source=MapSource.VANILLA,
-            ),
-            *campaigns,
-        )
-    return CampaignCatalog(
-        campaigns=campaigns,
-        hidden_campaigns=hidden_campaigns,
-        overrides=tuple(overrides),
-        unloaded_mods=tuple(mod for mod in mods if mod.path not in content_mod_paths),
-        dialogs=dialogs,
-        mods_by_content_path=mods_by_content_path,
-        diagnostics=tuple(diagnostics),
-    )
+    return campaigns, hidden_campaigns
 
 
-def _reserved_campaign_diagnostic(
+def _reserved_campaign_issue(
     campaigns: Iterable[Campaign],
     vanilla_levels: Iterable[levels.Level],
-    mods_by_content_path: Mapping[Path, game_mods.InstalledMod],
-) -> str | None:
-    """Warn about Mod maps that Everest assigns to its reserved vanilla LevelSet."""
-    campaign = next((item for item in campaigns if item.uses_vanilla_campaign), None)
+) -> ReservedCampaignIssue | None:
+    """Identify Mod maps using the reserved vanilla LevelSet and colliding SIDs."""
+    campaign = next(
+        (
+            item
+            for item in campaigns
+            if isinstance(item, ModCampaign) and item.uses_vanilla_campaign
+        ),
+        None,
+    )
     if campaign is None:
         return None
-    sources = '、'.join(
-        dict.fromkeys(
-            mods_by_content_path[map_file.content.path].metadata_name
-            for map_file in campaign.iter_maps()
-        )
-    )
     vanilla_sids = {level.sid for level in vanilla_levels}
     conflicting_sids = sorted(
         {level.sid for level in campaign.levels} & vanilla_sids,
         key=str.casefold,
     )
-    conflict = (
-        f'；与官图 SID 冲突并会替换官图定义：{"、".join(conflicting_sids)}'
-        if conflicting_sids
-        else ''
-    )
-    message = 'Mod 地图集 Maps/Celeste 使用 Everest 保留的 Celeste LevelSet'
-    message += f'（来源：{sources}）；游戏会将其视为官图并使用官图存档{conflict}。'
-    return message
+    return ReservedCampaignIssue(campaign, tuple(conflicting_sids))
 
 
 def _load_pending(
     pending: list[tuple[game_mods.InstalledMod, everest.ModMetadata]],
     *,
     loaded_metadata: dict[str, everest.ModMetadata],
-    content_mods: list[game_mods.InstalledMod],
-    content_mod_paths: set[Path],
+    loaded_mods: list[game_mods.InstalledMod],
+    loaded_mod_paths: set[Path],
     enforce_optional_dependencies: bool,
 ) -> list[tuple[game_mods.InstalledMod, everest.ModMetadata]]:
     """Load every pending manifest entry that can progress in this phase."""
@@ -286,8 +388,8 @@ def _load_pending(
                 mod,
                 metadata,
                 loaded_metadata=loaded_metadata,
-                content_mods=content_mods,
-                content_mod_paths=content_mod_paths,
+                loaded_mods=loaded_mods,
+                loaded_mod_paths=loaded_mod_paths,
                 enforce_optional_dependencies=enforce_optional_dependencies,
             ):
                 progressed = True
@@ -304,8 +406,8 @@ def _try_load_metadata(
     metadata: everest.ModMetadata,
     *,
     loaded_metadata: dict[str, everest.ModMetadata],
-    content_mods: list[game_mods.InstalledMod],
-    content_mod_paths: set[Path],
+    loaded_mods: list[game_mods.InstalledMod],
+    loaded_mod_paths: set[Path],
     enforce_optional_dependencies: bool,
 ) -> bool:
     """Load one metadata entry if Everest would not delay it."""
@@ -317,9 +419,9 @@ def _try_load_metadata(
         enforce_optional_dependencies=enforce_optional_dependencies,
     ):
         return False
-    if mod.path not in content_mod_paths:
-        content_mods.append(mod)
-        content_mod_paths.add(mod.path)
+    if mod.path not in loaded_mod_paths:
+        loaded_mods.append(mod)
+        loaded_mod_paths.add(mod.path)
     loaded_metadata[metadata.name] = metadata
     return True
 
@@ -360,61 +462,37 @@ def _dependency_is_satisfied(
     ).is_compatible_with(dependency.version or everest.DEFAULT_VERSION)
 
 
-def _unloaded_metadata_diagnostic(
+def _unloaded_metadata_issue(
     mod: game_mods.InstalledMod,
     metadata: everest.ModMetadata,
     loaded: Mapping[str, everest.ModMetadata],
-) -> str:
+) -> ModLoadingIssue:
     """Describe why one manifest entry remained outside the loaded Mod graph."""
     required = tuple(
-        dependency
+        DependencyIssue(dependency, loaded.get(dependency.name))
         for dependency in metadata.dependencies
         if game_mods.is_mod_dependency(dependency.name)
         and not _dependency_is_satisfied(dependency, loaded)
     )
     optional = tuple(
-        dependency
+        DependencyIssue(dependency, loaded.get(dependency.name))
         for dependency in metadata.optional_dependencies
         if game_mods.is_mod_dependency(dependency.name)
         and dependency.name in loaded
         and not _dependency_is_satisfied(dependency, loaded)
     )
-    problems: list[str] = []
-    if required:
-        problems.append(f'必需依赖：{_dependency_diagnostic_list(required, loaded)}')
-    if optional:
-        problems.append(f'可选依赖版本不兼容：{_dependency_diagnostic_list(optional, loaded)}')
-    reason = '；'.join(problems) or '依赖关系无法解析'
-    return f'Mod 元数据 {metadata.name}（{mod.filename}）未加载：{reason}'
-
-
-def _dependency_diagnostic_list(
-    dependencies: Iterable[everest.Dependency],
-    loaded: Mapping[str, everest.ModMetadata],
-) -> str:
-    """Format unresolved dependencies without losing installed-version context."""
-    entries: list[str] = []
-    for dependency in dependencies:
-        required = dependency.version or everest.DEFAULT_VERSION
-        installed_metadata = loaded.get(dependency.name)
-        if installed_metadata is None:
-            entries.append(f'{dependency.name}（未加载，需要 {required}）')
-        else:
-            installed = installed_metadata.version or everest.DEFAULT_VERSION
-            entries.append(f'{dependency.name} {installed}（需要 {required}）')
-    return '、'.join(entries)
+    return ModLoadingIssue(mod, metadata, required, optional)
 
 
 def _group_campaigns(level_items: Iterable[levels.Level]) -> tuple[Campaign, ...]:
     """Group final Levels by their exact Everest Level Set directory."""
     grouped: dict[content.ContentPath, list[levels.Level]] = {}
     for level in level_items:
-        directory = maps.campaign_dir_for_map_file(_level_file_path(level))
+        directory = level[levels.LevelSide.A].campaign_dir
         grouped.setdefault(directory, []).append(level)
     return tuple(
-        Campaign(
+        ModCampaign(
             directory=directory,
-            dialog_key=dialog.dialog_key_for_campaign_dir(directory),
             levels=tuple(campaign_levels),
         )
         for directory, campaign_levels in sorted(
@@ -433,12 +511,17 @@ def _mark_lobby_maps(
 def _mark_campaign_lobby_maps(campaign: Campaign, collab_ids: AbstractSet[str]) -> Campaign:
     path = campaign.directory
     collab_id = path.parts[1] if len(path.parts) > 2 and path.parts[1] in collab_ids else None
-    return replace(
-        campaign,
+    if collab_id is None:
+        return campaign
+    campaign_type = (
+        CollabHubCampaign
+        if path == content.MAPS_DIR / collab_id / '0-Lobbies'
+        else CollabSubCampaign
+    )
+    return campaign_type(
+        directory=campaign.directory,
         levels=tuple(
-            replace(level, is_lobby=True)
-            if collab_id is not None and collab.is_lobby_sid(level.sid, (collab_id,))
-            else level
+            replace(level, is_lobby=True) if collab.is_lobby_sid(level.sid, (collab_id,)) else level
             for level in campaign.levels
         ),
         collab_id=collab_id,
@@ -452,44 +535,27 @@ def _split_collab_campaigns(
     visible_campaigns: list[Campaign] = []
     hidden_campaigns: list[Campaign] = []
     for campaign in campaigns:
-        if campaign.collab_id is None or campaign.is_collab_lobby_campaign:
-            visible_campaigns.append(campaign)
-        else:
+        if isinstance(campaign, CollabSubCampaign):
             hidden_campaigns.append(campaign)
+        else:
+            visible_campaigns.append(campaign)
     return tuple(visible_campaigns), tuple(hidden_campaigns)
 
 
 def resolve_campaign_refs(
     campaigns: Mapping[str, Campaign],
     campaign_refs: Iterable[str],
-    *,
-    reference_name: str = '日志引用',
 ) -> tuple[tuple[Campaign, ...], tuple[str, ...]]:
-    """Resolve raw journal or configuration references against the exact campaign index."""
+    """Resolve exact references, returning matched campaigns and missing raw references."""
     resolved: list[Campaign] = []
-    diagnostics: list[str] = []
+    missing: list[str] = []
     seen: set[str] = set()
     for campaign_ref in campaign_refs:
         directory = f'{content.MAPS_DIR}/{campaign_ref}'
         campaign = campaigns.get(directory)
         if campaign is None:
-            diagnostics.append(f'{reference_name}的地图集不存在：{campaign_ref}')
+            missing.append(campaign_ref)
         elif directory not in seen:
             seen.add(directory)
             resolved.append(campaign)
-    return tuple(resolved), tuple(diagnostics)
-
-
-def load_vanilla_dialogs(game_dir: Path) -> dict[str, CaseFoldDict[str]]:
-    """Read original Dialog entries used as the base of the global merge."""
-    return vanilla.load_dialogs(game_dir)
-
-
-def load_vanilla_maps(game_dir: Path) -> tuple[levels.Map, ...]:
-    """Read original Game Content maps without treating them as a Mod package."""
-    game_content = content.GameContent(game_dir / content.CONTENT_DIRNAME)
-    return tuple(levels.Map(map_info, game_content) for map_info in vanilla.load_maps(game_dir))
-
-
-def _level_file_path(level: levels.Level) -> content.ContentPath:
-    return level[levels.LevelSide.A].file_path
+    return tuple(resolved), tuple(missing)

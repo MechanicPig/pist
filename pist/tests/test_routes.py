@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from berries.entities.rules import SHARED_ENTITIES_PATH, load_entity_rules
+from berries.entities.config import (
+    load_default_entity_rules,
+)
 from berries.game.binmap import BinElement, BinMap
 from pist.entity_stats import load_entity_stat_rules, map_entity_stats
 from pist.routes.models import MapRoute
@@ -41,9 +43,7 @@ def test_map_entity_record_values_apply_saved_marker_exclusions() -> None:
         ),
     )
 
-    entity_rules = load_entity_rules(SHARED_ENTITIES_PATH).with_rule(
-        'heartGem', 'end_level_heart', {}
-    )
+    entity_rules = load_default_entity_rules().with_rule('heartGem', 'end_level_heart', {})
     values = map_entity_stats(
         map_data,
         excluded_entities=frozenset({'room:1'}),

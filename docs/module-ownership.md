@@ -19,7 +19,7 @@ loopback 预览的 HTTP 集成测试使用共享辅助工具约束启动与请�
 - `berries.installation`：面向第三方应用的高层只读入口；
 - `berries.game.*`：游戏、Mod、存档、Campaign、Level、Map 与 Collab 事实读取；
 - `berries.game.map_data`：地图资源读取与解码边界，供布局解释、实体统计及 Collab 日志共用；
-- `berries.entities.rules`、`berries.entities.classification`：共享识别规则与分类；
+- `berries.entities.rules`、`berries.entities.classification`：规则模型、匹配与实体分类；`config` 管理用户覆盖，`maintenance` 显式维护共享规则库，`serialization` 输出 TOML；
 - `berries.map_layout`、`berries.map_entrances`：客观地图布局与入口识别；
 - `berries.gamebanana`：外部投稿元数据查询；
 - `berries.map_preview`：只读 loopback 地图预览，以及可组合的会话、地图导航与基础画布能力；
@@ -38,7 +38,11 @@ Everest 激活、覆盖与 Mod 组合语义
 
 `game.content`、`game.vanilla`、地图二进制格式和原生存档读取属于基础层；`game.everest`、`game.mods` 以及基于加载顺序构建 Campaign 目录的能力建立在基础层之上。共享的 Map、Level 等领域模型不因内容来源而复制。
 
+`CampaignCatalog.from_game_dir()` 负责扫描启用的 Mod、读取原版地图与 Dialog，并协调依赖解析、内容覆盖和地图集组装；扫描与加载诊断统一保留在目录结果中。进度式扫描的调用方可显式传入同一游戏目录的 `scan_report`，避免重复扫描；原始输入组装仅作为内部实现，不提供公共 `from_mods()` 入口。`MapHiderRules` 的默认声明随 Berries 发布，动态目标来自游戏安装目录中的 Helper 设置，不读取 Pist 个人配置；替代规则须由调用方显式提供。
+
 这条边界用于约束依赖和测试，不代表面向两类用户提供两个并列产品。首版不拆分单独的原版发行包，也不增加 `VanillaInstallation` 一类稳定入口。`GameInstallation` 继续返回游戏实际生效的内容；没有启用 Mod 时，其结果自然退化为原版目录。只有出现真实的纯原版消费者后，才重新评估是否公开专用入口。
+
+`CollabHubCampaign` 与 `CollabSubCampaign` 是 `ModCampaign` 的兄弟类型：前者表示合集的 `0-Lobbies` 地图集，后者表示其余合集 LevelSet，包括 Gym 等目录；两者均持有必填的 `collab_id`。具体大厅身份仍由 `Level.is_lobby` 表达，Hub 地图集中的序章不因此成为大厅。子地图集在常规选图入口隐藏遵循 CollabUtils2 的游戏行为，不能仅视为 Pist 的展示策略。
 
 ## 个人记录应用
 
@@ -46,8 +50,9 @@ Everest 激活、覆盖与 Mod 组合语义
 - `pist/data`：随个人应用版本控制的统计规则、表格字段配置等应用数据；不属于公共规则库，也不包含归档子系统资源；
 - `pist.routes.models`、`pist.routes.store`：个人路线模型与持久化；
 - `pist.map_preview`：组合 Berries 基础能力的地图预览，附加路线编辑、实体屏蔽及初见统计；
-- `pist.records.schema`、`pist.records.store`：逐列记录存储、远端确认基准与读取快照；`pist.app_data` 负责应用组装；
+- `pist.records.schema`、`pist.records.store`：逐列记录存储、远端确认基准与读取快照；`pist.data_stores` 负责应用组装；
 - `pist.catalog_cache`：地图浏览器使用的、可丢弃且可重建的 Collab 扫描缓存；
+- `pist.catalog_fingerprint`：上述缓存使用的物理文件与 ZIP 条目签名，不属于公共内容接口或地图身份；
 - `pist.records.fields`、`pist.smartsheet.fields`：明确的记录字段映射与表格协议校验；
 - `pist.records.sync`：远端核对、冲突检测与写入回读确认，不依赖 UI；
 - `pist.records.lock`：同一数据目录的跨进程记录写入锁；
@@ -56,11 +61,15 @@ Everest 激活、覆盖与 Mod 组合语义
 - `pist.credentials`：凭据模型与存储、系统后端选择及 Windows 后端适配；
 - `pist.ui.maps`：个人记录工作流。
 
+地图浏览的 CLI 启动阶段负责扫描、构建 `CampaignCatalog` 和读取选定存档，再注入 `browse_maps()` 与 `MapBrowserApp`；浏览器构造函数不扫描游戏目录或组装领域目录。扫描报告只在扫描器与 Catalog 的构建阶段传递，不作为浏览器依赖。
+
 记录领域集中在 `pist.records`，调用方直接从职责所属子模块导入；包入口不提前加载统计、存储或网络边界。
 
 ## 实体审计应用
 
 - `pist.entities.audit`：审计数据库与证据模型；
+- 审计库按完整属性、地图元数据和来源增量积累知识，人工结论独立保存；不保留报告或扫描批次层，JSON 报告仅作为导入格式。地图浏览发现实际存在的待审查组合时先收录，再提示审查，不自动确认类别。
+- 审计候选列表标记“未完全覆盖”的实体；刷新时提示补审，但允许忽略提示继续预览并替换完整生成规则层，不针对已有规则特殊处理。
 - `pist.ui.entities`：审计交互、规则维护和 occurrence 预览。
 
 审计应用可以使用公共分类和预览能力，但公共模块不得读取审计数据库或导入审计 UI。

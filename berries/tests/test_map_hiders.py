@@ -16,10 +16,31 @@ HELPER_MAP = ContentPath('Maps/Helper/Test.bin')
 SCUG_MAP = ContentPath('Maps/ScugHelper/ScugHelperTest/Example.bin')
 
 
+@pytest.mark.parametrize(
+    ('mod', 'filename'),
+    (
+        (CHRONIA_HELPER, 'ChroniaHelper/MapHider.yaml'),
+        (SCUG_HELPER, 'modsettings-ScugHelper.celeste'),
+    ),
+)
+def test_undecodable_settings_retain_maps_and_report_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mod: str, filename: str
+) -> None:
+    monkeypatch.setenv('EVEREST_SAVEPATH', str(tmp_path))
+    path = tmp_path / 'Saves' / filename
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'\xff')
+    result = MapHiderRules(tmp_path).resolve((mod,))
+    assert result.rules == ()
+    assert len(result.issues) == 1
+    assert result.issues[0].failure.path == path
+    assert isinstance(result.issues[0].failure.cause, UnicodeDecodeError)
+
+
 def test_chronia_uses_builtin_targets_without_saved_configuration(tmp_path: Path) -> None:
     resolution = MapHiderRules(tmp_path).resolve((CHRONIA_HELPER,))
 
-    assert resolution.diagnostics == ()
+    assert resolution.issues == ()
     assert resolution.hides(source='AltSidesHelper', map_file=HELPER_MAP)
     assert resolution.hides(source='altsideshelper', map_file=HELPER_MAP)
 
@@ -44,8 +65,10 @@ def test_invalid_chronia_configuration_does_not_hide_and_reports_once(tmp_path: 
     resolution = MapHiderRules(tmp_path).resolve((CHRONIA_HELPER,))
 
     assert resolution.rules == ()
-    assert len(resolution.diagnostics) == 1
-    assert 'ChroniaHelper' in resolution.diagnostics[0]
+    assert len(resolution.issues) == 1
+    assert resolution.issues[0].rule.hider == CHRONIA_HELPER
+    assert resolution.issues[0].failure.path == path
+    assert resolution.issues[0].failure.stage == 'parse'
 
 
 def test_chronia_rejects_a_non_list_target_value(tmp_path: Path) -> None:
@@ -56,7 +79,7 @@ def test_chronia_rejects_a_non_list_target_value(tmp_path: Path) -> None:
     resolution = MapHiderRules(tmp_path).resolve((CHRONIA_HELPER,))
 
     assert resolution.rules == ()
-    assert len(resolution.diagnostics) == 1
+    assert len(resolution.issues) == 1
 
 
 def test_unknown_rule_does_not_cancel_other_confirmed_hiders(tmp_path: Path) -> None:
@@ -67,7 +90,7 @@ def test_unknown_rule_does_not_cancel_other_confirmed_hiders(tmp_path: Path) -> 
     resolution = MapHiderRules(tmp_path).resolve((CHRONIA_HELPER, HELPER_TEST_MAP_HIDER))
 
     assert resolution.hides(source='AltSidesHelper', map_file=HELPER_MAP)
-    assert len(resolution.diagnostics) == 1
+    assert len(resolution.issues) == 1
 
 
 def test_inactive_hider_does_not_read_stale_configuration(tmp_path: Path) -> None:
@@ -77,7 +100,7 @@ def test_inactive_hider_does_not_read_stale_configuration(tmp_path: Path) -> Non
 
     resolution = MapHiderRules(tmp_path).resolve((HELPER_TEST_MAP_HIDER,))
 
-    assert resolution.diagnostics == ()
+    assert resolution.issues == ()
     assert resolution.hides(source='AltSidesHelper', map_file=HELPER_MAP)
 
 
@@ -149,7 +172,7 @@ def test_scug_invalid_setting_is_unknown_not_a_forced_display(tmp_path: Path) ->
         map_file=SCUG_MAP,
     )
     assert resolution.hides(source='AltSidesHelper', map_file=HELPER_MAP)
-    assert len(resolution.diagnostics) == 1
+    assert len(resolution.issues) == 1
 
 
 def test_scug_rejects_a_non_mapping_settings_document(tmp_path: Path) -> None:
@@ -160,7 +183,7 @@ def test_scug_rejects_a_non_mapping_settings_document(tmp_path: Path) -> None:
     resolution = MapHiderRules(tmp_path).resolve((SCUG_HELPER,))
 
     assert resolution.rules == ()
-    assert len(resolution.diagnostics) == 1
+    assert len(resolution.issues) == 1
 
 
 def test_unknown_reader_name_is_a_rule_definition_error(tmp_path: Path) -> None:

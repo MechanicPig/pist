@@ -108,7 +108,7 @@
 - `roomCount`
 - `firstClearRooms`
 - `firstClearDeath`
-- `firstClearTime`
+- `firstClearTimeTicks`（十进制字符串，保留原始 ticks 精度）
 - `excluded`
 - `readOnly`
 - `initialMode`
@@ -288,7 +288,7 @@ GameBanana 查询属于公共包中的可选外部元数据能力。公共接口
 ## 当前实施说明
 
 - 公共只读预览位于 `berries.map_preview`，个人增强预览位于 `pist.map_preview`，后者同时支持预览与路线编辑。两者通过组合复用 Berries 的浏览器会话、地图导航、资源加载及基础画布；各自保留工作流相关的服务端协议和页面，不通过继承预览类扩展功能。
-- 原 `LocalDataStore` 已删除；`RecordStore`、`RouteStore` 与 `CatalogCache` 保持原数据库路径和原表结构，因此本次不涉及 schema 迁移。
+- `RecordStore`、`RouteStore` 与 `CatalogCache` 分别管理记录、路线和可重建的缓存；应用通过 `DataStores` 组装这些存储组件，数据库路径由应用配置决定。
 - 顶层 `berries` 只导出刻意选择的公共入口；`examples/list_maps.py` 展示了不依赖个人表格模型的第三方使用方式。
 - `berries` 安装后的本地覆盖使用 `BERRIES_DATA_DIR` 或平台用户数据目录；源码 workspace 中与 Pist 一同复用仓库根目录的 `.pist`。Pist 自己的本地数据路径和 `PIST_DATA_DIR` 语义不变。
 - 实体审计通过 `pist entities audit` 进入；内部领域与 Textual App 保持独立，但在仍属于 Pist 发行项目期间不增加单独的 console script。若未来拆成第三个 workspace 成员，再重新评估入口。

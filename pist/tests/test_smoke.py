@@ -1,11 +1,68 @@
+import asyncio
+from pathlib import Path
+from unittest.mock import Mock
+
 import pytest
 from pydantic import ValidationError
 
+from berries.game.campaigns import CampaignCatalog
+from berries.game.maps import ModMap
 from pist import __doc__
+from pist import __main__ as cli
 from pist.__main__ import build_parser
 from pist.credentials.store import TencentDocsCredentials
-from pist.smartsheet.client import extract_file_id
+from pist.settings import SettingsStore
+from pist.smartsheet.client import TencentSmartSheetClient, extract_file_id
 from pist.smartsheet.models import FieldsResult, TencentApiResp
+from test_support.save_docs import normal_save_xml
+
+
+def test_map_browse_cli_injects_completed_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod_dir = tmp_path / 'Mods' / 'Example'
+    maps_dir = mod_dir / 'Maps' / 'Example'
+    maps_dir.mkdir(parents=True)
+    (mod_dir / 'everest.yaml').write_text('- Name: Example\n  Version: 1.0.0\n', encoding='utf-8')
+    (maps_dir / 'Map.bin').touch()
+    dialog_dir = tmp_path / 'Content' / 'Dialog'
+    dialog_dir.mkdir(parents=True)
+    (dialog_dir / 'English.txt').write_bytes(b'\xff')
+    saves_dir = tmp_path / 'Saves'
+    saves_dir.mkdir()
+    (saves_dir / '0.celeste').write_text(normal_save_xml('<SaveData/>'), encoding='utf-8')
+    captured: list[CampaignCatalog] = []
+    captured_diagnostics: list[tuple[str, ...]] = []
+
+    async def capture_catalog(
+        campaign_catalog: CampaignCatalog, *, diagnostics: tuple[str, ...], **kwargs: object
+    ) -> None:
+        captured.append(campaign_catalog)
+        captured_diagnostics.append(diagnostics)
+
+    monkeypatch.setattr(cli, 'browse_maps', capture_catalog)
+    monkeypatch.setattr(cli, 'latest_inspection_report', lambda: None)
+    asyncio.run(
+        cli.browse_game_maps(
+            tmp_path,
+            0,
+            settings_store=SettingsStore(tmp_path / 'settings.json'),
+            sheet_client=Mock(spec=TencentSmartSheetClient),
+            sheet_source=None,
+            whitelist_path=None,
+            temporary_blacklist_path=None,
+            whitelist_full_override=False,
+        )
+    )
+    assert len(captured) == 1
+    assert type(captured[0]) is CampaignCatalog
+    assert len(captured_diagnostics) == 1
+    assert len(captured_diagnostics[0]) == 1
+    assert 'English.txt' in captured_diagnostics[0][0]
+    assert [camp.ref for camp in captured[0].campaigns] == ['Example']
+    loaded_map = next(captured[0].campaigns[0].iter_maps())
+    assert isinstance(loaded_map, ModMap)
+    assert loaded_map.mod.path == mod_dir
 
 
 def test_pkg_loads() -> None:

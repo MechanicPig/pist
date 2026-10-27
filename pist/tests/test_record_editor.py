@@ -1,22 +1,27 @@
 import asyncio
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 from sheet_factory import FakeSheet, make_sheet_fields
 from textual.app import App
-from textual.widgets import Button, Input, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
+from berries.game.duration import Duration
+from berries.gamebanana import GameBananaSubmission
 from pist.records.fields import RECORD_ATTRIBUTES
 from pist.records.models import MapRecord
 from pist.records.store import RecordSheetLink, RecordStore, RecordSyncState
 from pist.records.sync import RecordSyncService
+from pist.routes.models import MapRoute
 from pist.smartsheet.encoding import encode_record_values
 from pist.smartsheet.report import ManualRecordField
 from pist.ui.records.controller import RecordEditorController
 from pist.ui.records.editor import (
     RECORD_FIELD_ORDER,
+    AuthorSelectionScreen,
+    DatePickerScreen,
     RecordEditorScreen,
     RecordSaveModeScreen,
 )
@@ -27,6 +32,147 @@ NOW = datetime(2026, 10, 10, tzinfo=UTC)
 CSS = Path(__file__).parents[1] / 'src/pist/ui/styles/maps_browser.tcss'
 
 
+@pytest.mark.parametrize('size', ((80, 30), (120, 40)))
+def test_date_picker_month_buttons_are_visible_and_clickable(size: tuple[int, int]) -> None:
+    result: list[str | None] = []
+
+    async def run() -> None:
+        app = App[None](css_path=CSS)
+        async with app.run_test(size=size) as pilot:
+            screen = DatePickerScreen(date(2026, 12, 14))
+            await app.push_screen(screen, result.append)
+            await pilot.pause()
+            header = screen.query_one('#date-picker-header')
+            for button_id in ('date-picker-previous', 'date-picker-next'):
+                button = screen.query_one(f'#{button_id}', Button)
+                assert header.content_region.contains_region(button.region)
+            assert await pilot.click('#date-picker-next')
+            await pilot.pause()
+            assert str(screen.query_one('#date-picker-month', Static).content) == '2027 年 1 月'
+            assert await pilot.click('#date-picker-previous')
+            await pilot.pause()
+            assert str(screen.query_one('#date-picker-month', Static).content) == '2026 年 12 月'
+            assert await pilot.click('#date-picker-next')
+            await pilot.pause()
+            assert await pilot.click('#date-picker-day-1')
+            await pilot.pause()
+
+    asyncio.run(run())
+    assert result == ['2027-01-01']
+
+
+@pytest.mark.parametrize('submitter', ('Submitter', 'Alice'))
+def test_author_selection_includes_submitter_with_credits_and_deduplicates(submitter: str) -> None:
+    submission = GameBananaSubmission.model_validate(
+        {
+            'name': 'Example',
+            'submitter': submitter,
+            'latestUpdateAddedTime': '2026-09-04T12:00:00Z',
+            'credits': [{'groupName': 'Creator', 'authors': [{'name': 'Alice', 'role': 'Mapper'}]}],
+        }
+    )
+    result: list[tuple[str, ...] | None] = []
+
+    async def run() -> None:
+        app = App[None](css_path=CSS)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = AuthorSelectionScreen(submission)
+            await app.push_screen(screen, result.append)
+            await pilot.pause()
+            assert len(screen.query(Checkbox)) == 2
+            assert all(not item.value for item in screen.query(Checkbox))
+            assert '[Creator]' in str(screen.query_one('#record-author-0', Checkbox).label)
+            assert '[Mapper]' in str(screen.query_one('#record-author-0', Checkbox).label)
+            assert '[提交者]' in str(screen.query_one('#record-author-1', Checkbox).label)
+            assert submitter in str(screen.query_one('#record-author-1', Checkbox).label)
+            await pilot.click('#record-author-0')
+            await pilot.click('#record-author-1')
+            await pilot.click('#author-select-save')
+            await pilot.pause()
+
+    asyncio.run(run())
+    assert result == [tuple(dict.fromkeys(('Alice', submitter)))]
+
+
+@pytest.mark.parametrize('submitter', ('', ' '))
+@pytest.mark.parametrize('has_credits', (False, True))
+def test_author_selection_omits_blank_submitter(submitter: str, has_credits: bool) -> None:
+    submission = GameBananaSubmission.model_validate(
+        {
+            'name': 'Example',
+            'submitter': submitter,
+            'latestUpdateAddedTime': '2026-09-04T12:00:00Z',
+            'credits': [{'groupName': 'Creator', 'authors': [{'name': 'Alice'}]}]
+            if has_credits
+            else [],
+        }
+    )
+
+    async def run() -> None:
+        app = App[None](css_path=CSS)
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = AuthorSelectionScreen(submission)
+            await app.push_screen(screen)
+            await pilot.pause()
+            assert len(screen.query(Checkbox)) == int(has_credits)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('path', ('Maps/Other/Map.bin', 'maps/Example/Map.bin'))
+def test_route_notification_for_other_map_does_not_change_count(
+    record: MapRecord, path: str
+) -> None:
+    results: list[MapRecord | None] = []
+
+    async def run() -> None:
+        app = App[None](css_path=CSS)
+        current = record.model_copy(update={'map_file': 'Maps/Example/Map.bin', 'n_main_rooms': 2})
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = RecordEditorScreen(current)
+            app.push_screen(screen, results.append)
+            await pilot.pause()
+            screen.post_message(
+                RecordEditorScreen.RouteSaved(MapRoute(map_file=path, rooms=('a',)))
+            )
+            await pilot.pause()
+            control = screen.query_one(
+                f'#record-manual-{RECORD_FIELD_ORDER.index("主房间数")}', Input
+            )
+            assert control.value == '2'
+            assert await pilot.click('#record-confirm-save')
+            await pilot.pause()
+
+    asyncio.run(run())
+    assert len(results) == 1 and results[0] is not None and results[0].n_main_rooms == 2
+
+
+def test_map_browser_styles_keep_all_editor_fields_inside_grid(record: MapRecord) -> None:
+    class BrowserStyleApp(App[None]):
+        CSS_PATH = CSS
+
+    async def run() -> None:
+        app = BrowserStyleApp()
+        async with app.run_test(size=(200, 55)) as pilot:
+            screen = RecordEditorScreen(
+                record,
+                reference=('简介', 'Map description ' * 40),
+                author_source='Author',
+                edit_route=lambda: None,
+            )
+            await app.push_screen(screen)
+            await pilot.pause()
+            grid = screen.query_one('#record-fields')
+            for child in grid.children:
+                assert child.region.bottom <= grid.region.bottom
+            for title in RECORD_FIELD_ORDER:
+                control = screen.query_one(f'#record-manual-{RECORD_FIELD_ORDER.index(title)}')
+                assert control.region.height == 1
+            assert screen.query_one('#record-video-url').region.bottom <= grid.region.bottom
+
+    asyncio.run(run())
+
+
 def test_one_line_text_scrolls_with_cursor_without_scrollbars(record: MapRecord) -> None:
     async def run() -> None:
         app = App[None]()
@@ -34,9 +180,7 @@ def test_one_line_text_scrolls_with_cursor_without_scrollbars(record: MapRecord)
             screen = RecordEditorScreen(record.model_copy(update={'notes': '长备注' * 80}))
             await app.push_screen(screen)
             await pilot.pause()
-            field = screen._manual_field('备注')
-            assert field is not None
-            control = screen.query_one(f'#{screen._manual_field_id(field)}', Input)
+            control = screen.query_one(f'#record-manual-{RECORD_FIELD_ORDER.index("备注")}', Input)
             control.focus()
             await pilot.press('end')
             await pilot.pause()
@@ -79,27 +223,30 @@ def test_sid_stays_one_line_and_read_only_with_cursor_navigation(record: MapReco
     asyncio.run(run())
 
 
-def test_tags_use_one_line_input_and_preserve_individual_values(record: MapRecord) -> None:
+@pytest.mark.parametrize(
+    ('edited', 'expected'),
+    [(None, ('a,b', '特殊')), ('"a,b", 新标签, 新标签', ('a,b', '新标签')), ('', ())],
+)
+def test_tags_use_one_line_input_and_preserve_individual_values(
+    record: MapRecord, edited: str | None, expected: tuple[str, ...]
+) -> None:
+    results: list[MapRecord | None] = []
+
     async def run() -> None:
         app = App[None]()
         async with app.run_test(size=(120, 40)) as pilot:
             screen = RecordEditorScreen(record.model_copy(update={'tags': ('a,b', '特殊')}))
-            await app.push_screen(screen)
+            app.push_screen(screen, results.append)
             await pilot.pause()
-            field = screen._manual_field('标签')
-            assert field is not None
-            control = screen.query_one(f'#{screen._manual_field_id(field)}', Input)
+            control = screen.query_one(f'#record-manual-{RECORD_FIELD_ORDER.index("标签")}', Input)
             assert control.value == '"a,b",特殊'
-            values = screen._manual_values()
-            assert values is not None and values['tags'] == ('a,b', '特殊')
-            control.value = '"a,b", 新标签, 新标签'
-            values = screen._manual_values()
-            assert values is not None and values['tags'] == ('a,b', '新标签')
-            control.value = ''
-            values = screen._manual_values()
-            assert values is not None and values['tags'] == ()
+            if edited is not None:
+                control.value = edited
+            assert await pilot.click('#record-confirm-save')
+            await pilot.pause()
 
     asyncio.run(run())
+    assert len(results) == 1 and results[0] is not None and results[0].tags == expected
 
 
 @pytest.mark.parametrize('size', ((80, 24), (120, 40), (180, 60)))
@@ -170,7 +317,7 @@ def test_editor_labels_and_order_are_independent_of_remote_column_order(
             ]
             assert all(section.content_region.height == 1 for section in sections)
             assert [str(label.content) for label in labels] == expected
-            assert set(RECORD_FIELD_ORDER) == set(RECORD_ATTRIBUTES) - {'更新时间'}
+            assert set(RECORD_FIELD_ORDER) == set(RECORD_ATTRIBUTES) - {'更新时间', '编号'}
             assert all(label.region.height == 1 for label in labels)
             assert all(control.styles.margin == (0, 0, 0, 0) for control in screen.query(Input))
             for control in screen.query('.record-list-control').results(TextArea):
@@ -184,17 +331,17 @@ def test_editor_labels_and_order_are_independent_of_remote_column_order(
             grid = screen.query_one('#record-fields')
             assert grid.has_class('record-fields-narrow') is (size[0] < 120)
             # Text controls still refer to protocol titles, not the display labels.
-            field = screen._manual_field('Mod元数据名')
-            assert field is not None
-            assert screen.query_one(f'#{screen._manual_field_id(field)}', Input).value == 'Example'
+            assert (
+                screen.query_one(
+                    f'#record-manual-{RECORD_FIELD_ORDER.index("Mod元数据名")}', Input
+                ).value
+                == 'Example'
+            )
             if size[0] >= 120:
                 for difficulty, tier in (('体感难度', '难度子阶'), ('标注难度', '标注难度子阶')):
-                    fields = [screen._manual_field(title) for title in (difficulty, tier)]
-                    assert all(field is not None for field in fields)
                     controls = [
-                        screen.query_one(f'#{screen._manual_field_id(field)}')
-                        for field in fields
-                        if field is not None
+                        screen.query_one(f'#record-manual-{RECORD_FIELD_ORDER.index(title)}')
+                        for title in (difficulty, tier)
                     ]
                     assert controls[0].region.y == controls[1].region.y
 
@@ -209,7 +356,7 @@ def record() -> MapRecord:
         mod_metadata_name='Example',
         map_file='Maps/Map.bin',
         save_slot=0,
-        time_played='0:01:00',
+        time_played=Duration.from_dotnet_ticks(600000000),
         status='进行中',
         notes='A',
     )
@@ -241,15 +388,24 @@ def test_uncertain_add_recovery_requires_explicit_choice_and_preserves_protectio
             app, store, client=client, source='source', manual_fields=()
         )
         async with app.run_test(size=size) as pilot:
-            worker = app.run_worker(controller._prepare(saved))
+            worker = app.run_worker(controller.sync_record(saved))
             await pilot.pause()
             assert isinstance(app.screen, RecordAddRecoveryScreen)
             assert app.screen.query_one('#record-add-bind', Button).disabled
             assert app.screen.query_one('#record-add-target', Select).value is Select.NULL
             if choice == 'bind':
                 assert app.screen.query_one('#record-add-retry', Button).disabled
-                app.screen.query_one('#record-add-target', Select).value = 'candidate'
+                target = app.screen.query_one('#record-add-target', Select)
+                target.scroll_visible(immediate=True)
                 await pilot.pause()
+                for _ in range(10):
+                    if app.focused is target:
+                        break
+                    await pilot.press('tab')
+                assert app.focused is target
+                await pilot.press('space', 'end', 'enter')
+                await pilot.pause()
+                assert target.value == 'candidate'
                 assert await pilot.click('#record-add-bind')
             elif choice in ('retry', 'cancel-retry'):
                 await pilot.click('#record-add-retry')
@@ -267,22 +423,20 @@ def test_uncertain_add_recovery_requires_explicit_choice_and_preserves_protectio
                 await pilot.click(f'#record-add-{choice}')
             result = await asyncio.wait_for(worker.wait(), timeout=5)
             if choice == 'bind':
-                assert result is not None and result[0] is not None
-                assert result[0].differences == ()
-                assert store.sheet_links(saved.local_id)[0].confirmed_values is None
+                assert result is True
+                assert store.sheet_links(saved.local_id)[0].record_id == 'candidate'
+                assert store.sheet_links(saved.local_id)[0].confirmed_values is not None
             elif choice == 'retry':
-                assert result is not None and result[0] is not None
-                assert result[0].remote is None
-            elif choice == 'local':
-                assert result is not None and result[0] is None and result[1] is not None
+                assert result is True
+                assert store.sheet_links(saved.local_id)
             else:
-                assert result == (None, None)
+                assert result is False
 
     asyncio.run(run())
     assert bool(store.sheet_add_attempts(saved.local_id)) == (
         choice in ('cancel', 'local', 'cancel-retry')
     )
-    assert len(client.writes) == 1  # Recovery itself never writes remote data.
+    assert len(client.writes) == (2 if choice == 'retry' else 1)
 
 
 @pytest.mark.parametrize('bind', (False, True))
@@ -309,6 +463,9 @@ def test_editing_resumes_normal_conflict_and_save_flow_after_recovery(
             await pilot.pause()
             await pilot.click('#record-save-update')
             await pilot.pause()
+            assert isinstance(app.screen, RecordEditorScreen)
+            await pilot.click('#record-confirm-save')
+            await pilot.pause()
             assert isinstance(app.screen, RecordAddRecoveryScreen)
             if bind:
                 app.screen.query_one('#record-add-target', Select).value = 'candidate'
@@ -322,9 +479,8 @@ def test_editing_resumes_normal_conflict_and_save_flow_after_recovery(
                 await pilot.pause()
                 await pilot.click('#record-add-retry-confirmed')
             await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
-            await pilot.click('#record-confirm-save')
             await asyncio.wait_for(worker.wait(), timeout=5)
+            await asyncio.wait_for(controller.background_sync.wait(), timeout=5)
 
     asyncio.run(run())
     assert saved.local_id is not None
@@ -339,8 +495,10 @@ def test_storage_failure_is_visible_without_writing_remote_or_crashing_worker(
 ) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
     with store.connect() as conn:
-        conn.execute("""CREATE TRIGGER reject_record_insert BEFORE INSERT ON records BEGIN
-            SELECT RAISE(ABORT, 'simulated storage failure'); END""")
+        conn.execute(
+            """CREATE TRIGGER reject_record_insert BEFORE INSERT ON records BEGIN
+            SELECT RAISE(ABORT, 'simulated storage failure'); END"""
+        )
     client = FakeSheet()
     messages: list[tuple[str, str]] = []
 
@@ -381,7 +539,12 @@ def test_cross_slot_save_adds_by_default_or_explicitly_overwrites_without_accumu
     store = RecordStore(tmp_path / 'records.sqlite3')
     saved = store.load(store.save(record.model_copy(update={'deaths': 2})))
     current = record.model_copy(
-        update={'save_slot': 1, 'time_played': '0:02:00', 'deaths': 3, 'notes': 'new experience'}
+        update={
+            'save_slot': 1,
+            'time_played': Duration.from_dotnet_ticks(1200000000),
+            'deaths': 3,
+            'notes': 'new experience',
+        }
     )
 
     async def run() -> None:
@@ -406,7 +569,7 @@ def test_cross_slot_save_adds_by_default_or_explicitly_overwrites_without_accumu
 
         latest = store.load(1 if choice == 'update' else 2)
         assert latest.save_slot == 1
-        assert latest.time_played == '0:02:00'
+        assert latest.time_played == Duration.from_dotnet_ticks(1200000000)
         assert latest.deaths == 3
         if choice == 'update':
             assert latest.record_number == saved.record_number
@@ -436,11 +599,12 @@ def test_offline_consent_is_reused_only_within_current_controller(
         async with app.run_test(size=(120, 40)) as pilot:
             app.run_worker(controller.edit(record, editor))
             await pilot.pause()
+            assert isinstance(app.screen, RecordEditorScreen)
+            assert client.reads == 0
+            await pilot.click('#record-confirm-save')
+            await pilot.pause()
             assert isinstance(app.screen, RecordOfflineScreen)
             await pilot.click('#record-offline-local')
-            await pilot.pause()
-            assert isinstance(app.screen, RecordEditorScreen)
-            await pilot.click('#record-confirm-save')
             await pilot.pause()
             assert store.sync_state(1) is RecordSyncState.PENDING
             assert controller.allow_offline
@@ -497,7 +661,9 @@ def test_default_sync_rechecks_remote_changes_and_obeys_choice(
             await pilot.pause()
             assert isinstance(app.screen, RecordConflictScreen)
             assert client.writes == []
-            assert store.load(1) == saved
+            assert store.load(1).video_url == 'https://example.com/video'
+            assert store.sync_state(1) is RecordSyncState.PENDING
+            assert store.sheet_links(1)[0].confirmed_values == values
             await pilot.click(f'#record-conflict-{choice}')
             await pilot.pause()
             if choice in {'local', 'remote'}:
@@ -515,7 +681,8 @@ def test_default_sync_rechecks_remote_changes_and_obeys_choice(
                 assert client.rows['target']['备注'] == [{'text': 'remote change'}]
                 assert client.writes == []
             else:
-                assert store.load(1) == saved
+                assert store.load(1).video_url == 'https://example.com/video'
+                assert store.sync_state(1) is RecordSyncState.PENDING
                 assert client.writes == []
 
     asyncio.run(run())
@@ -535,24 +702,25 @@ def test_schema_failure_permits_local_save_but_never_remote_write(
             app, store, client=client, source='source', manual_fields=()
         )
         async with app.run_test(size=(120, 40)) as pilot:
-            app.run_worker(controller.edit(record, editor))
+            worker = app.run_worker(controller.edit(record, editor))
+            await pilot.pause()
+            assert isinstance(app.screen, RecordEditorScreen)
+            assert client.reads == 0
+            assert await pilot.click('#record-confirm-save')
+            await asyncio.wait_for(worker.wait(), timeout=5)
             await pilot.pause()
             assert isinstance(app.screen, RecordOfflineScreen)
             await pilot.click(f'#{button}')
             await pilot.pause()
-            if button == 'record-offline-local':
-                assert isinstance(app.screen, RecordEditorScreen)
-                await pilot.click('#record-confirm-save')
-                await pilot.pause()
-                assert store.sync_state(1) is RecordSyncState.PENDING
+            assert store.sync_state(1) is RecordSyncState.PENDING
             assert not controller.allow_offline
 
     asyncio.run(run())
-    assert len(store.matching_ids(record)) == (1 if button == 'record-offline-local' else 0)
+    assert len(store.matching_ids(record)) == 1
     assert client.writes == []
 
 
-def test_conflict_at_open_can_be_saved_locally_without_changing_baseline(
+def test_existing_conflict_is_deferred_until_save_and_keeps_local_changes_without_baseline_update(
     tmp_path: Path, record: MapRecord
 ) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
@@ -580,12 +748,13 @@ def test_conflict_at_open_can_be_saved_locally_without_changing_baseline(
             await pilot.pause()
             await pilot.click('#record-save-update')
             await pilot.pause()
-            assert isinstance(app.screen, RecordConflictScreen)
-            await pilot.click('#record-conflict-only-local')
-            await pilot.pause()
             assert isinstance(app.screen, RecordEditorScreen)
+            assert client.reads == 0
             app.screen.query_one('#record-video-url', Input).value = 'https://example.com/video'
             await pilot.click('#record-confirm-save')
+            await pilot.pause()
+            assert isinstance(app.screen, RecordConflictScreen)
+            await pilot.click('#record-conflict-only-local')
             await pilot.pause()
         assert store.load(1).video_url == 'https://example.com/video'
         assert store.sync_state(1) is RecordSyncState.PENDING

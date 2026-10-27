@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from catalog_factory import make_campaign_catalog
 
-from berries.game.mods import ModScanReport
 from pist import __main__ as cli
 from pist.credentials.store import CredentialStore
 from pist.records.lock import RecordWriterBusyError, record_writer_lock
@@ -86,14 +86,15 @@ def test_busy_record_entries_stop_before_opening_ui_or_reading_records(
     monkeypatch.setattr(browser, 'MapBrowserApp', unexpected_access)
     monkeypatch.setattr(cli, 'RecordStore', unexpected_access)
     monkeypatch.setattr(record_browser, 'RecordStore', unexpected_access)
-    report = ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[])
+    campaign_catalog = make_campaign_catalog(mods=[], game_dir=tmp_path)
+    if entry == 'browser':
+        operation = browser.browse_maps(campaign_catalog)
+    elif entry == 'sync':
+        operation = cli.sync_saved_record(Mock(spec=CredentialStore), 'source', 1)
+    else:
+        operation = record_browser.browse_records(settings_store=Mock(spec=SettingsStore))
     with record_writer_lock(tmp_path), pytest.raises(RecordWriterBusyError):
-        if entry == 'browser':
-            asyncio.run(browser.browse_maps(report))
-        elif entry == 'sync':
-            asyncio.run(cli.sync_saved_record(Mock(spec=CredentialStore), 'source', 1))
-        else:
-            asyncio.run(record_browser.browse_records(settings_store=Mock(spec=SettingsStore)))
+        asyncio.run(operation)
 
 
 def test_browser_holds_record_lock_until_ui_exits(
@@ -111,7 +112,7 @@ def test_browser_holds_record_lock_until_ui_exits(
                 pytest.fail('The browser released its lock before exiting')
 
     monkeypatch.setattr(browser, 'MapBrowserApp', FakeBrowser)
-    report = ModScanReport(mods_dir=str(tmp_path / 'Mods'), disabled_filenames=[], mods=[])
-    asyncio.run(browser.browse_maps(report))
+    campaign_catalog = make_campaign_catalog(mods=[], game_dir=tmp_path)
+    asyncio.run(browser.browse_maps(campaign_catalog))
     with record_writer_lock(tmp_path):
         pass

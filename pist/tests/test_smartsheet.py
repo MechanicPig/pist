@@ -33,6 +33,68 @@ def test_read_main_sheet_reads_every_page(sync_session: _SyncSession) -> None:
     assert sync_session.writes == []
 
 
+def test_shared_session_pins_target_but_reads_live_schema_and_rows(
+    sync_session: _SyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions: list[_SyncSession] = []
+
+    def factory(**_: object) -> _SyncSession:
+        session = sync_session if not sessions else _SyncSession()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(backend, 'ClientSession', factory)
+    client = backend.TencentSmartSheetClient(cast(CredentialStore, _Store()))
+
+    async def run() -> None:
+        async with client:
+            assert sessions == []  # Missing credentials must not prevent starting a local UI.
+            await client.read_main_sheet('encoded-id')
+            assert not sync_session.closed
+            sync_session.field_types['新增字段'] = 1
+            sync_session.records = [_remote_record('new-row')]
+            fresh = await client.read_main_sheet('https://docs.qq.com/smartsheet/encoded-id')
+            assert fresh.records[0].record_id == 'new-row'
+            assert fresh.fields.fields[-1].field_title == '新增字段'
+            assert len(sessions) == 1
+            assert sync_session.gets == [backend.DRIVE_API_URL, 'files/$file/sheets']
+            with pytest.raises(RuntimeError, match='重复进入'):
+                await client.__aenter__()
+        assert sync_session.closed
+        await client.read_main_sheet('encoded-id')
+        assert len(sessions) == 2 and sessions[1].closed
+        assert sessions[1].gets == [backend.DRIVE_API_URL, 'files/$file/sheets']
+
+    asyncio.run(run())
+
+
+def test_failed_shared_read_forgets_target_without_retry_and_closes_session(
+    sync_session: _SyncSession,
+) -> None:
+    client = backend.TencentSmartSheetClient(cast(CredentialStore, _Store()))
+
+    async def run() -> None:
+        async with client:
+            await client.read_main_sheet('encoded-id')
+            sync_session.responses[models.SmartSheetOperation.GET_RECORDS] = {
+                'ret': 1,
+                'msg': 'Synthetic failure',
+                'data': {},
+            }
+            with pytest.raises(RuntimeError, match='Synthetic failure'):
+                await client.read_main_sheet('encoded-id')
+            del sync_session.responses[models.SmartSheetOperation.GET_RECORDS]
+            await client.read_main_sheet('encoded-id')
+            assert len(sync_session.gets) == 4
+            queries = [payload for _, payload in sync_session.posts if 'getRecords' in payload]
+            assert len(queries) == 3
+            raise ValueError('End workflow')
+
+    with pytest.raises(ValueError, match='End workflow'):
+        asyncio.run(run())
+    assert sync_session.closed
+
+
 @pytest.mark.parametrize('n_records', (1, 100, 101))
 def test_read_selected_ids_filters_every_page(sync_session: _SyncSession, n_records: int) -> None:
     sync_session.records = [_remote_record(f'r{i}', name=f'Map{i}') for i in range(200)]
@@ -75,12 +137,9 @@ def test_write_record_uses_exact_id_without_name_matching(sync_session: _SyncSes
     snapshot = models.MainSheetSnapshot(
         file_id='$file', sheet_id='main', fields=models.FieldsResult(fields=[]), records=()
     )
-    assert (
-        asyncio.run(
-            client.write_record(snapshot, {'备注': [{'text': 'note'}]}, record_id='explicit-id')
-        )
-        == 'explicit-id'
-    )
+    assert asyncio.run(
+        client.write_record(snapshot, {'备注': [{'text': 'note'}]}, record_id='explicit-id')
+    ) == models.SmartSheetRecord(record_id='explicit-id', values={'备注': [{'text': 'note'}]})
     assert sync_session.writes == [
         {
             'updateRecords': {
@@ -226,33 +285,15 @@ def test_page_options_rejects_limit_outside_the_api_range(limit: int) -> None:
         models.PageOptions(offset=0, limit=limit)
 
 
-def test_record_pagination_reads_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_pagination_reads_all_pages(sync_session: _SyncSession) -> None:
     client = backend.TencentSmartSheetClient(cast(CredentialStore, _Store()))
-    calls: list[models.PageOptions] = []
-
-    async def get_records(
-        _session: object,
-        _endpoint: str,
-        operation: models.SmartSheetOperation,
-        options: models.PageOptions,
-        result_type: type[models.RecordsResult],
-    ) -> models.RecordsResult:
-        assert operation is models.SmartSheetOperation.GET_RECORDS
-        assert result_type is models.RecordsResult
-        calls.append(options)
-        offset = options.offset
-        await asyncio.sleep(0)
-        return models.RecordsResult.model_validate(
-            {'records': [{'recordID': f'r{i}'} for i in range(offset, min(offset + 100, 101))]}
-        )
-
-    monkeypatch.setattr(client, '_post_operation', get_records)
-
-    records = asyncio.run(client._all_records(cast(ClientSession, object()), 'sheet'))
-
-    assert calls == [
-        models.RecordReadOptions(offset=0, limit=100),
-        models.RecordReadOptions(offset=100, limit=100),
+    sync_session.records = [_remote_record(f'r{i}') for i in range(101)]
+    records = asyncio.run(client.read_main_sheet('encoded-id'))
+    assert [
+        payload['getRecords'] for _, payload in sync_session.posts if 'getRecords' in payload
+    ] == [
+        {'offset': 0, 'limit': 100},
+        {'offset': 100, 'limit': 100},
     ]
     assert len(records.records) == 101
 
@@ -309,8 +350,14 @@ def test_incomplete_record_does_not_hide_explicitly_edited_statistics(status: st
     ],
 )
 def test_field_value_encoding_rejects_incompatible_types(value: object, field_type: int) -> None:
+    record = MapRecord(created_at=datetime(2026, 10, 10, tzinfo=UTC), map_name='Map')
+    # Deliberately malformed in-memory values must still fail at the write boundary.
+    record = record.model_copy(update={'rating': value})
+    fields = models.FieldsResult.model_validate(
+        {'fields': [{'fieldID': 'rating', 'fieldTitle': '评分', 'fieldType': field_type}]}
+    )
     with pytest.raises(ValueError, match='Unsupported value'):
-        encoding._encode_field_value(cast(encoding.SmartSheetSourceValue, value), field_type)
+        encoding.encode_record_values(record, fields)
 
 
 def test_inspect_uses_one_aiohttp_session_for_all_smart_sheet_operations(
@@ -370,11 +417,16 @@ class _SyncSession(_Session):
         }
         self.responses: dict[models.SmartSheetOperation, models.JsonObject] = {}
         self.closed = False
+        self.gets: list[str] = []
+
+    async def close(self) -> None:
+        self.closed = True
 
     async def __aexit__(self, *_: object) -> None:
         self.closed = True
 
     def get(self, url: str, *, params: dict[str, object] | None = None) -> _Response:
+        self.gets.append(url)
         if url == backend.DRIVE_API_URL:
             return super().get(url, params=params)
         assert url == 'files/$file/sheets'
@@ -408,9 +460,21 @@ class _SyncSession(_Session):
                     'total': len(selected),
                 }
             case models.SmartSheetOperation.ADD_RECORDS:
-                result = {'records': [{'recordID': 'created-id'}]}
+                writes = models.RecordWriteOptions.model_validate(json[operation])
+                result = {
+                    'records': [
+                        {'recordID': 'created-id', 'values': write.values}
+                        for write in writes.records
+                    ]
+                }
             case models.SmartSheetOperation.UPDATE_RECORDS:
-                result = {'records': []}
+                writes = models.RecordWriteOptions.model_validate(json[operation])
+                result = {
+                    'records': [
+                        {'recordID': write.record_id, 'values': write.values}
+                        for write in writes.records
+                    ]
+                }
             case _:
                 raise AssertionError(f'Unexpected operation: {operation}')
         return _Response({'ret': 0, 'data': {operation: result}})
@@ -484,15 +548,15 @@ def test_write_record_adds_encoded_values_without_name_matching(
     client = backend.TencentSmartSheetClient(cast(CredentialStore, _Store()))
     snapshot = asyncio.run(client.read_main_sheet(file_id))
     sync_session.posts.clear()
-    assert (
-        asyncio.run(
-            client.write_record(
-                snapshot,
-                encoding.encode_record_values(record_to_sync, snapshot.fields),
-                record_id=None,
-            )
+    assert asyncio.run(
+        client.write_record(
+            snapshot,
+            encoding.encode_record_values(record_to_sync, snapshot.fields),
+            record_id=None,
         )
-        == 'created-id'
+    ) == models.SmartSheetRecord(
+        record_id='created-id',
+        values=encoding.encode_record_values(record_to_sync, snapshot.fields),
     )
     assert sync_session.writes == [
         {
@@ -535,15 +599,14 @@ def test_read_all_pages_then_update_an_explicit_record_id(
     sync_session.records[1] = _remote_record('other-mod-id', mod='OtherMod')
     client = backend.TencentSmartSheetClient(cast(CredentialStore, _Store()))
     snapshot = asyncio.run(client.read_main_sheet('$file'))
-    assert (
-        asyncio.run(
-            client.write_record(
-                snapshot,
-                encoding.encode_record_values(record_to_sync, snapshot.fields),
-                record_id='target-id',
-            )
+    assert asyncio.run(
+        client.write_record(
+            snapshot,
+            encoding.encode_record_values(record_to_sync, snapshot.fields),
+            record_id='target-id',
         )
-        == 'target-id'
+    ) == models.SmartSheetRecord(
+        record_id='target-id', values=encoding.encode_record_values(record_to_sync, snapshot.fields)
     )
     assert len(sync_session.writes) == 1
     write = sync_session.writes[0]

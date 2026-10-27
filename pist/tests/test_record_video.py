@@ -6,7 +6,7 @@ import pytest
 from textual.app import App
 from textual.widgets import Input
 
-from pist.records.models import MapRecord, merge_saved_record
+from pist.records.models import MapRecord
 from pist.records.store import RecordStore
 from pist.ui.records.editor import RecordEditorScreen
 
@@ -48,7 +48,7 @@ def test_video_link_is_retained_when_refreshing_game_stats_and_persisting(tmp_pa
         video_url='https://example.com/video',
     )
     current = saved.model_copy(update={'video_url': None, 'deaths': 10})
-    merged = merge_saved_record(current, saved)
+    merged = current.with_saved_fields(saved)
     assert merged.video_url == saved.video_url
     assert merged.deaths == 10
     store = RecordStore(tmp_path / 'records.sqlite3')

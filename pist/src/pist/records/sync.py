@@ -7,11 +7,19 @@ from typing import Protocol
 from aiohttp import ClientError
 from pydantic import JsonValue
 
-from pist.records.models import MapRecord
-from pist.records.store import RecordSheetAddAttempt, RecordSheetLink, RecordStore
 from pist.smartsheet.encoding import encode_record_values
 from pist.smartsheet.fields import SheetFields, load_sheet_fields
-from pist.smartsheet.models import JsonObject, MainSheetSnapshot, RecordWrite, SmartSheetRecord
+from pist.smartsheet.models import (
+    FieldsResult,
+    JsonObject,
+    MainSheetSnapshot,
+    RecordWrite,
+    SmartSheetRecord,
+)
+from pist.smartsheet.response import needs_option_refresh, submitted_response_values
+
+from .models import MapRecord
+from .store import RecordSheetAddAttempt, RecordSheetLink, RecordStore
 
 
 class RecordSheetClient(Protocol):
@@ -21,13 +29,15 @@ class RecordSheetClient(Protocol):
         self, source: str, *, record_ids: tuple[str, ...] | None = None
     ) -> MainSheetSnapshot: ...
 
+    async def read_fields(self, file_id: str, sheet_id: str) -> FieldsResult: ...
+
     async def write_record(
         self, snapshot: MainSheetSnapshot, values: JsonObject, *, record_id: str | None
-    ) -> str: ...
+    ) -> SmartSheetRecord: ...
 
     async def update_records(
         self, snapshot: MainSheetSnapshot, records: tuple[RecordWrite, ...]
-    ) -> None: ...
+    ) -> tuple[SmartSheetRecord, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +95,7 @@ class RecordSyncResult:
 
 @dataclass(frozen=True, slots=True)
 class RecordSubmission:
-    """A remotely accepted write awaiting readback confirmation."""
+    """One saved public projection and its explicit remote write target."""
 
     record: MapRecord
     link: RecordSheetLink
@@ -153,6 +163,13 @@ class RecordSyncService:
         )
         if links and link is None:
             raise ValueError('此记录关联的是其他表格，不能自动写入当前表格。')
+        if (
+            link is not None
+            and link.confirmed_values is not None
+            and '编号' in link.confirmed_values
+            and not any(field.field_title == '编号' for field in snapshot.fields.fields)
+        ):
+            issues = (*issues, '缺少已确认同步的字段：编号，不能忽略编号确认同步。')
         remote = None
         if link is not None:
             matches = [row for row in snapshot.records if row.record_id == link.record_id]
@@ -266,35 +283,39 @@ class RecordSyncService:
         """Adopt public remote contents without replacing private record identity."""
         if check.issues or check.remote is None:
             raise ValueError('没有可采用的兼容远端记录。')
+        if any(difference.title == '编号' for difference in check.differences):
+            raise ValueError(
+                '远端编号已变化，请采用本地编号或先在本地调整顺序，不能逐条采用远端编号。'
+            )
         adopted = self.fields.apply_remote(record, check.remote.values, check.snapshot.fields)
         if record.map_file is not None and adopted.mod_metadata_name != record.mod_metadata_name:
             raise ValueError('远端 Mod 元数据名已变化，涉及地图身份调整，不能自动采用。')
         return adopted
 
-    async def save(self, record: MapRecord, check: RecordSyncCheck) -> RecordSyncResult:
+    async def save(
+        self, record: MapRecord, check: RecordSyncCheck | None = None
+    ) -> RecordSyncResult:
         """Recheck and save locally, confirming equal remote data or verifying a write.
 
+        Without a prior reviewed check, reconcile against the last confirmed baseline.
         Failures after the local save leave it pending. A returned row ID is retained
         even if verification fails, so subsequent attempts update rather than add.
         """
         latest = await self.check(record, expected=check)
-        submission = await self._submit_checked(record, latest)
-        if isinstance(submission, RecordSyncResult):
-            return submission
-        try:
-            self.confirm_submission(
-                submission, await self.read_snapshot(record_ids=(submission.link.record_id,))
-            )
-        except (ClientError, OSError, RuntimeError, TypeError, ValueError) as error:
-            return RecordSyncResult(submission.record, False, str(error))
-        return RecordSyncResult(submission.record, True)
+        return await self.submit_checked(record, latest)
 
-    async def _submit_checked(
+    async def submit_checked(
         self,
         record: MapRecord,
         latest: RecordSyncCheck,
-    ) -> RecordSubmission | RecordSyncResult:
-        """Save a freshly reconciled record and submit only differing public data."""
+    ) -> RecordSyncResult:
+        """Save and submit using a freshly reconciled check, without another read.
+
+        The caller must obtain this check for this record from check() or
+        check_snapshot() immediately before submission. This is the shared
+        single/batch commit step, not a way to bypass conflict review. Issues and
+        unresolved differences are rejected before saving or writing anything.
+        """
         if latest.issues:
             raise ValueError('\n'.join(latest.issues))
         if latest.differences:
@@ -302,6 +323,11 @@ class RecordSyncService:
         values = encode_record_values(record, self.fields.writable_fields(latest.snapshot.fields))
         saved = self.store.load(self.store.save(record))
         assert saved.local_id is not None
+        if saved.record_number != record.record_number:
+            # Starting a record allocates its number during save; publish the saved projection.
+            values = encode_record_values(
+                saved, self.fields.writable_fields(latest.snapshot.fields)
+            )
         if latest.remote is not None:
             written = self.fields.comparable(values, latest.snapshot.fields)
             actual = self.fields.comparable(latest.remote.values, latest.snapshot.fields)
@@ -332,26 +358,32 @@ class RecordSyncService:
             )
         association_saved = latest.remote is not None
         try:
-            remote_id = await self.client.write_record(
+            response = await self.client.write_record(
                 latest.snapshot,
                 values,
                 record_id=None if latest.remote is None else latest.remote.record_id,
             )
+            if not response.record_id:
+                raise ValueError('写入响应缺少记录 ID，不能确认成功。')
+            if latest.remote is not None and response.record_id != latest.remote.record_id:
+                raise ValueError('写入响应返回了不同的记录 ID，不能确认成功。')
             link = RecordSheetLink(
                 local_id=saved.local_id,
                 file_id=latest.snapshot.file_id,
                 sheet_id=latest.snapshot.sheet_id,
-                record_id=remote_id,
+                record_id=response.record_id,
             )
             if latest.remote is None:
                 self.store.link_sheet_record(link)
                 association_saved = True
+            checked = await self.response_schema(latest.snapshot, ((values, response),))
+            self.confirm_submission(RecordSubmission(saved, link, values), response, checked)
         except (ClientError, OSError, RuntimeError, TypeError, ValueError) as error:
             message = str(error)
             if not association_saved:
                 message += '；新增结果尚未确认，请人工核对并关联远端记录，不能直接重试新增。'
             return RecordSyncResult(saved, False, message)
-        return RecordSubmission(saved, link, values)
+        return RecordSyncResult(saved, True)
 
     def matches_remote(self, record: MapRecord, check: RecordSyncCheck) -> bool:
         """Whether all supported writable cells already equal the local projection."""
@@ -362,20 +394,49 @@ class RecordSyncService:
         actual = self.fields.comparable(check.remote.values, check.snapshot.fields)
         return all(written[title] == actual[title] for title in values)
 
-    def confirm_submission(self, submission: RecordSubmission, verified: MainSheetSnapshot) -> None:
-        """Confirm one accepted write against a readback, preserving pending state on mismatch."""
-        link, saved, values = submission.link, submission.record, submission.values
-        if (verified.file_id, verified.sheet_id) != (link.file_id, link.sheet_id):
-            raise ValueError('写入后读取到了不同的表格。')
-        if issues := self.fields.issues(verified.fields):
+    async def response_schema(
+        self, checked: MainSheetSnapshot, responses: tuple[tuple[JsonObject, SmartSheetRecord], ...]
+    ) -> MainSheetSnapshot:
+        """Refresh schema at most once when a write introduces unknown select options."""
+        if not any(
+            needs_option_refresh(response.values, values, checked.fields)
+            for values, response in responses
+        ):
+            return checked
+        fields = await self.client.read_fields(checked.file_id, checked.sheet_id)
+        if issues := self.fields.issues(fields):
             raise ValueError('\n'.join(issues))
-        rows = [row for row in verified.records if row.record_id == link.record_id]
-        if len(rows) != 1:
-            raise ValueError('无法读取刚提交的记录，尚不能确认同步成功。')
-        written = self.fields.comparable(values, verified.fields)
-        actual = self.fields.comparable(rows[0].values, verified.fields)
+        before = {
+            (field.field_id, field.field_title, field.field_type)
+            for field in self.fields.writable_fields(checked.fields).fields
+        }
+        after = {
+            (field.field_id, field.field_title, field.field_type)
+            for field in self.fields.writable_fields(fields).fields
+        }
+        if before != after:
+            raise ValueError('写入期间支持字段的结构发生变化，不能确认成功。')
+        return checked.model_copy(update={'fields': fields})
+
+    def confirm_submission(
+        self, submission: RecordSubmission, response: SmartSheetRecord, checked: MainSheetSnapshot
+    ) -> None:
+        """Verify successful response cells and acknowledge only that submitted projection."""
+        link, saved, values = submission.link, submission.record, submission.values
+        if (checked.file_id, checked.sheet_id) != (link.file_id, link.sheet_id):
+            raise ValueError('核对的表格与写入关联不一致。')
+        if issues := self.fields.issues(checked.fields):
+            raise ValueError('\n'.join(issues))
+        if response.record_id != link.record_id:
+            raise ValueError('写入响应中的记录 ID 与提交值不一致。')
+        returned = submitted_response_values(response.values, values, checked.fields)
+        written = self.fields.comparable(values, checked.fields)
+        actual = self.fields.comparable(returned, checked.fields)
         if any(written[title] != actual[title] for title in values):
-            raise ValueError('写入后的远端值与提交值不一致，记录保留为待同步。')
+            raise ValueError('写入响应的字段值与提交值不一致，记录保留为待推送。')
+        previous = next(
+            (row.values for row in checked.records if row.record_id == link.record_id), {}
+        )
         self.store.confirm_sheet_record(
-            link, rows[0].values, submitted=saved, confirmed_at=datetime.now(UTC)
+            link, {**previous, **returned}, submitted=saved, confirmed_at=datetime.now(UTC)
         )

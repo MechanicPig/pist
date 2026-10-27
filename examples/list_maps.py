@@ -15,7 +15,7 @@ def main() -> None:
     for campaign in catalog.campaigns:
         print(campaign.directory)
         for level, side in campaign.iter_sides():
-            print(f'  {side.value}: {level.sid} -> {level[side].map_info.file_path}')
+            print(f'  {side.name}: {level.sid} -> {level[side].file_path}')
 
 
 if __name__ == '__main__':

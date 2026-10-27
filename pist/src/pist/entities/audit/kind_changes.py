@@ -2,21 +2,25 @@
 
 import sqlite3
 
-from berries.entities.rules import EntityConfigStore, EntityRules
+from berries.entities.rules import EntityRules
+from pist.entities.maintenance import EntityRuleLibrary
 
 from .store import EntityAuditStore
 
 
 def change_kind(
-    config: EntityConfigStore,
+    config: EntityRuleLibrary,
     store: EntityAuditStore,
     old_name: str,
     new_name: str,
     rules: EntityRules,
 ) -> None:
-    """Commit audit references after rule files, restoring rules if the database fails."""
+    """Write rule files, then update audit references in the store's own transaction."""
     try:
-        with config.kind_change(old_name, new_name, rules):
-            store.rename_kind(old_name, new_name)
+        config.rename_kind(old_name, new_name, rules)
+        store.rename_kind(old_name, new_name)
     except (sqlite3.Error, OSError) as error:
-        raise RuntimeError(f'类别变更失败，规则文件已恢复：{error}') from error
+        raise RuntimeError(
+            f'类别变更失败：{error}。规则文件可能已部分或全部写入，未自动恢复；'
+            '请检查 Git diff 与审计数据库中的分类引用。'
+        ) from error

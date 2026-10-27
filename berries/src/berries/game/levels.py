@@ -1,13 +1,12 @@
 """Assemble active map assets into community-facing levels and sides."""
 
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum
 
-from berries.game import dialog
-from berries.game.content import MAPS_DIR, ContentEntry, ContentPath, ContentSource
-from berries.game.maps import MapInfo, split_map_side_suffix
+from .content import MAPS_DIR, ContentPath
+from .maps import Map, VanillaMap, split_map_side_suffix
 
 _VANILLA_MAP_PATTERN = re.compile(r'(?P<level>\d+)(?P<side>[HX])?-(?P<name>.+)')
 _VANILLA_SIDE_BY_SUFFIX = {'H': 'B', 'X': 'C'}
@@ -15,37 +14,15 @@ _LOST_LEVELS_STEM = 'LostLevels'
 _LOST_LEVELS_LEVEL = '10'
 
 
-class LevelSide(StrEnum):
-    """One playable side of a community-facing level."""
+class LevelSide(IntEnum):
+    """A playable side's zero-based position in a Level's ordered map sequence."""
 
-    A = 'A'
-    B = 'B'
-    C = 'C'
-
-    @property
-    def position(self) -> int:
-        """Return this Side's position in a Level's ordered map tuple."""
-        return _LEVEL_SIDES.index(self)
+    A = 0
+    B = 1
+    C = 2
 
 
-_LEVEL_SIDES = tuple(LevelSide)
-
-
-@dataclass(frozen=True, slots=True)
-class Map:
-    """One active map file and the content tree that supplies it."""
-
-    map_info: MapInfo
-    content: ContentSource
-
-    @property
-    def file_path(self) -> ContentPath:
-        """Return this Map's exact virtual file path without reading its source."""
-        return self.map_info.file_path
-
-    def open_content(self) -> ContentEntry:
-        """Open the content tree that supplies this asset."""
-        return self.content.open()
+type MapKey = tuple[str, LevelSide]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,66 +30,36 @@ class Level:
     """One Campaign level containing consecutive A/B/C map assets."""
 
     sid: str
-    dialog_key: str
     maps: tuple[Map, ...]
     is_lobby: bool = False
 
     def __post_init__(self) -> None:
-        if not 1 <= len(self.maps) <= len(_LEVEL_SIDES):
+        if not 1 <= len(self.maps) <= len(LevelSide):
             raise ValueError('A level must have between one and three Side maps.')
+
+    @property
+    def dialog_key(self) -> str:
+        """Return the assembled base map's key, or the original game's AREA key."""
+        base_map = self.maps[0]
+        if isinstance(base_map, VanillaMap):
+            stem = base_map.file_path.stem
+            if stem == _LOST_LEVELS_STEM:
+                return f'AREA_{_LOST_LEVELS_LEVEL}'
+            if (match := _VANILLA_MAP_PATTERN.fullmatch(stem)) is not None:
+                return f'AREA_{match["level"]}'
+        return base_map.dialog_key
 
     @property
     def sides(self) -> tuple[LevelSide, ...]:
         """Return the consecutive Sides occupied by this Level."""
-        return _LEVEL_SIDES[: len(self.maps)]
+        return tuple(side for side, _ in zip(LevelSide, self.maps))
 
     def __getitem__(self, side: LevelSide) -> Map:
-        return self.maps[side.position]
+        return self.maps[side]
 
     def map(self, side: LevelSide) -> Map | None:
         """Return the active map occupying ``side``, if present."""
-        return self.maps[side.position] if side.position < len(self.maps) else None
-
-    def localized_names(
-        self,
-        side: LevelSide,
-        dialogs: Mapping[str, Mapping[str, str]],
-    ) -> dialog.LocalizedNames:
-        """Return current localized names from the final merged Dialog mapping."""
-        return {
-            lang: _side_name(name, side)
-            for lang, entries in dialogs.items()
-            if (name := entries.get(self.dialog_key)) is not None
-        }
-
-    def dialog_texts(
-        self,
-        dialogs: Mapping[str, Mapping[str, str]],
-        suffix: str,
-    ) -> dialog.LocalizedNames:
-        """Return localized auxiliary text for this final level identity."""
-        key = f'{self.dialog_key}_{suffix}'
-        return {
-            lang: value
-            for lang, entries in dialogs.items()
-            if (value := entries.get(key)) is not None
-        }
-
-    def fallback_name(self, side: LevelSide) -> str:
-        """Return the Game-style fallback name for one assembled map side."""
-        name = dialog.default_map_name(self[LevelSide.A].file_path)
-        return _side_name(name, side)
-
-    def display_name(
-        self,
-        side: LevelSide,
-        dialogs: Mapping[str, Mapping[str, str]],
-        languages: Iterable[str],
-    ) -> str:
-        """Resolve one map name at its final Dialog-use boundary."""
-        return dialog.localized_name(
-            self.localized_names(side, dialogs), languages
-        ) or self.fallback_name(side)
+        return self.maps[side] if side < len(self.maps) else None
 
 
 def local_sid_for_map_file(map_file: ContentPath) -> str:
@@ -160,7 +107,7 @@ def assemble_mod_levels(maps: Collection[Map]) -> tuple[Level, ...]:
 def assemble_vanilla_levels(maps: Iterable[Map]) -> tuple[Level, ...]:
     """Assemble original Game maps using Celeste's numeric H/X naming convention."""
     grouped: dict[str, dict[LevelSide, Map]] = {}
-    identities: dict[str, tuple[str, str]] = {}
+    level_keys: dict[str, str] = {}
     independent: list[Level] = []
     for map_file in maps:
         path = map_file.file_path
@@ -172,18 +119,17 @@ def assemble_vanilla_levels(maps: Iterable[Map]) -> tuple[Level, ...]:
         elif (match := _VANILLA_MAP_PATTERN.fullmatch(stem)) is not None:
             level_id = match['level']
             sid_stem = f'{level_id}-{match["name"]}'
-            side = LevelSide(_VANILLA_SIDE_BY_SUFFIX.get(match['side'], 'A'))
+            side = LevelSide[_VANILLA_SIDE_BY_SUFFIX.get(match['side'], 'A')]
         else:
             independent.append(
                 Level(
                     sid=local_sid_for_map_file(path),
-                    dialog_key=dialog.dialog_key_for_map_file(path),
                     maps=(map_file,),
                 )
             )
             continue
         grouped.setdefault(level_id, {})[side] = map_file
-        identities[level_id] = (f'Celeste/{sid_stem}', f'AREA_{level_id}')
+        level_keys[level_id] = f'Celeste/{sid_stem}'
     levels: list[Level] = []
     for level_id, entries in grouped.items():
         a_map = entries.get(LevelSide.A)
@@ -198,12 +144,10 @@ def assemble_vanilla_levels(maps: Iterable[Map]) -> tuple[Level, ...]:
                 if (c_map := entries.get(LevelSide.C)) is not None:
                     side_maps.append(c_map)
                     consumed.add(LevelSide.C)
-            sid, dialog_key = identities[level_id]
-            levels.append(Level(sid=sid, dialog_key=dialog_key, maps=tuple(side_maps)))
+            levels.append(Level(sid=level_keys[level_id], maps=tuple(side_maps)))
         independent.extend(
             Level(
                 sid=f'Celeste/{map_file.file_path.stem}',
-                dialog_key=identities[level_id][1],
                 maps=(map_file,),
             )
             for side, map_file in entries.items()
@@ -216,14 +160,9 @@ def assemble_vanilla_levels(maps: Iterable[Map]) -> tuple[Level, ...]:
 def _mod_level(path: ContentPath, maps: tuple[Map, ...]) -> Level:
     return Level(
         sid=local_sid_for_map_file(path),
-        dialog_key=dialog.dialog_key_for_map_file(path),
         maps=maps,
     )
 
 
 def _side_path(base_path: ContentPath, side: LevelSide) -> ContentPath:
-    return base_path.with_stem(f'{base_path.stem}-{side}')
-
-
-def _side_name(name: str, side: LevelSide) -> str:
-    return name if side is LevelSide.A else f'{name} {side.value}'
+    return base_path.with_stem(f'{base_path.stem}-{side.name}')

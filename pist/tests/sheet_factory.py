@@ -35,7 +35,15 @@ class FakeSheet:
         self.update_batches: list[tuple[RecordWrite, ...]] = []
         self.read_error = False
         self.write_error = False
-        self.verify_error = False
+        self.response_error = False
+        self.field_reads = 0
+
+    async def read_fields(self, file_id: str, sheet_id: str) -> FieldsResult:
+        assert (file_id, sheet_id) == ('file', 'main')
+        self.field_reads += 1
+        if self.read_error:
+            raise OSError('offline')
+        return self.fields.model_copy(deep=True)
 
     async def read_main_sheet(
         self, source: str, *, record_ids: tuple[str, ...] | None = None
@@ -43,12 +51,12 @@ class FakeSheet:
         self.reads += 1
         self.read_selections.append(record_ids)
         assert source == 'source'
-        if self.read_error or (self.verify_error and self.writes):
+        if self.read_error:
             raise OSError('offline')
         return MainSheetSnapshot(
             file_id='file',
             sheet_id='main',
-            fields=self.fields,
+            fields=self.fields.model_copy(deep=True),
             records=tuple(
                 SmartSheetRecord.model_validate({'recordID': id_, 'values': deepcopy(values)})
                 for id_, values in self.rows.items()
@@ -58,19 +66,24 @@ class FakeSheet:
 
     async def write_record(
         self, snapshot: MainSheetSnapshot, values: JsonObject, *, record_id: str | None
-    ) -> str:
+    ) -> SmartSheetRecord:
         assert (snapshot.file_id, snapshot.sheet_id) == ('file', 'main')
         self.writes.append((record_id, deepcopy(values)))
         if self.write_error:
             raise OSError('write failed')
         target = record_id or 'created'
         self.rows.setdefault(target, {}).update(deepcopy(values))
-        return target
+        returned = {} if self.response_error else deepcopy(self.rows[target])
+        return SmartSheetRecord(record_id=target, values=returned)
 
     async def update_records(
         self, snapshot: MainSheetSnapshot, records: tuple[RecordWrite, ...]
-    ) -> None:
+    ) -> tuple[SmartSheetRecord, ...]:
         self.update_batches.append(records)
+        returned = []
         for record in records:
             assert record.record_id is not None
-            await self.write_record(snapshot, record.values, record_id=record.record_id)
+            returned.append(
+                await self.write_record(snapshot, record.values, record_id=record.record_id)
+            )
+        return tuple(returned)

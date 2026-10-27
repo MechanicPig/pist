@@ -11,21 +11,22 @@ from pathlib import Path
 from aiohttp import ClientError
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 
-from berries.game.enders_blender import EndersBlenderReader
-from berries.game.mods import DisabledMod, ModScanner, ModScanReport, ScannedMod
-from berries.game.saves import SaveReader
-from pist.credentials.store import CredentialStore
-from pist.paths import PIST_DIR
-from pist.records.lock import record_writer_lock
-from pist.records.store import RecordStore, RecordSyncState
-from pist.records.sync import RecordSyncService
-from pist.settings import PistSettings, SettingsStore
-from pist.smartsheet.client import TencentSmartSheetClient, extract_file_id
-from pist.smartsheet.models import MAX_PAGE_SIZE, InspectionReport
-from pist.smartsheet.report import field_coverage_report
-from pist.ui.entities.audit import review_entity_audit
-from pist.ui.maps.browser import browse_maps
-from pist.ui.records.app import browse_records
+from berries.game.mods import ModScanProgress
+
+from .credentials.store import CredentialStore
+from .mod_scan import ModScanner, ModScanReport
+from .paths import PIST_DIR
+from .records.lock import record_writer_lock
+from .records.store import RecordStore, RecordSyncState
+from .records.sync import RecordSyncService
+from .saves import SaveProgressReader
+from .settings import PistSettings, SettingsStore
+from .smartsheet.client import TencentSmartSheetClient, extract_file_id
+from .smartsheet.models import MAX_PAGE_SIZE, InspectionReport
+from .smartsheet.report import field_coverage_report
+from .ui.entities.audit import review_entity_audit
+from .ui.maps.browser import browse_maps
+from .ui.records.app import browse_records
 
 INSPECT_DIR = PIST_DIR / 'inspect'
 MOD_REPORT_DIR = PIST_DIR / 'mods'
@@ -41,19 +42,17 @@ def build_parser() -> argparse.ArgumentParser:
         'credentials', help='Manage local application credentials.'
     )
     credentials_subcommands = credentials.add_subparsers(dest='credentials_command', required=True)
-    credentials_subcommands.add_parser(
+    credentials_subcommands.add_parser(  # pyright: ignore[reportUnusedCallResult]
         'set', help='Store direct Tencent Docs credentials securely.'
     )
 
     settings = subcommands.add_parser('settings', help='Manage local presentation settings.')
     settings_subcommands = settings.add_subparsers(dest='settings_command', required=True)
-    settings_subcommands.add_parser('show', help='Print current local settings.')
-    dialog_languages = settings_subcommands.add_parser(
-        'dialog-languages', help='Set Dialog language preference order.'
+    settings_subcommands.add_parser('show', help='Print current local settings.')  # pyright: ignore[reportUnusedCallResult]
+    dialog_lang = settings_subcommands.add_parser(
+        'dialog-lang', help='Set the Dialog language (with English fallback).'
     )
-    dialog_languages.add_argument(
-        'languages', nargs='+', help='Language codes, for example zh-cn en.'
-    )
+    dialog_lang.add_argument('lang', help='Language code, for example zh-cn or en.')  # pyright: ignore[reportUnusedCallResult]
     for name, help_text, value_name, value_type in (
         (
             'game-dir',
@@ -66,19 +65,19 @@ def build_parser() -> argparse.ArgumentParser:
         setting = settings_subcommands.add_parser(name, help=help_text)
         setting_subcommands = setting.add_subparsers(dest='settings_action', required=True)
         set_value = setting_subcommands.add_parser('set', help=f'Set the default {value_name}.')
-        set_value.add_argument(value_name, type=value_type)
-        setting_subcommands.add_parser('clear', help=f'Clear the default {value_name}.')
+        set_value.add_argument(value_name, type=value_type)  # pyright: ignore[reportUnusedCallResult]
+        setting_subcommands.add_parser('clear', help=f'Clear the default {value_name}.')  # pyright: ignore[reportUnusedCallResult]
 
     sheet = subcommands.add_parser('sheet', help='Read Tencent Docs Smart Sheet metadata.')
     sheet_subcommands = sheet.add_subparsers(dest='sheet_command', required=True)
     inspect = sheet_subcommands.add_parser(
         'inspect', help='Save raw sheet metadata and print a short summary.'
     )
-    inspect.add_argument('source', nargs='?', help='Smart Sheet URL or file ID.')
-    inspect.add_argument(
+    inspect.add_argument('source', nargs='?', help='Smart Sheet URL or file ID.')  # pyright: ignore[reportUnusedCallResult]
+    inspect.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--record-limit', type=int, default=3, help='Sample records per sub-sheet.'
     )
-    inspect.add_argument(
+    inspect.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--output-dir',
         type=Path,
         default=INSPECT_DIR,
@@ -87,28 +86,30 @@ def build_parser() -> argparse.ArgumentParser:
     report = sheet_subcommands.add_parser(
         'report', help='Create a field-coverage Markdown report from raw inspection JSON.'
     )
-    report.add_argument('input_path', type=Path, help='Raw JSON created by pist sheet inspect.')
-    report.add_argument(
+    report.add_argument('input_path', type=Path, help='Raw JSON created by pist sheet inspect.')  # pyright: ignore[reportUnusedCallResult]
+    report.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--output-path', type=Path, help='Markdown output path; defaults beside input.'
     )
 
     records = subcommands.add_parser('records', help='Manage saved local map records.')
     records_subcommands = records.add_subparsers(dest='records_command', required=True)
-    records_subcommands.add_parser(
+    records_subcommands.add_parser(  # pyright: ignore[reportUnusedCallResult]
         'browse', help='Browse and edit local history without game files.'
     )
     sync = records_subcommands.add_parser(
         'sync', help='Synchronize one saved local record to the main table.'
     )
-    sync.add_argument(
+    sync.add_argument(  # pyright: ignore[reportUnusedCallResult]
         'record_id', type=int, help='Internal local record ID, not the formal record number.'
     )
-    sync.add_argument('--sheet-source', help='Smart Sheet URL or file ID; defaults to settings.')
+    sync.add_argument(  # pyright: ignore[reportUnusedCallResult]
+        '--sheet-source', help='Smart Sheet URL or file ID; defaults to settings.'
+    )
     mods = subcommands.add_parser('mods', help='Inspect locally enabled Mods.')
     mods_subcommands = mods.add_subparsers(dest='mods_command', required=True)
     scan = mods_subcommands.add_parser('scan', help='Save an offline enabled-Mod inventory.')
-    scan.add_argument('--game-dir', type=Path, help='Game installation directory.')
-    scan.add_argument(
+    scan.add_argument('--game-dir', type=Path, help='Game installation directory.')  # pyright: ignore[reportUnusedCallResult]
+    scan.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--output-dir',
         type=Path,
         default=MOD_REPORT_DIR,
@@ -118,36 +119,36 @@ def build_parser() -> argparse.ArgumentParser:
     maps = subcommands.add_parser('maps', help='Browse maps available to the game.')
     maps_subcommands = maps.add_subparsers(dest='maps_command', required=True)
     browse = maps_subcommands.add_parser('browse', help='Browse active maps in a terminal UI.')
-    browse.add_argument('--game-dir', type=Path, help='Game installation directory.')
-    browse.add_argument(
+    browse.add_argument('--game-dir', type=Path, help='Game installation directory.')  # pyright: ignore[reportUnusedCallResult]
+    browse.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--save-slot', type=int, default=0, help='Show native stats from this save slot.'
     )
 
     entities = subcommands.add_parser('entities', help='Inspect and maintain entity rules.')
     entities_subcommands = entities.add_subparsers(dest='entities_command', required=True)
     audit = entities_subcommands.add_parser('audit', help='Review entity audit evidence.')
-    audit.add_argument(
+    audit.add_argument(  # pyright: ignore[reportUnusedCallResult]
         'input_path',
         type=Path,
         nargs='?',
         help='Optional JSON entity audit report; defaults to the latest import.',
     )
-    audit.add_argument(
+    audit.add_argument(  # pyright: ignore[reportUnusedCallResult]
         '--game-dir', type=Path, help='Game installation directory for map progress sort.'
     )
     for command in (scan, browse):
-        command.add_argument(
+        command.add_argument(  # pyright: ignore[reportUnusedCallResult]
             '--whitelist',
             type=Path,
             help='Everest --whitelist file; relative paths resolve under Mods.',
         )
-        command.add_argument(
+        command.add_argument(  # pyright: ignore[reportUnusedCallResult]
             '--blacklist',
             dest='temporary_blacklist',
             type=Path,
             help='Everest --blacklist file; relative paths resolve under Mods.',
         )
-        command.add_argument(
+        command.add_argument(  # pyright: ignore[reportUnusedCallResult]
             '--whitelist-full-override',
             action='store_true',
             help='Match Everest WhitelistFullOverride behavior.',
@@ -157,9 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def set_credentials(store: CredentialStore) -> None:
-    client_id = input('Client ID: ').strip()
-    access_token = getpass('Access Token (input hidden): ').strip()
-    open_id = input('Open ID: ').strip()
+    client_id = (await asyncio.to_thread(input, 'Client ID: ')).strip()
+    access_token = (await asyncio.to_thread(getpass, 'Access Token (input hidden): ')).strip()
+    open_id = (await asyncio.to_thread(input, 'Open ID: ')).strip()
     if not client_id or not access_token or not open_id:
         raise ValueError('Client ID, Access Token, and Open ID cannot be empty.')
     await store.save_credentials(client_id, access_token, open_id)
@@ -172,12 +173,12 @@ def update_settings(store: SettingsStore, **changes: object) -> PistSettings:
     return settings
 
 
-def set_dialog_languages(store: SettingsStore, languages: list[str]) -> None:
-    preferences = tuple(lang.casefold() for lang in languages if lang.strip())
-    if not preferences:
-        raise ValueError('At least one Dialog language code is required.')
-    update_settings(store, dialog_languages=preferences)
-    print(f'Dialog language preference saved: {", ".join(preferences)}')
+def set_dialog_lang(store: SettingsStore, lang: str) -> None:
+    lang = lang.strip().casefold()
+    if not lang:
+        raise ValueError('A Dialog language code is required.')
+    update_settings(store, dialog_lang=lang)  # pyright: ignore[reportUnusedCallResult]
+    print(f'Dialog language saved: {lang}')
 
 
 def setting_value(args: argparse.Namespace) -> SettingValue:
@@ -185,7 +186,7 @@ def setting_value(args: argparse.Namespace) -> SettingValue:
 
 
 def set_default_setting(store: SettingsStore, key: str, value: SettingValue) -> None:
-    update_settings(store, **{key: value})
+    update_settings(store, **{key: value})  # pyright: ignore[reportUnusedCallResult]
     action = 'cleared' if value is None else 'saved'
     print(f'Default {key} {action}.')
 
@@ -236,10 +237,12 @@ async def inspect_sheet(
         raise ValueError(f'--record-limit must be between 1 and {MAX_PAGE_SIZE}.')
     client = TencentSmartSheetClient(store)
     result = await client.inspect(extract_file_id(source), record_limit=record_limit)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
     timestamp = datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%SZ')
     output_path = output_dir / f'inspect-{timestamp}.json'
-    output_path.write_text(result.model_dump_json(indent=2), encoding='utf-8')
+    await asyncio.to_thread(  # pyright: ignore[reportUnusedCallResult]
+        output_path.write_text, result.model_dump_json(indent=2), encoding='utf-8'
+    )
     print(f'Raw UTF-8 inspection saved to: {output_path}')
     print(json.dumps(inspection_summary(result), ensure_ascii=False, indent=2))
 
@@ -247,19 +250,22 @@ async def inspect_sheet(
 async def sync_saved_record(store: CredentialStore, source: str, record_id: int) -> None:
     """Sync one exact local record, refusing unreviewed conflicts or ambiguous identity."""
     with record_writer_lock():
-        records = RecordStore()
-        record = records.load(record_id)
-        service = RecordSyncService(records, TencentSmartSheetClient(store), source)
-        check = await service.check(record)
-        if check.issues:
-            raise ValueError('\n'.join(check.issues))
-        if check.differences:
-            titles = '、'.join(diff.title for diff in check.differences)
-            raise ValueError(f'远端存在未确认的变化：{titles}。请在编辑界面核对，未执行写入。')
-        result = await service.save(record, check)
-        if not result.synced or records.sync_state(record_id) is not RecordSyncState.SYNCED:
-            raise RuntimeError(f'本地 ID {record_id} 仍待同步：{result.error or "本地数据已变化"}')
-        print(f'本地 ID {record_id} 已同步并回读确认。')
+        async with TencentSmartSheetClient(store) as client:
+            records = RecordStore()
+            record = records.load(record_id)
+            service = RecordSyncService(records, client, source)
+            check = await service.check(record)
+            if check.issues:
+                raise ValueError('\n'.join(check.issues))
+            if check.differences:
+                titles = '、'.join(diff.title for diff in check.differences)
+                raise ValueError(f'远端存在未确认的变化：{titles}。请在编辑界面核对，未执行写入。')
+            result = await service.save(record, check)
+            if not result.synced or records.sync_state(record_id) is not RecordSyncState.SYNCED:
+                raise RuntimeError(
+                    f'本地 ID {record_id} 仍待推送：{result.error or "本地数据已变化"}'
+                )
+            print(f'本地 ID {record_id} 已同步并确认。')
 
 
 def create_sheet_report(input_path: Path, output_path: Path | None) -> Path:
@@ -269,7 +275,7 @@ def create_sheet_report(input_path: Path, output_path: Path | None) -> Path:
     )
     if output_path is None:
         output_path = input_path.with_name(f'{input_path.stem}-fields.md')
-    output_path.write_text(field_coverage_report(result), encoding='utf-8')
+    output_path.write_text(field_coverage_report(result), encoding='utf-8')  # pyright: ignore[reportUnusedCallResult]
     return output_path
 
 
@@ -280,14 +286,14 @@ def mod_scan_summary(result: ModScanReport) -> dict[str, object]:
         'disabled_candidate_count': len(result.disabled_filenames),
         'warning_count': len(result.warnings),
         'warnings': [warning.model_dump() for warning in result.warnings],
-        'map_mod_count': sum(bool(mod.maps) for mod in result.mods),
+        'map_mod_count': sum(bool(mod.map_files) for mod in result.mods),
         'collab_mod_count': sum(mod.collab_id is not None for mod in result.mods),
         'sample': [
             {
                 'metadata_name': mod.metadata_name,
                 'filename': mod.filename,
                 'collab_id': mod.collab_id,
-                'map_file_count': len(mod.maps),
+                'map_file_count': len(mod.map_files),
                 'dialog_language_count': len(mod.dialogs),
             }
             for mod in result.mods[:10]
@@ -312,7 +318,7 @@ def scan_mods(
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%SZ')
     output_path = output_dir / f'mods-{timestamp}.json'
-    output_path.write_text(result.model_dump_json(indent=2), encoding='utf-8')
+    output_path.write_text(result.model_dump_json(indent=2), encoding='utf-8')  # pyright: ignore[reportUnusedCallResult]
     print(f'Raw UTF-8 Mod inventory saved to: {output_path}')
     print(json.dumps(mod_scan_summary(result), ensure_ascii=False, indent=2))
 
@@ -347,7 +353,6 @@ async def browse_game_maps(
         temporary_blacklist_path=temporary_blacklist_path,
         whitelist_full_override=whitelist_full_override,
     )
-    preparation = scanner.prepare()
     with Progress(
         TextColumn('[progress.description]{task.description}'),
         BarColumn(),
@@ -355,38 +360,27 @@ async def browse_game_maps(
         TextColumn('{task.fields[filename]}'),
         transient=True,
     ) as startup_progress:
-        total_task_id = startup_progress.add_task('准备 Mod 列表', total=2, filename='')
-        scan_task_id = startup_progress.add_task(
-            '正在扫描已启用 Mod', total=len(preparation.candidates), filename=''
-        )
-        scanned_mods: list[ScannedMod] = []
-        for candidate in preparation.candidates:
-            startup_progress.update(scan_task_id, filename=candidate.name)
-            if mod := scanner.scan_mod(candidate):
-                scanned_mods.append(mod)
-            startup_progress.advance(scan_task_id)
-        startup_progress.remove_task(scan_task_id)
-        startup_progress.advance(total_task_id)
+        scan_task_id = startup_progress.add_task('正在扫描 Mod', total=None, filename='')
 
-        scan_task_id = startup_progress.add_task(
-            '正在读取已禁用 Mod', total=len(preparation.disabled_candidates), filename=''
-        )
-        disabled_mods: list[DisabledMod] = []
-        for candidate in preparation.disabled_candidates:
-            startup_progress.update(scan_task_id, filename=candidate.name)
-            disabled_mods.append(scanner.scan_disabled_mod(candidate))
-            startup_progress.advance(scan_task_id)
-        startup_progress.remove_task(scan_task_id)
-        startup_progress.advance(total_task_id)
-    result = scanner.build_report(scanned_mods, disabled_mods)
-    save_reader = SaveReader(game_dir)
+        def update_progress(progress: ModScanProgress) -> None:
+            startup_progress.update(
+                scan_task_id,
+                completed=progress.completed,
+                total=progress.total,
+                filename='' if progress.path is None else progress.path.name,
+                description='正在读取已禁用 Mod' if progress.disabled else '正在扫描 Mod',
+            )
+
+        result = scanner.scan(on_progress=update_progress)
+    catalog_result = result.load_catalog(game_dir)
+    save_reader = SaveProgressReader.from_game_dir(game_dir)
     save_slot = save_reader.load(save_slot_number)
     await browse_maps(
-        result,
+        catalog_result.catalog,
+        diagnostics=catalog_result.diagnostics,
         settings_store=settings_store,
         save_reader=save_reader,
         save_slot=save_slot,
-        route_reader=EndersBlenderReader(game_dir),
         inspection_report=latest_inspection_report(),
         sheet_client=sheet_client if sheet_source is not None else None,
         sheet_source=sheet_source,
@@ -398,8 +392,8 @@ async def async_main(args: argparse.Namespace) -> None:
     settings_store = SettingsStore()
     if args.command == 'credentials' and args.credentials_command == 'set':
         await set_credentials(store)
-    elif args.command == 'settings' and args.settings_command == 'dialog-languages':
-        set_dialog_languages(settings_store, args.languages)
+    elif args.command == 'settings' and args.settings_command == 'dialog-lang':
+        set_dialog_lang(settings_store, args.lang)
     elif args.command == 'settings' and args.settings_command == 'show':
         print(settings_store.load().model_dump_json(indent=2))
     elif args.command == 'settings' and args.settings_command in {'game-dir', 'smartsheet-url'}:
@@ -456,7 +450,9 @@ async def async_main(args: argparse.Namespace) -> None:
         game_dir = args.game_dir or settings_store.load().game_dir
         await review_entity_audit(
             args.input_path,
-            save_reader=SaveReader(game_dir) if game_dir is not None else None,
+            save_reader=SaveProgressReader.from_game_dir(game_dir)
+            if game_dir is not None
+            else None,
             game_dir=game_dir,
         )
     else:

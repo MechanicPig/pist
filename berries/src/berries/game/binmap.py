@@ -1,10 +1,13 @@
 """Read map files."""
 
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from os import environ
 from struct import unpack_from
+from warnings import warn
 
 BIN_HEADER = 'CELESTE MAP'
 MAX_FILE_SIZE = 64 * 1024 * 1024
@@ -34,6 +37,42 @@ class BadMapBin(ValueError):
     """A map file is truncated, malformed, or exceeds parser safety limits."""
 
 
+class MapStringDecodeWarning(UnicodeWarning):
+    """A malformed UTF-8 string decoded with the game's replacement fallback."""
+
+    def __init__(self, offset: int, raw: bytes) -> None:
+        self.offset = offset
+        self.raw = raw
+        preview = raw[:64].hex() + ('…' if len(raw) > 64 else '')
+        super().__init__(
+            f'Invalid UTF-8 string at byte {offset}; decoded with replacement characters '
+            f'to match BinaryReader. Raw bytes: {preview}'
+        )
+
+
+@contextmanager
+def map_string_warnings(
+    report: Callable[[MapStringDecodeWarning], None] | None,
+) -> Generator[None]:
+    """Forward decoding diagnostics to a caller while preserving unrelated warnings."""
+    if report is None:
+        yield
+        return
+    captured: list[warnings.WarningMessage] = []
+    try:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter('always', MapStringDecodeWarning)
+            yield
+    finally:
+        for warning in captured:
+            if isinstance(warning.message, MapStringDecodeWarning):
+                report(warning.message)
+            else:
+                warnings.warn_explicit(
+                    warning.message, warning.category, warning.filename, warning.lineno
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class BinElement:
     """One BinaryPacker element with typed attributes and child elements."""
@@ -52,7 +91,7 @@ class BinElement:
         while pending:
             element = next(pending[-1], None)
             if element is None:
-                pending.pop()
+                pending.pop()  # pyright: ignore[reportUnusedCallResult]
             else:
                 yield element
                 pending.append(iter(element.children))
@@ -151,7 +190,7 @@ class _BinReader:
                 pending.append(self.read_element_frame(lookup, depth=depth + len(pending)))
                 continue
             element = BinElement(frame.name, frame.attrs, tuple(frame.children))
-            pending.pop()
+            pending.pop()  # pyright: ignore[reportUnusedCallResult]
             if not pending:
                 return element
             pending[-1].children.append(element)
@@ -178,7 +217,7 @@ class _BinReader:
     def skip_attrs(self, lookup: tuple[str, ...], count: int) -> None:
         """Skip ``count`` attributes without decoding their values."""
         for _ in range(count):
-            self.read_lookup(lookup)
+            self.read_lookup(lookup)  # pyright: ignore[reportUnusedCallResult]
             self.skip_value()
 
     def skip_children(self, lookup: tuple[str, ...], *, depth: int) -> None:
@@ -186,7 +225,7 @@ class _BinReader:
         pending = [self.read_u16()]
         while pending:
             if not pending[-1]:
-                pending.pop()
+                pending.pop()  # pyright: ignore[reportUnusedCallResult]
                 continue
             pending[-1] -= 1
             _, attr_count = self.read_element_header(lookup, depth=depth + len(pending))
@@ -252,19 +291,20 @@ class _BinReader:
             char = self.read_u8()
             self._reserve_decoded_text(times)
             decoded.extend(bytes((char,)) * times)
-        try:
-            return decoded.decode('utf-8')
-        except UnicodeDecodeError as error:
-            raise BadMapBin('RLE string is not valid UTF-8.') from error
+        # BinaryPacker's RLE format casts each byte to a char; it is not UTF-8.
+        return decoded.decode('latin1')
 
     def read_string(self) -> str:
-        """Read a UTF-8 string prefixed by BinaryPacker's variable-length integer."""
+        """Read a length-prefixed string using BinaryReader's UTF-8 replacement fallback."""
         length = self.read_varlen()
         self._reserve_decoded_text(length)
+        offset = self._offset
+        raw = self.read_bytes(length)
         try:
-            return self.read_bytes(length).decode('utf-8')
-        except UnicodeDecodeError as error:
-            raise BadMapBin('String is not valid UTF-8.') from error
+            return raw.decode('utf-8')
+        except UnicodeDecodeError:
+            warn(MapStringDecodeWarning(offset, raw), stacklevel=2)
+            return raw.decode('utf-8', errors='replace')
 
     def read_varlen(self) -> int:
         """Read the little-endian base-128 length encoding used by BinaryPacker."""
@@ -305,7 +345,7 @@ class _BinReader:
 
     def skip_bytes(self, length: int) -> None:
         """Consume an exact byte count without creating a temporary slice."""
-        self._consume(length)
+        self._consume(length)  # pyright: ignore[reportUnusedCallResult]
 
     def _consume(self, length: int) -> int:
         """Advance by ``length`` bytes and return the former offset."""

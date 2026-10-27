@@ -1,14 +1,6 @@
 // Application-specific drawing layered on Berries' objective map renderer.
 const MAP_MARGIN = 100;
 
-export function formatTime(milliseconds) {
-  const totalSeconds = Math.floor(milliseconds / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor(totalSeconds % 3600 / 60);
-  const seconds = totalSeconds % 60;
-  return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
 export class MapOverlays {
   constructor(renderer, viewport, geometry) {
     this.renderer = renderer;
@@ -134,12 +126,12 @@ export class MapOverlays {
       const firstClearTime = timeMode === 'cumulative'
         ? room.firstClearCumulativeTime
         : room.firstClearTime;
-      if (showTime && Number.isFinite(firstClearTime)) {
+      if (showTime && typeof firstClearTime === 'string') {
         ctx.font = `${12 / scale}px sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         const y = room.y + room.height / 2 + (index ? 14 : 0) / scale;
-        this.drawOutlinedText(formatTime(firstClearTime), room.x + room.width / 2, y, '#d2d9de');
+        this.drawOutlinedText(firstClearTime, room.x + room.width / 2, y, '#d2d9de');
       }
     }
     if (selectionBox) {

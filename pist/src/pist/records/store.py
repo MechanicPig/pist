@@ -11,10 +11,12 @@ from sqlite3 import Row
 from pydantic import JsonValue, PositiveInt, TypeAdapter, ValidationError
 
 from berries.models import FrozenModel
-from pist.records.models import MapRecord
-from pist.records.schema import RECORD_TABLE_SQL, record_columns, record_from_row
 from pist.smartsheet.models import FieldsResult, MainSheetSnapshot
 from pist.sqlite_store import LOCAL_DATA_PATH, SQLiteStore
+
+from .models import MapRecord
+from .order import RecordOrderPlan
+from .schema import RECORD_TABLE_SQL, record_columns, record_from_row
 
 _VALUES = TypeAdapter(dict[str, JsonValue])
 
@@ -32,6 +34,7 @@ class StoredRecord(FrozenModel):
 
     record: MapRecord
     sync_state: RecordSyncState
+    confirmed_at: datetime | None = None
 
 
 class RecordStorageError(RuntimeError):
@@ -84,8 +87,8 @@ class RecordStore(SQLiteStore):
     def __init__(self, path: Path = LOCAL_DATA_PATH) -> None:
         super().__init__(path)
         with self.connect() as conn:
-            conn.executescript(RECORD_TABLE_SQL)
-            conn.executescript(
+            conn.executescript(RECORD_TABLE_SQL)  # pyright: ignore[reportUnusedCallResult]
+            conn.executescript(  # pyright: ignore[reportUnusedCallResult]
                 """
                 CREATE INDEX IF NOT EXISTS records_by_map
                 ON records (mod_metadata_name, map_file);
@@ -130,7 +133,7 @@ class RecordStore(SQLiteStore):
     def save(self, record: MapRecord) -> int:
         """Insert a new record or update exactly its explicit internal ID."""
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('BEGIN IMMEDIATE')  # pyright: ignore[reportUnusedCallResult]
             if record.local_id is not None:
                 row = conn.execute(
                     'SELECT record_number FROM records WHERE id = ?', (record.local_id,)
@@ -162,13 +165,13 @@ class RecordStore(SQLiteStore):
                     'SELECT last_number + 1 FROM record_number_counter WHERE id = 1'
                 ).fetchone()[0]
             if number is not None:
-                conn.execute(
+                conn.execute(  # pyright: ignore[reportUnusedCallResult]
                     'UPDATE record_number_counter SET last_number = MAX(last_number, ?) WHERE id = 1',
                     (number,),
                 )
             saved = record.model_copy(update={'local_id': local_id, 'record_number': number})
             columns = record_columns(saved)
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 f'UPDATE records SET {", ".join(f"{name} = ?" for name in columns)}, '
                 "sync_state = 'pending' WHERE id = ?",
                 (*columns.values(), local_id),
@@ -176,19 +179,56 @@ class RecordStore(SQLiteStore):
         return local_id
 
     def list_records(self) -> tuple[StoredRecord, ...]:
-        """Read all local records and sync states in stable formal-number order."""
+        """Read local records, states and latest confirmation times in formal-number order."""
         with self.connect() as conn:
             conn.row_factory = Row
             rows = conn.execute(
-                'SELECT * FROM records ORDER BY record_number IS NULL, record_number, id'
+                'SELECT records.*, '
+                '(SELECT MAX(confirmed_at) FROM record_sheet_links WHERE local_id = records.id) '
+                'AS confirmed_at FROM records '
+                'ORDER BY record_number IS NULL, record_number, id'
             ).fetchall()
         try:
             return tuple(
-                StoredRecord(record=record_from_row(row), sync_state=row['sync_state'])
+                StoredRecord(
+                    record=record_from_row(row),
+                    sync_state=row['sync_state'],
+                    confirmed_at=row['confirmed_at'],
+                )
                 for row in rows
             )
         except (TypeError, ValueError) as error:
             raise RecordStorageError('本地记录列表包含无效数据。') from error
+
+    def apply_order(self, plan: RecordOrderPlan) -> None:
+        """Commit a still-current number permutation and mark changed public rows pending."""
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')  # pyright: ignore[reportUnusedCallResult]
+            current = tuple(
+                conn.execute(
+                    'SELECT id, record_number FROM records WHERE record_number IS NOT NULL '
+                    'ORDER BY record_number'
+                ).fetchall()
+            )
+            if current != plan.expected:
+                raise ValueError('记录顺序已变化，请重新打开调整窗口并确认。')
+            old = dict(current)
+            if (
+                len({change.local_id for change in plan.changes}) != len(plan.changes)
+                or any(old.get(change.local_id) != change.old_number for change in plan.changes)
+                or sorted(change.old_number for change in plan.changes)
+                != sorted(change.new_number for change in plan.changes)
+            ):
+                raise ValueError('编号调整不是有效的顺序置换。')
+            # Clear only affected unique values inside this transaction, then reassign.
+            conn.executemany(  # pyright: ignore[reportUnusedCallResult]
+                'UPDATE records SET record_number = NULL WHERE id = ?',
+                ((change.local_id,) for change in plan.changes),
+            )
+            conn.executemany(  # pyright: ignore[reportUnusedCallResult]
+                "UPDATE records SET record_number = ?, sync_state = 'pending' WHERE id = ?",
+                ((change.new_number, change.local_id) for change in plan.changes),
+            )
 
     def matching_ids(self, record: MapRecord) -> tuple[int, ...]:
         """Find map candidates independently of the originating save slot."""
@@ -221,13 +261,13 @@ class RecordStore(SQLiteStore):
         with self.connect() as conn:
             if link.confirmed_values is not None or link.confirmed_at is not None:
                 raise ValueError('Use confirm_sheet_record to acknowledge remote data.')
-            conn.execute('PRAGMA foreign_keys = ON')
-            conn.execute(
+            conn.execute('PRAGMA foreign_keys = ON')  # pyright: ignore[reportUnusedCallResult]
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 'INSERT INTO record_sheet_links (local_id, file_id, sheet_id, record_id) '
                 'VALUES (?, ?, ?, ?)',
                 (link.local_id, link.file_id, link.sheet_id, link.record_id),
             )
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 'DELETE FROM record_sheet_add_attempts '
                 'WHERE local_id = ? AND file_id = ? AND sheet_id = ?',
                 (link.local_id, link.file_id, link.sheet_id),
@@ -236,13 +276,13 @@ class RecordStore(SQLiteStore):
     def begin_sheet_add(self, attempt: RecordSheetAddAttempt) -> None:
         """Persist an add intent before sending it, rejecting unresolved prior attempts."""
         with self.connect() as conn:
-            conn.execute('PRAGMA foreign_keys = ON')
-            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('PRAGMA foreign_keys = ON')  # pyright: ignore[reportUnusedCallResult]
+            conn.execute('BEGIN IMMEDIATE')  # pyright: ignore[reportUnusedCallResult]
             if conn.execute(
                 'SELECT 1 FROM record_sheet_add_attempts WHERE local_id = ?', (attempt.local_id,)
             ).fetchone():
                 raise ValueError('之前的新增结果尚未确认，不能再次新增。')
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 'INSERT INTO record_sheet_add_attempts '
                 '(local_id, file_id, sheet_id, started_at, mod_metadata_name, map_name) '
                 'VALUES (?, ?, ?, ?, ?, ?)',
@@ -347,7 +387,7 @@ class RecordStore(SQLiteStore):
             for local_id, remote_id in links:
                 if remote_id not in rows:
                     continue
-                conn.execute(
+                conn.execute(  # pyright: ignore[reportUnusedCallResult]
                     'INSERT INTO record_sheet_snapshots '
                     '(local_id, file_id, sheet_id, record_id, values_json, fields_json, read_at) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (local_id, file_id, sheet_id) '
@@ -363,6 +403,14 @@ class RecordStore(SQLiteStore):
                         read_at_text,
                     ),
                 )
+
+    def latest_sheet_fields(self) -> FieldsResult | None:
+        """Return last-observed editor options, not evidence of current remote compatibility."""
+        with self.connect() as conn:
+            row = conn.execute(
+                'SELECT fields_json FROM record_sheet_snapshots ORDER BY read_at DESC LIMIT 1'
+            ).fetchone()
+        return None if row is None else FieldsResult.model_validate_json(row[0], by_name=True)
 
     def sheet_snapshots(self, record_id: int) -> tuple[RecordSheetSnapshot, ...]:
         """Return the complete last-observed remote rows, including formula results."""
@@ -403,13 +451,13 @@ class RecordStore(SQLiteStore):
             raise ValueError('The submitted record does not match the remote association.')
         payload = _VALUES.dump_json(_VALUES.validate_python(values)).decode()
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('BEGIN IMMEDIATE')  # pyright: ignore[reportUnusedCallResult]
             conn.row_factory = Row
             row = conn.execute('SELECT * FROM records WHERE id = ?', (link.local_id,)).fetchone()
             if row is None:
                 raise ValueError(f'No saved local record with id {link.local_id}.')
             current = record_from_row(row)
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 'INSERT INTO record_sheet_links '
                 '(local_id, file_id, sheet_id, record_id, confirmed_values, confirmed_at) '
                 'VALUES (?, ?, ?, ?, ?, ?) '
@@ -427,10 +475,12 @@ class RecordStore(SQLiteStore):
             )
             if conn.execute('SELECT changes()').fetchone()[0] != 1:
                 raise ValueError('Cannot replace an existing remote row association.')
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 'DELETE FROM record_sheet_add_attempts '
                 'WHERE local_id = ? AND file_id = ? AND sheet_id = ?',
                 (link.local_id, link.file_id, link.sheet_id),
             )
             state = RecordSyncState.SYNCED if current == submitted else RecordSyncState.PENDING
-            conn.execute('UPDATE records SET sync_state = ? WHERE id = ?', (state, link.local_id))
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
+                'UPDATE records SET sync_state = ? WHERE id = ?', (state, link.local_id)
+            )

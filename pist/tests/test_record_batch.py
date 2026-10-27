@@ -1,6 +1,7 @@
 """Enforce full-sheet read budgets and safe deferred verification for batch sync."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -11,25 +12,26 @@ from pist.records.batch import UPDATE_BATCH_SIZE, RecordQueuedUpdate, RecordSync
 from pist.records.models import MapRecord
 from pist.records.store import RecordSheetLink, RecordStore, RecordSyncState
 from pist.records.sync import (
+    RecordFieldDifference,
     RecordSyncCheck,
     RecordSyncConflict,
     RecordSyncResult,
     RecordSyncService,
 )
 from pist.smartsheet.encoding import encode_record_values
-from pist.smartsheet.models import MainSheetSnapshot, RecordWrite
+from pist.smartsheet.models import MainSheetSnapshot, RecordWrite, SmartSheetRecord
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 
 
 def linked_records(store: RecordStore, client: FakeSheet, n_records: int) -> list[MapRecord]:
     result = []
-    for index in range(n_records):
+    for i in range(n_records):
         record = store.load(
             store.save(
                 MapRecord(
                     created_at=NOW,
-                    map_name=f'Map {index}',
+                    map_name=f'Map {i}',
                     mod_metadata_name='Mod',
                     status='进行中',
                     notes='Before',
@@ -38,10 +40,10 @@ def linked_records(store: RecordStore, client: FakeSheet, n_records: int) -> lis
         )
         assert record.local_id is not None
         values = encode_record_values(record, client.fields)
-        client.rows[str(index)] = values
+        client.rows[str(i)] = values
         store.confirm_sheet_record(
             RecordSheetLink(
-                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(index)
+                local_id=record.local_id, file_id='file', sheet_id='main', record_id=str(i)
             ),
             values,
             submitted=record,
@@ -69,6 +71,44 @@ def test_166_equal_records_share_one_full_sheet_read(tmp_path: Path) -> None:
     assert all(entry.sync_state is RecordSyncState.SYNCED for entry in store.list_records())
 
 
+@pytest.mark.parametrize('problem', (None, 'issue', 'conflict'))
+def test_submit_checked_uses_supplied_check_and_rejects_unresolved_problems(
+    tmp_path: Path, problem: str | None
+) -> None:
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    client = FakeSheet()
+    record = linked_records(store, client, 1)[0]
+    changed = record.model_copy(update={'notes': 'After'})
+    service = RecordSyncService(store, client, 'source')
+
+    async def run() -> None:
+        check = await service.check(changed)
+        if problem == 'issue':
+            check = replace(check, issues=('incompatible schema',))
+            with pytest.raises(ValueError, match='incompatible schema'):
+                await service.submit_checked(changed, check)
+        elif problem == 'conflict':
+            check = replace(
+                check,
+                differences=(RecordFieldDifference('备注', 'Before', 'Remote'),),
+            )
+            with pytest.raises(RecordSyncConflict):
+                await service.submit_checked(changed, check)
+        else:
+            result = await service.submit_checked(changed, check)
+            assert result.synced
+
+    asyncio.run(run())
+    assert client.reads == 1
+    assert record.local_id is not None
+    if problem is None:
+        assert len(client.writes) == 1
+        assert store.load(record.local_id).notes == 'After'
+    else:
+        assert client.writes == []
+        assert store.load(record.local_id).notes == 'Before'
+
+
 def test_converged_batch_refreshes_old_baselines_without_writing(tmp_path: Path) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
     client = FakeSheet()
@@ -90,13 +130,13 @@ def test_converged_batch_refreshes_old_baselines_without_writing(tmp_path: Path)
 
     asyncio.run(run())
     assert client.reads == 1 and client.writes == [] and client.update_batches == []
-    for index, record in enumerate(current):
+    for i, record in enumerate(current):
         assert record.local_id is not None
-        assert store.sheet_links(record.local_id)[0].confirmed_values == client.rows[str(index)]
+        assert store.sheet_links(record.local_id)[0].confirmed_values == client.rows[str(i)]
         assert store.sync_state(record.local_id) is RecordSyncState.SYNCED
 
 
-def test_multiple_writes_share_one_final_readback(tmp_path: Path) -> None:
+def test_multiple_writes_confirm_responses_without_final_readback(tmp_path: Path) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
     client = FakeSheet()
     records = linked_records(store, client, 3)
@@ -114,32 +154,33 @@ def test_multiple_writes_share_one_final_readback(tmp_path: Path) -> None:
             assert store.sync_state(changed.local_id) is RecordSyncState.PENDING
         assert client.reads == 1 and client.writes == []
         await batch.finish()
-        assert client.reads == 3 and len(client.update_batches) == 1
+        assert client.reads == 2 and len(client.update_batches) == 1
 
     asyncio.run(run())
     assert [id_ for id_, _ in client.writes] == ['1', '2']
     assert all(entry.sync_state is RecordSyncState.SYNCED for entry in store.list_records())
 
 
-@pytest.mark.parametrize('failure', ('read', 'mismatch', 'deleted', 'schema'))
-def test_final_readback_failure_preserves_pending_records(tmp_path: Path, failure: str) -> None:
+@pytest.mark.parametrize('failure', ('empty', 'mismatch', 'missing-row', 'missing-field'))
+def test_incomplete_batch_response_only_confirms_valid_rows(tmp_path: Path, failure: str) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
 
-    class FailingReadbackSheet(FakeSheet):
+    class IncompleteResponseSheet(FakeSheet):
         async def update_records(
             self, snapshot: MainSheetSnapshot, records: tuple[RecordWrite, ...]
-        ) -> None:
-            await super().update_records(snapshot, records)
-            if failure == 'read':
-                self.read_error = True
+        ) -> tuple[SmartSheetRecord, ...]:
+            result = await super().update_records(snapshot, records)
+            if failure == 'empty':
+                return ()
             elif failure == 'mismatch':
-                self.rows['0']['备注'] = [{'text': 'Changed again'}]
-            elif failure == 'deleted':
-                del self.rows['0']
+                result[0].values['备注'] = [{'text': 'Unexpected value'}]
+            elif failure == 'missing-row':
+                return result[1:]
             else:
-                self.fields.fields.pop(0)
+                result[0].values.pop('备注')
+            return result
 
-    client = FailingReadbackSheet()
+    client = IncompleteResponseSheet()
     records = linked_records(store, client, 2)
 
     async def run() -> None:
@@ -152,7 +193,7 @@ def test_final_readback_failure_preserves_pending_records(tmp_path: Path, failur
         assert records[0].local_id is not None and records[1].local_id is not None
         assert store.sync_state(records[0].local_id) is RecordSyncState.PENDING
         assert store.sync_state(records[1].local_id) is (
-            RecordSyncState.PENDING if failure in ('read', 'schema') else RecordSyncState.SYNCED
+            RecordSyncState.PENDING if failure == 'empty' else RecordSyncState.SYNCED
         )
         assert len(client.writes) == 2
 
@@ -197,18 +238,16 @@ def test_166_changed_rows_use_two_update_requests(tmp_path: Path) -> None:
 
     asyncio.run(run())
     assert [len(items) for items in client.update_batches] == [UPDATE_BATCH_SIZE, 66]
-    assert client.reads == 5
+    assert client.reads == 3
     assert client.read_selections == [
         None,
         tuple(str(i) for i in range(100)),
-        tuple(str(i) for i in range(100)),
-        tuple(str(i) for i in range(100, 166)),
         tuple(str(i) for i in range(100, 166)),
     ]
     assert all(entry.sync_state is RecordSyncState.SYNCED for entry in store.list_records())
 
 
-@pytest.mark.parametrize('failure', ('write', 'readback'))
+@pytest.mark.parametrize('failure', ('write', 'response'))
 def test_later_batch_failure_preserves_first_batch_confirmation(
     tmp_path: Path, failure: str
 ) -> None:
@@ -217,13 +256,13 @@ def test_later_batch_failure_preserves_first_batch_confirmation(
     class SecondBatchFails(FakeSheet):
         async def update_records(
             self, snapshot: MainSheetSnapshot, records: tuple[RecordWrite, ...]
-        ) -> None:
+        ) -> tuple[SmartSheetRecord, ...]:
             if self.update_batches:
                 if failure == 'write':
                     self.write_error = True
                 else:
-                    self.read_error = True
-            await super().update_records(snapshot, records)
+                    self.response_error = True
+            return await super().update_records(snapshot, records)
 
     client = SecondBatchFails()
     records = linked_records(store, client, UPDATE_BATCH_SIZE + 1)
@@ -233,7 +272,7 @@ def test_later_batch_failure_preserves_first_batch_confirmation(
         for record in records:
             changed = record.model_copy(update={'notes': 'After'})
             await batch.save(changed, await batch.check(changed))
-        with pytest.raises(OSError):
+        with pytest.raises((OSError, ValueError)):
             await batch.finish()
 
     asyncio.run(run())

@@ -6,7 +6,6 @@ import pytest
 
 from berries.game.duration import Duration
 from berries.game.levels import Level, LevelSide
-from berries.game.saves import MapStats, SaveSlot
 from berries.gamebanana import GameBananaSubmission
 from berries.map_entity_id import MapEntityID
 from pist.entity_stats import MapEntityStats
@@ -15,11 +14,14 @@ from pist.records.models import (
     MapRecordProgress,
     create_map_record,
     map_record_progress,
-    merge_saved_record,
 )
 from pist.records.store import RecordSheetLink, RecordStorageError, RecordStore
+from pist.saves import MapStats
+from pist.smartsheet.encoding import encode_record_values
+from pist.smartsheet.models import FieldsResult
 from test_support.map_factory import make_level_side
 from test_support.mod_factory import make_installed_mod
+from test_support.saves import make_save_progress
 
 EXAMPLE_MOD = make_installed_mod(
     source='zip',
@@ -33,12 +35,10 @@ EXAMPLE_MOD = make_installed_mod(
 def _example_map(
     file_path: str,
     *,
-    dialog_key: str | None = None,
     side: Literal['B', 'C'] | None = None,
 ) -> tuple[Level, LevelSide]:
     return make_level_side(
         file_path=file_path,
-        dialog_key=dialog_key,
         side=side,
         mod=EXAMPLE_MOD,
     )
@@ -73,7 +73,7 @@ def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> No
     assert (
         map_record_progress(
             MapStats(
-                Duration.from_milliseconds(1),
+                Duration.from_dotnet_ticks(1 * 10_000),
                 1,
                 single_run_completed=True,
                 cassette_collected=True,
@@ -88,7 +88,7 @@ def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> No
     assert (
         map_record_progress(
             MapStats(
-                Duration.from_milliseconds(1),
+                Duration.from_dotnet_ticks(1 * 10_000),
                 1,
                 single_run_completed=True,
                 cassette_collected=True,
@@ -102,23 +102,29 @@ def test_map_record_progress_distinguishes_completion_and_saved_sessions() -> No
     )
     assert (
         map_record_progress(
-            MapStats(Duration.from_milliseconds(1), 1, completed=True), stats, is_in_progress=False
+            MapStats(Duration.from_dotnet_ticks(1 * 10_000), 1, completed=True),
+            stats,
+            is_in_progress=False,
         )
         is MapRecordProgress.PARTIALLY_COMPLETED
     )
     assert (
-        map_record_progress(MapStats(Duration.from_milliseconds(1), 1), stats, is_in_progress=True)
+        map_record_progress(
+            MapStats(Duration.from_dotnet_ticks(1 * 10_000), 1), stats, is_in_progress=True
+        )
         is MapRecordProgress.IN_PROGRESS
     )
     assert (
-        map_record_progress(MapStats(Duration.from_milliseconds(1), 1), stats, is_in_progress=False)
+        map_record_progress(
+            MapStats(Duration.from_dotnet_ticks(1 * 10_000), 1), stats, is_in_progress=False
+        )
         is MapRecordProgress.RAN_BEFORE
     )
     assert map_record_progress(None, stats, is_in_progress=False) is MapRecordProgress.NOT_STARTED
 
 
 def test_map_record_progress_requires_each_existing_collectible() -> None:
-    completed = MapStats(Duration.from_milliseconds(1), 1, single_run_completed=True)
+    completed = MapStats(Duration.from_dotnet_ticks(1 * 10_000), 1, single_run_completed=True)
 
     cassette = MapEntityStats(existing_stats=frozenset({'cassette'}))
     assert (
@@ -128,7 +134,10 @@ def test_map_record_progress_requires_each_existing_collectible() -> None:
     assert (
         map_record_progress(
             MapStats(
-                Duration.from_milliseconds(1), 1, single_run_completed=True, cassette_collected=True
+                Duration.from_dotnet_ticks(1 * 10_000),
+                1,
+                single_run_completed=True,
+                cassette_collected=True,
             ),
             cassette,
             is_in_progress=False,
@@ -144,7 +153,10 @@ def test_map_record_progress_requires_each_existing_collectible() -> None:
     assert (
         map_record_progress(
             MapStats(
-                Duration.from_milliseconds(1), 1, single_run_completed=True, heart_collected=True
+                Duration.from_dotnet_ticks(1 * 10_000),
+                1,
+                single_run_completed=True,
+                heart_collected=True,
             ),
             heart,
             is_in_progress=False,
@@ -179,7 +191,7 @@ def test_completion_requires_current_red_and_moon_berry_ids(
     )
     progress = map_record_progress(
         MapStats(
-            Duration.from_milliseconds(1),
+            Duration.from_dotnet_ticks(1 * 10_000),
             1,
             single_run_completed=True,
             collected_strawberries=collected,
@@ -204,7 +216,7 @@ def test_unidentified_or_duplicate_instances_cannot_prove_full_collection(count:
         },
     )
     stats = MapStats(
-        Duration.from_milliseconds(1),
+        Duration.from_dotnet_ticks(1 * 10_000),
         1,
         single_run_completed=True,
         collected_strawberries=frozenset({MapEntityID('room', 1), MapEntityID('room', 2)}),
@@ -219,26 +231,32 @@ def test_record_side_validates_and_round_trips_existing_serialized_values(side: 
     record = MapRecord.model_validate(
         {'created_at': '2026-10-10T00:00:00Z', 'map_name': 'Map', 'side': side}
     )
-    assert record.side is (None if side is None else LevelSide(side))
+    assert record.side is (None if side is None else LevelSide[side])
     assert record.model_dump(mode='json')['side'] == side
     assert MapRecord.model_validate_json(record.model_dump_json()) == record
 
 
-def test_record_side_rejects_invalid_serialized_value() -> None:
+@pytest.mark.parametrize('side', ('D', '', 'a', '0', 0, 1, 2, False, True))
+def test_record_side_rejects_invalid_serialized_value(side: str | int | bool) -> None:
     with pytest.raises(ValueError):
         MapRecord.model_validate(
-            {'created_at': '2026-10-10T00:00:00Z', 'map_name': 'Map', 'side': 'D'}
+            {'created_at': '2026-10-10T00:00:00Z', 'map_name': 'Map', 'side': side}
         )
 
 
-def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ('milliseconds', 'sheet_time'),
+    ((83_456, '0:01:23'), (3_599_999, '0:59:59'), (3_600_000, '1:00:00')),
+)
+def test_create_map_record_uses_local_map_and_native_save_data(
+    tmp_path: Path, milliseconds: int, sheet_time: str
+) -> None:
     map_info = _example_map(
         file_path='Maps/Author/Pack/Map-B.bin',
-        dialog_key='Author_Pack_Map',
         side='B',
     )
-    save_slot = SaveSlot(
-        0, {('Author/Pack/Map', 1): MapStats(Duration.from_milliseconds(83_456), 12)}
+    save_slot = make_save_progress(
+        0, {('Author/Pack/Map', 1): MapStats(Duration.from_dotnet_ticks(milliseconds * 10_000), 12)}
     )
 
     record = create_map_record(
@@ -258,7 +276,11 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
     assert record.sid == 'Author/Pack/Map'
     assert record.side is LevelSide.B
     assert record.save_slot == 0
-    assert record.time_played == '0:01:23'
+    assert record.time_played == Duration.from_dotnet_ticks(milliseconds * 10_000)
+    fields = FieldsResult.model_validate(
+        {'fields': [{'fieldID': 'time', 'fieldTitle': '用时', 'fieldType': 1}]}
+    )
+    assert encode_record_values(record, fields)['用时'] == [{'type': 'text', 'text': sheet_time}]
     assert record.deaths == 12
     assert not record.completed
     assert record.mod_name is None
@@ -268,9 +290,11 @@ def test_create_map_record_uses_local_map_and_native_save_data(tmp_path: Path) -
 
 def test_create_map_record_preserves_configured_record_values() -> None:
     record = create_map_record(
-        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin'),
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1000), 1)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1000 * 10_000), 1)}
+        ),
         statistics={'n_strawberries': 3, 'cassette': True, 'heart': '通关收集'},
     )
 
@@ -283,9 +307,11 @@ def test_create_map_record_preserves_configured_record_values() -> None:
 
 def test_create_map_record_marks_normal_map_as_a_side() -> None:
     record = create_map_record(
-        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin'),
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1_000 * 10_000), 1)}
+        ),
     )
 
     assert record.side is LevelSide.A
@@ -294,17 +320,19 @@ def test_create_map_record_marks_normal_map_as_a_side() -> None:
 def test_create_map_record_rejects_vanilla_map() -> None:
     with pytest.raises(TypeError, match='vanilla map'):
         create_map_record(
-            *make_level_side(file_path='Maps/0-Intro.bin', dialog_key='AREA_0'),
+            *make_level_side(file_path='Maps/0-Intro.bin'),
             mod=None,
-            save_slot=SaveSlot(0, {}),
+            save_slot=make_save_progress(0, {}),
         )
 
 
 def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
     record = create_map_record(
-        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin'),
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1_000 * 10_000), 1)}
+        ),
         gamebanana=GameBananaSubmission.model_validate(
             {
                 'name': 'Example Mod',
@@ -329,11 +357,13 @@ def test_create_map_record_uses_gamebanana_submission_metadata() -> None:
 
 
 def test_create_map_record_omits_zero_time_stats() -> None:
-    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
+    map_info = _example_map('Maps/Example/Map.bin')
     record = create_map_record(
         *map_info,
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(), 12)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(0), 12)}
+        ),
     )
 
     assert record.save_slot == 0
@@ -343,9 +373,11 @@ def test_create_map_record_omits_zero_time_stats() -> None:
 
 def test_record_store_round_trips_a_record(tmp_path: Path) -> None:
     record = create_map_record(
-        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin'),
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 1)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1_000 * 10_000), 1)}
+        ),
         now=datetime(2026, 9, 4, 12, tzinfo=UTC),
     )
 
@@ -357,17 +389,21 @@ def test_record_store_round_trips_a_record(tmp_path: Path) -> None:
 
 
 def test_record_store_updates_only_an_explicit_record_id(tmp_path: Path) -> None:
-    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
+    map_info = _example_map('Maps/Example/Map.bin')
     store = RecordStore(tmp_path / '.pist/local-data.sqlite3')
     initial = create_map_record(
         *map_info,
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1_000), 2)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1_000 * 10_000), 2)}
+        ),
     )
     current = create_map_record(
         *map_info,
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2_000), 5)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(2_000 * 10_000), 5)}
+        ),
     )
 
     record_id = store.save(initial)
@@ -375,16 +411,18 @@ def test_record_store_updates_only_an_explicit_record_id(tmp_path: Path) -> None
     assert store.save(current.model_copy(update={'local_id': record_id})) == record_id
 
     saved = store.load(record_id)
-    assert saved.time_played == '0:00:02'
+    assert saved.time_played == Duration.from_dotnet_ticks(20000000)
     assert saved.deaths == 5
 
 
 def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> None:
-    map_info = _example_map('Maps/Example/Map.bin', dialog_key='Example_Map')
+    map_info = _example_map('Maps/Example/Map.bin')
     saved = create_map_record(
         *map_info,
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(1000), 2)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(1000 * 10_000), 2)}
+        ),
         authors=('Alice',),
         statistics={
             'n_strawberries': 2,
@@ -395,14 +433,16 @@ def test_merge_saved_record_retains_manual_values_but_refreshes_save_data() -> N
     current = create_map_record(
         *map_info,
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {('Example/Map', 0): MapStats(Duration.from_milliseconds(2000), 5)}),
+        save_slot=make_save_progress(
+            0, {('Example/Map', 0): MapStats(Duration.from_dotnet_ticks(2000 * 10_000), 5)}
+        ),
         statistics={'n_strawberries': 4, 'n_main_rooms': 8},
     )
 
-    merged = merge_saved_record(current, saved)
+    merged = current.with_saved_fields(saved)
 
     assert merged.authors == ('Alice',)
-    assert merged.time_played == '0:00:02'
+    assert merged.time_played == Duration.from_dotnet_ticks(20000000)
     assert merged.deaths == 5
     assert merged.model_dump(include={'n_strawberries', 'n_main_rooms', 'started_at', 'notes'}) == {
         'n_strawberries': 4,
@@ -425,7 +465,7 @@ def test_merge_saved_record_preserves_edited_names_mod_link_and_update_date(
         mod_name=None if cleared else 'My Mod',
         mod_url=None if cleared else 'https://gamebanana.com/mods/456',
         mod_updated_at=None if cleared else datetime(2026, 9, 1, tzinfo=UTC),
-        time_played='0:01:00',
+        time_played=Duration.from_dotnet_ticks(600000000),
         status='进行中',
         save_slot=0,
     )
@@ -437,10 +477,10 @@ def test_merge_saved_record_preserves_edited_names_mod_link_and_update_date(
             'mod_url': 'https://gamebanana.com/mods/123',
             'mod_updated_at': datetime(2026, 10, 10, tzinfo=UTC).date(),
             'save_slot': 1,
-            'time_played': '0:02:00',
+            'time_played': Duration.from_dotnet_ticks(1200000000),
         }
     )
-    merged = merge_saved_record(scanned, saved)
+    merged = scanned.with_saved_fields(saved)
     store.save(merged)
     assert saved.local_id is not None
     latest = store.load(saved.local_id)
@@ -451,14 +491,14 @@ def test_merge_saved_record_preserves_edited_names_mod_link_and_update_date(
     )
     assert latest.record_number == saved.record_number
     assert latest.mod_updated_at == saved.mod_updated_at
-    assert latest.save_slot == 1 and latest.time_played == '0:02:00'
+    assert latest.save_slot == 1 and latest.time_played == Duration.from_dotnet_ticks(1200000000)
 
 
 def test_record_store_preserves_missing_stats_without_inventing_a_number(tmp_path: Path) -> None:
     record = create_map_record(
-        *_example_map('Maps/Example/Map.bin', dialog_key='Example_Map'),
+        *_example_map('Maps/Example/Map.bin'),
         mod=EXAMPLE_MOD,
-        save_slot=SaveSlot(0, {}),
+        save_slot=make_save_progress(0, {}),
     )
 
     store = RecordStore(tmp_path / '.pist/local-data.sqlite3')
@@ -472,7 +512,7 @@ def test_new_records_of_the_same_map_remain_separate(tmp_path: Path) -> None:
         created_at=datetime(2026, 10, 4, tzinfo=UTC),
         mod_metadata_name='Example',
         map_name='Map',
-        time_played='0:01:00',
+        time_played=Duration.from_dotnet_ticks(600000000),
         status='进行中',
     )
     store = RecordStore(tmp_path / 'records.sqlite3')
@@ -512,6 +552,10 @@ def test_record_store_keeps_numbers_and_remote_links_unique(tmp_path: Path) -> N
     with pytest.raises(ValueError, match='formal record number'):
         store.save(store.load(record_id).model_copy(update={'record_number': 7}))
     next_record = record.model_copy(
-        update={'record_number': None, 'time_played': '0:01:00', 'status': '进行中'}
+        update={
+            'record_number': None,
+            'time_played': Duration.from_dotnet_ticks(600000000),
+            'status': '进行中',
+        }
     )
     assert store.load(store.save(next_record)).record_number == 167

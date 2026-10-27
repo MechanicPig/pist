@@ -1,7 +1,7 @@
 """Personal map preview with route editing and first-clear overlays."""
 
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -10,14 +10,17 @@ from pydantic import Field, PositiveInt
 
 from berries import map_layout
 from berries.entities import rules as entity_rules
-from berries.game.binmap import AttrValue
-from berries.game.enders_blender import EndersBlenderSave, FirstClearStats
-from berries.game.levels import Level, LevelSide, Map
-from berries.game.maps import MapInfo
-from berries.map_preview.navigation import EntranceResp, OpenMapReq, PreviewNavigation, map_title
+from berries.game.binmap import AttrValue, MapStringDecodeWarning
+from berries.game.content import ContentPath
+from berries.game.duration import GAME_TIMER_SECONDS_FORMAT, Duration
+from berries.game.levels import Level, LevelSide, MapKey, local_sid_for_map_file
+from berries.game.maps import Map, split_map_side_suffix
+from berries.game.saves.rooms import RoomStats
+from berries.map_entrances import MapEntranceRules
+from berries.map_preview.navigation import EntranceResp, OpenMapReq, PreviewNavigation
 from berries.map_preview.session import PreviewAssets, PreviewSession
 from berries.models import FrozenModel, StrictModel
-from pist import entity_stats
+from pist import entity_stats, map_names
 from pist.paths import PIST_DIR
 from pist.routes import models as routes
 from pist.routes.store import RouteStore
@@ -61,13 +64,6 @@ class _PreviewEntityResp(FrozenModel):
     summary: _PreviewEntitySummary | None = None
 
 
-class _PreviewRespawnResp(FrozenModel):
-    """One respawn position in the browser preview protocol."""
-
-    x: int | float
-    y: int | float
-
-
 class _PreviewRoomResp(FrozenModel):
     """One room and its rendered content in the browser preview protocol."""
 
@@ -79,12 +75,12 @@ class _PreviewRoomResp(FrozenModel):
     background: tuple[str, ...]
     solids: tuple[str, ...]
     entities: tuple[_PreviewEntityResp, ...]
-    respawns: tuple[_PreviewRespawnResp, ...]
+    respawns: tuple[map_layout.MapRespawn, ...]
     respawn_count: int = Field(serialization_alias='respawnCount')
     room_count: int = Field(serialization_alias='roomCount')
     first_clear_death: int | None = Field(default=None, serialization_alias='firstClearDeath')
-    first_clear_time: int | None = Field(default=None, serialization_alias='firstClearTime')
-    first_clear_cumulative_time: int | None = Field(
+    first_clear_time: str | None = Field(default=None, serialization_alias='firstClearTime')
+    first_clear_cumulative_time: str | None = Field(
         default=None,
         serialization_alias='firstClearCumulativeTime',
     )
@@ -109,7 +105,7 @@ class _MapPreviewStateResp(FrozenModel):
 class _MapPreviewPage:
     """One map opened during a browser map-preview session."""
 
-    map_info: MapInfo
+    map_file: ContentPath
     title: str
     layout: map_layout.MapLayout
     selected: frozenset[str]
@@ -117,13 +113,13 @@ class _MapPreviewPage:
     excluded_entities: frozenset[str]
     first_clear_rooms: tuple[str, ...]
     first_clear_room_deaths: dict[str, int]
-    first_clear_room_times: dict[str, int]
+    first_clear_room_times: dict[str, Duration]
 
     @property
-    def first_clear_cumulative_times(self) -> dict[str, int]:
+    def first_clear_cumulative_times(self) -> dict[str, Duration]:
         """Return elapsed first-clear time through each room with a complete prefix."""
-        elapsed = 0
-        cumulative: dict[str, int] = {}
+        elapsed = Duration()
+        cumulative: dict[str, Duration] = {}
         for room in self.first_clear_rooms:
             if room in cumulative:
                 continue
@@ -136,17 +132,17 @@ class _MapPreviewPage:
 
 
 class MapPreview:
-    """Serve one short-lived, loopback-only browser map-preview session."""
+    """Serve a loopback preview, borrowing supplied Dialog and audit mappings."""
 
     def __init__(
         self,
-        map_source: MapInfo | Map,
+        map_source: ContentPath | Map,
         layout: map_layout.MapLayout,
         *,
         first_clear_rooms: Iterable[str] = (),
         saved_route: routes.MapRoute | None = None,
         route_store: RouteStore | None = None,
-        enders_blender_save: EndersBlenderSave | None = None,
+        first_clear_lookup: Callable[[str, LevelSide], RoomStats | None] | None = None,
         audit_entities: dict[str, tuple[map_layout.MapPreviewEntity, ...]] | None = None,
         read_only: bool = False,
         initial_mode: MapPreviewMode = MapPreviewMode.EDIT_ROUTE,
@@ -155,17 +151,22 @@ class MapPreview:
         level_side: tuple[Level, LevelSide] | None = None,
         routable_maps: Mapping[str, tuple[Level, LevelSide]] | None = None,
         classification_rules: entity_rules.EntityRules | None = None,
+        entrance_rules: MapEntranceRules | None = None,
         statistic_rules: entity_stats.EntityStatRules | None = None,
+        on_map_warning: Callable[[Map, MapStringDecodeWarning], None] | None = None,
+        on_route_saved: Callable[[routes.MapRoute], None] | None = None,
     ) -> None:
-        map_info = map_source.map_info if isinstance(map_source, Map) else map_source
-        self._enders_blender_save = enders_blender_save
+        map_file = map_source.file_path if isinstance(map_source, Map) else map_source
+        self._dialogs = {} if dialogs is None else dialogs
+        self._first_clear_lookup = first_clear_lookup
+        self._first_clear_cache: dict[MapKey, RoomStats | None] = {}
         room_names = layout.room_names
         first_clear = tuple(first_clear_rooms)
         defaults = saved_route.rooms if saved_route is not None else first_clear
         self._navigation = PreviewNavigation(
             _MapPreviewPage(
-                map_info,
-                title or map_title(map_info, dialogs or {}),
+                map_file,
+                title or map_names.map_title(map_file, self._dialogs),
                 layout,
                 frozenset(room for room in defaults if room in room_names),
                 (
@@ -179,17 +180,20 @@ class MapPreview:
                 ),
                 frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear,
-                self._first_clear_room_deaths(map_info, layout, level_side),
-                self._first_clear_room_times(map_info, layout, level_side),
+                self._first_clear_room_deaths(map_file, layout, level_side),
+                self._first_clear_room_times(map_file, layout, level_side),
             ),
-            dialogs=dialogs or {},
+            dialogs=self._dialogs,
             maps=routable_maps,
+            on_map_warning=on_map_warning,
+            entity_rules=classification_rules,
+            entrance_rules=entrance_rules,
         )
         self._route_store = route_store
-        self._audit_entities = audit_entities or {}
+        self._on_route_saved = on_route_saved
+        self._audit_entities = {} if audit_entities is None else audit_entities
         self._read_only = read_only
         self._initial_mode = MapPreviewMode.PREVIEW if read_only else initial_mode
-        self._dialogs = dialogs or {}
         if statistic_rules is not None and classification_rules is None:
             raise ValueError('Statistic rules require classification rules.')
         self._classification_rules = classification_rules
@@ -235,7 +239,7 @@ class MapPreview:
             ),
             selected=tuple(sorted(page.selected)),
             first_clear_rooms=page.first_clear_rooms,
-            entrances=() if self._read_only else self._navigation.entrances(page.layout),
+            entrances=() if self._read_only else self._entrances(page.layout),
             can_back=self._navigation.can_back,
             can_forward=self._navigation.can_forward,
             can_home=self._navigation.can_back,
@@ -243,14 +247,27 @@ class MapPreview:
             initial_mode=self._initial_mode,
         )
 
+    def _entrances(self, layout: map_layout.MapLayout) -> tuple[EntranceResp, ...]:
+        """Apply Pist's side labels to the shared navigation's resolved entrances."""
+        return tuple(
+            entrance.model_copy(
+                update={'target_title': map_names.side_name(entrance.target_title, target[1])}
+            )
+            if (target := self._navigation.maps.get(entrance.target_sid)) is not None
+            else entrance
+            for entrance in self._navigation.entrances(layout)
+        )
+
     def _room_resp(
         self,
         room: map_layout.MapRoom,
         page: _MapPreviewPage,
-        cumulative_times: Mapping[str, int],
+        cumulative_times: Mapping[str, Duration],
     ) -> _PreviewRoomResp:
         """Project one decoded room into the browser protocol."""
         entities = (*room.entities, *self._audit_entities.get(room.name, ()))
+        time = page.first_clear_room_times.get(room.name)
+        cumulative_time = cumulative_times.get(room.name)
         return _PreviewRoomResp(
             name=room.name,
             x=room.x,
@@ -262,14 +279,14 @@ class MapPreview:
             entities=tuple(
                 self._entity_resp(entity, page.excluded_entities) for entity in entities
             ),
-            respawns=tuple(
-                _PreviewRespawnResp(x=respawn.x, y=respawn.y) for respawn in room.respawns
-            ),
+            respawns=room.respawns,
             respawn_count=len(room.respawns),
             room_count=page.room_counts.get(room.name, 1),
             first_clear_death=page.first_clear_room_deaths.get(room.name),
-            first_clear_time=page.first_clear_room_times.get(room.name),
-            first_clear_cumulative_time=cumulative_times.get(room.name),
+            first_clear_time=None if time is None else format(time, GAME_TIMER_SECONDS_FORMAT),
+            first_clear_cumulative_time=None
+            if cumulative_time is None
+            else format(cumulative_time, GAME_TIMER_SECONDS_FORMAT),
         )
 
     def _entity_resp(
@@ -321,11 +338,11 @@ class MapPreview:
             return self._state_response()
         target_level_side = (target_level, target_side)
         target = target_level[target_side]
-        first_clear_rooms = (
-            self._enders_blender_save.first_clear_room_order(target_level, target_side)
-            if self._enders_blender_save is not None
-            else ()
-        )
+        try:
+            stats = self._first_clear_stats(target.file_path, target_level_side)
+        except ValueError as error:
+            return web.json_response({'error': str(error)}, status=400)
+        first_clear_rooms = () if stats is None else tuple(stats.room_order)
         room_names = layout.room_names
         try:
             saved_route = (
@@ -338,8 +355,8 @@ class MapPreview:
         defaults = saved_route.rooms if saved_route is not None else first_clear_rooms
         self._navigation.append(
             _MapPreviewPage(
-                target.map_info,
-                target_level.display_name(target_side, self._dialogs, ('zh-cn', 'en')),
+                target.file_path,
+                map_names.display_name(target_level, target_side, self._dialogs, 'zh-cn'),
                 layout,
                 frozenset(room for room in defaults if room in room_names),
                 (
@@ -353,8 +370,8 @@ class MapPreview:
                 ),
                 frozenset() if saved_route is None else saved_route.excluded_entities,
                 first_clear_rooms,
-                self._first_clear_room_deaths(target.map_info, layout, target_level_side),
-                self._first_clear_room_times(target.map_info, layout, target_level_side),
+                self._first_clear_room_deaths(target.file_path, layout, target_level_side),
+                self._first_clear_room_times(target.file_path, layout, target_level_side),
             )
         )
         return self._state_response()
@@ -383,7 +400,7 @@ class MapPreview:
         selected, excluded_entities, room_counts = saved
         page = self._navigation.current
         route = routes.MapRoute(
-            map_file=page.map_info.file_path.as_posix(),
+            map_file=page.map_file.as_posix(),
             rooms=tuple(room.name for room in page.layout.rooms if room.name in selected),
             room_counts=room_counts,
             excluded_entities=excluded_entities,
@@ -396,6 +413,8 @@ class MapPreview:
         page.selected = selected
         page.room_counts = room_counts
         page.excluded_entities = excluded_entities
+        if self._on_route_saved is not None:
+            self._on_route_saved(route)
         return web.json_response({'ok': True})
 
     async def _cancel(self, _: web.Request) -> web.Response:
@@ -437,22 +456,29 @@ class MapPreview:
 
     def _first_clear_stats(
         self,
-        map_info: MapInfo,
+        map_file: ContentPath,
         level_side: tuple[Level, LevelSide] | None,
-    ) -> FirstClearStats | None:
-        if self._enders_blender_save is None:
+    ) -> RoomStats | None:
+        if self._first_clear_lookup is None:
             return None
         if level_side is not None:
-            return self._enders_blender_save.first_clear_stats(*level_side)
-        return self._enders_blender_save.first_clear_stats_for_file(map_info)
+            sid, side = level_side[0].sid, level_side[1]
+        else:
+            base, suffix = split_map_side_suffix(map_file)
+            sid = local_sid_for_map_file(base)
+            side = LevelSide.A if suffix is None else LevelSide[suffix]
+        key = sid, side
+        if key not in self._first_clear_cache:
+            self._first_clear_cache[key] = self._first_clear_lookup(sid, side)
+        return self._first_clear_cache[key]
 
     def _first_clear_room_deaths(
         self,
-        map_info: MapInfo,
+        map_file: ContentPath,
         layout: map_layout.MapLayout,
         level_side: tuple[Level, LevelSide] | None = None,
     ) -> dict[str, int]:
-        if (stats := self._first_clear_stats(map_info, level_side)) is None:
+        if (stats := self._first_clear_stats(map_file, level_side)) is None:
             return {}
         return {
             room.name: death
@@ -462,14 +488,14 @@ class MapPreview:
 
     def _first_clear_room_times(
         self,
-        map_info: MapInfo,
+        map_file: ContentPath,
         layout: map_layout.MapLayout,
         level_side: tuple[Level, LevelSide] | None = None,
-    ) -> dict[str, int]:
-        if (stats := self._first_clear_stats(map_info, level_side)) is None:
+    ) -> dict[str, Duration]:
+        if (stats := self._first_clear_stats(map_file, level_side)) is None:
             return {}
         return {
-            room.name: time.total_milliseconds
+            room.name: time
             for room in layout.rooms
             if (time := stats.room_times.get(room.name)) is not None
         }

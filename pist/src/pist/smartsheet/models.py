@@ -71,7 +71,9 @@ class RecordWrite(FrozenModel):
     model_config = ConfigDict(populate_by_name=True)
 
     values: JsonObject
-    record_id: str | None = Field(default=None, serialization_alias='recordID')
+    record_id: str | None = Field(
+        default=None, validation_alias='recordID', serialization_alias='recordID'
+    )
 
 
 class RecordWriteOptions(SmartSheetOperationOptions):
@@ -104,10 +106,11 @@ class SmartSheetSelectOption(ExternalModel):
     """One visible option declared by a Smart Sheet select field."""
 
     text: str
+    id: str | None = None
 
 
-class SmartSheetSingleSelect(ExternalModel):
-    """Options declared for one Smart Sheet single-select field."""
+class SmartSheetSelect(ExternalModel):
+    """Options declared for one Smart Sheet single- or multi-select field."""
 
     options: list[SmartSheetSelectOption] = Field(default_factory=list)
 
@@ -119,10 +122,23 @@ class SmartSheetField(ExternalModel):
     field_title: str = Field(validation_alias='fieldTitle')
     field_type: int = Field(validation_alias='fieldType')
     property_formula: object | None = Field(default=None, validation_alias='propertyFormula')
-    property_single_select: SmartSheetSingleSelect | None = Field(
+    property_single_select: SmartSheetSelect | None = Field(
         default=None,
         validation_alias='propertySingleSelect',
     )
+    property_select: SmartSheetSelect | None = Field(
+        default=None, validation_alias='propertySelect'
+    )
+
+    @property
+    def select_options(self) -> tuple[SmartSheetSelectOption, ...]:
+        """Return options from the property belonging to this field's select type."""
+        choices = (
+            self.property_single_select
+            if self.field_type == FieldType.SINGLE_SELECT
+            else self.property_select
+        )
+        return () if choices is None else tuple(choices.options)
 
 
 class FieldsResult(ExternalModel):
@@ -140,6 +156,8 @@ class ViewsResult(ExternalModel):
 
 class SmartSheetRecord(ExternalModel):
     """One Smart Sheet record returned by a read or write operation."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     record_id: str | None = Field(default=None, validation_alias='recordID')
     values: JsonObject = Field(default_factory=dict)

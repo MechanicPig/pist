@@ -4,17 +4,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
+from pydantic import ValidationError
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Select, Static
-from textual.widgets._select import SelectCurrent, SelectOverlay
 
-from berries.entities.rules import EntityRules
-
-from ..kinds import KindTree, add_kind_nodes, kind_button_label
+from berries.entities.rules import EntityKind, EntityRules
+from pist.ui.entities.kinds import KindTree, add_kind_nodes, kind_button_label
 
 NEW_KIND_NAME_ID = 'audit-new-kind-name'
 NEW_KIND_LABEL_ID = 'audit-new-kind-label'
@@ -25,39 +24,25 @@ KIND_TREE_ID = 'audit-kind-tree'
 
 
 @dataclass(frozen=True, slots=True)
-class NewKind:
+class KindEdit:
     """One validated category edit returned by the category-editor screen."""
 
     name: str
-    label: str
-    parent: str | None
-    sprite: str | None
+    definition: EntityKind
 
 
-type SaveKind = Callable[[NewKind, str | None], EntityRules | None]
+type SaveKind = Callable[[KindEdit, str | None], EntityRules | None]
 type DeleteKind = Callable[[str], EntityRules | None]
-
-
-class AuditSelectOverlay(SelectOverlay):
-    """Keep wheel events inside an expanded audit dropdown at either scroll edge."""
-
-    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        super()._on_mouse_scroll_down(event)
-        event.stop()
-
-    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        super()._on_mouse_scroll_up(event)
-        event.stop()
 
 
 class AuditSelect(Select[str]):
     """A string Select whose option overlay never scrolls its parent container."""
 
-    def compose(self) -> ComposeResult:
-        yield SelectCurrent(self.prompt)
-        yield AuditSelectOverlay(type_to_search=self._type_to_search).data_bind(
-            compact=Select.compact
-        )
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
 
 
 class KindDeleteScreen(ModalScreen[bool]):
@@ -79,10 +64,12 @@ class KindDeleteScreen(ModalScreen[bool]):
         with Vertical(id='kind-delete-dialog'):
             yield Static('删除类别', classes='audit-section-title')
             text = Text()
-            text.append(f'删除 {self._label} ({self._kind})？\n\n')
-            text.append(f'直接命中的 {self._rule_count} 条规则将改为父类别 {self._fallback}。\n')
-            text.append(f'{self._child_count} 个子类别也会提升到该父类别。\n')
-            text.append('审计中的已确认类别会同步降级。', style='yellow')
+            text.append(f'删除 {self._label} ({self._kind})？\n\n')  # pyright: ignore[reportUnusedCallResult]
+            text.append(  # pyright: ignore[reportUnusedCallResult]
+                f'直接命中的 {self._rule_count} 条规则将改为父类别 {self._fallback}。\n'
+            )
+            text.append(f'{self._child_count} 个子类别也会提升到该父类别。\n')  # pyright: ignore[reportUnusedCallResult]
+            text.append('审计中的已确认类别会同步降级。', style='yellow')  # pyright: ignore[reportUnusedCallResult]
             yield Static(text)
             with Horizontal():
                 yield Button('取消', id='kind-delete-cancel')
@@ -90,15 +77,15 @@ class KindDeleteScreen(ModalScreen[bool]):
 
     @on(Button.Pressed, '#kind-delete-cancel')
     def cancel(self) -> None:
-        self.dismiss(False)
+        self.dismiss(False)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, '#kind-delete-confirm')
     def confirm(self) -> None:
-        self.dismiss(True)
+        self.dismiss(True)  # pyright: ignore[reportUnusedCallResult]
 
 
-class KindEditorScreen(ModalScreen[NewKind | None]):
-    """Create or edit one local collectible kind without editing TOML by hand."""
+class KindEditorScreen(ModalScreen[KindEdit | None]):
+    """Create or edit one collectible kind in explicit shared maintenance mode."""
 
     BINDINGS: ClassVar = [('escape', 'dismiss', '取消')]
 
@@ -151,11 +138,11 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
 
     @on(Button.Pressed, '#new-kind-cancel')
     def cancel(self) -> None:
-        self.dismiss(None)
+        self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, f'#{NEW_KIND_PARENT_ID}')
     def select_parent(self) -> None:
-        self.app.push_screen(
+        self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
             KindPickerScreen(
                 self._rules,
                 title='选择父类别',
@@ -179,14 +166,16 @@ class KindEditorScreen(ModalScreen[NewKind | None]):
             return
         label = self.query_one(f'#{NEW_KIND_LABEL_ID}', Input).value.strip() or name
         sprite = self.query_one(f'#{NEW_KIND_SPRITE_ID}', Input).value.strip() or None
-        self.dismiss(
-            NewKind(
-                name=name,
+        try:
+            definition = EntityKind(
                 label=label,
                 parent=self._parent_kind,
                 sprite=sprite,
             )
-        )
+        except ValidationError as error:
+            self.notify(str(error), severity='warning', markup=False)
+            return
+        self.dismiss(KindEdit(name, definition))  # pyright: ignore[reportUnusedCallResult]
 
 
 class KindContextScreen(ModalScreen[Literal['add', 'edit', 'delete'] | None]):
@@ -233,7 +222,7 @@ class KindContextScreen(ModalScreen[Literal['add', 'edit', 'delete'] | None]):
                 action = 'delete'
             case _:
                 action = None
-        self.dismiss(action)
+        self.dismiss(action)  # pyright: ignore[reportUnusedCallResult]
 
 
 class KindPickerScreen(ModalScreen[str | None]):
@@ -264,7 +253,7 @@ class KindPickerScreen(ModalScreen[str | None]):
             tree.show_root = False
             tree.auto_expand = False
             add_kind_nodes(tree.root, self._rules)
-            tree.root.expand_all()
+            tree.root.expand_all()  # pyright: ignore[reportUnusedCallResult]
             yield tree
             if self._allow_blank:
                 yield Button('不设父类别', id='kind-picker-clear')
@@ -273,15 +262,15 @@ class KindPickerScreen(ModalScreen[str | None]):
     def select_kind(self, event: KindTree.KindConfirmed) -> None:
         if self.app.screen is not self:
             return
-        event.stop()
-        self.dismiss(event.kind)
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
+        self.dismiss(event.kind)  # pyright: ignore[reportUnusedCallResult]
 
     @on(KindTree.ContextRequested)
     def open_context_menu(self, event: KindTree.ContextRequested) -> None:
         if self._save_kind is None:
-            self.notify('当前类别选择器不能新增类别。', severity='warning')
+            self.notify('当前类别仅供选择，不支持编辑。', severity='warning')
             return
-        self.app.push_screen(
+        self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
             KindContextScreen(self._rules, event.kind, allow_delete=self._delete_kind is not None),
             lambda action, kind=event.kind: self._run_context_action(kind, action),
         )
@@ -299,12 +288,12 @@ class KindPickerScreen(ModalScreen[str | None]):
             if self._rules.kinds[kind].parent is None:
                 self.notify('根类别没有可降级的父类别，不能删除。', severity='warning')
                 return
-            self.app.push_screen(
+            self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
                 KindDeleteScreen(self._rules, kind),
                 lambda confirmed: self._delete_kind_result(kind, confirmed),
             )
             return
-        self.app.push_screen(
+        self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
             KindEditorScreen(
                 self._rules,
                 kind=kind if action == 'edit' else None,
@@ -326,9 +315,9 @@ class KindPickerScreen(ModalScreen[str | None]):
         parent = self._rules.kinds[kind].parent
         assert parent is not None
         self._rules = rules
-        self.dismiss(parent)
+        self.dismiss(parent)  # pyright: ignore[reportUnusedCallResult]
 
-    def _save_kind_result(self, result: NewKind | None, previous_name: str | None) -> None:
+    def _save_kind_result(self, result: KindEdit | None, previous_name: str | None) -> None:
         if result is None:
             return
         save_kind = self._save_kind
@@ -338,10 +327,10 @@ class KindPickerScreen(ModalScreen[str | None]):
         if rules is None:
             return
         self._rules = rules
-        self.dismiss(result.name)
+        self.dismiss(result.name)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, '#kind-picker-clear')
     def clear_kind(self) -> None:
         if self.app.screen is not self:
             return
-        self.dismiss(None)
+        self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]

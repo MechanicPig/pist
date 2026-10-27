@@ -60,14 +60,14 @@ def test_record_save_mode_defaults_only_to_known_same_slot(
 ) -> None:
     candidates = tuple(
         MapRecord(
-            local_id=index,
-            record_number=index,
+            local_id=i,
+            record_number=i,
             created_at=datetime(2026, 10, 4, tzinfo=UTC),
             mod_metadata_name='Example',
             map_name='Map',
             save_slot=slot,
         )
-        for index, slot in enumerate(candidate_slots, start=1)
+        for i, slot in enumerate(candidate_slots, start=1)
     )
 
     async def run() -> None:

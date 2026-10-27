@@ -1,21 +1,21 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sheet_factory import make_sheet_fields
 
-from berries.entities.classification import (
-    classify_map_entities,
+from berries.entities.classification import classify_map_entities
+from berries.entities.config import (
+    load_default_entity_rules,
 )
 from berries.entities.rules import (
-    SHARED_ENTITIES_PATH,
     EntityKind,
     EntityRule,
     EntityRules,
     EntityRulesForId,
-    load_entity_rules,
 )
 from berries.game.binmap import BinElement, BinMap
 from berries.game.duration import Duration
-from berries.game.saves import MapStats
 from berries.map_entity_id import MapEntityID
 from pist.entity_stats import (
     EntityStatAggregation,
@@ -25,9 +25,12 @@ from pist.entity_stats import (
     load_entity_stat_rules,
     map_entity_stats,
 )
-from pist.records.models import MapRecordProgress, map_record_progress
+from pist.records.models import MapRecord, MapRecordProgress, map_record_progress
+from pist.records.store import RecordStore
+from pist.saves import MapStats
+from pist.smartsheet.encoding import encode_record_values
 
-SHARED_RULES = load_entity_rules(SHARED_ENTITIES_PATH)
+SHARED_RULES = load_default_entity_rules()
 STAT_RULES = load_entity_stat_rules(SHARED_RULES)
 
 
@@ -60,7 +63,7 @@ def test_completion_rejects_actual_instance_identity_collisions(
     map_data = BinMap('Test', BinElement('Map', {}, (BinElement('levels', {}, (room,)),)))
     stats = map_entity_stats(map_data, entity_rules=SHARED_RULES, stat_rules=STAT_RULES)
     save = MapStats(
-        Duration.from_milliseconds(1),
+        Duration.from_dotnet_ticks(1 * 10_000),
         0,
         single_run_completed=True,
         cassette_collected=True,
@@ -95,7 +98,7 @@ def test_one_instance_projected_into_multiple_statistics_is_not_a_collision() ->
     assert stats.all_instances_collected('strawberry', collected)
     assert stats.all_instances_collected('another_strawberry', collected)
     save = MapStats(
-        Duration.from_milliseconds(1),
+        Duration.from_dotnet_ticks(1 * 10_000),
         0,
         single_run_completed=True,
         collected_strawberries=collected,
@@ -137,6 +140,69 @@ def test_entity_record_values_include_absent_count_and_existence_kinds() -> None
     )
 
     assert stats.record_values == {'主表': {'红草莓数': 0, '磁带': False}}
+
+
+@pytest.mark.parametrize('aggregation', (EntityStatAggregation.COUNT, EntityStatAggregation.EXIST))
+def test_absent_value_only_applies_to_select_statistics(aggregation: EntityStatAggregation) -> None:
+    with pytest.raises(ValueError, match='Only a select statistic'):
+        EntityStatRule(
+            kind='heart', aggregation=aggregation, table='主表', field='水晶之心', absent_value='无'
+        )
+
+
+@pytest.mark.parametrize('case', ('absent', 'known', 'unmapped', 'conflict'))
+def test_heart_absence_is_distinct_from_unresolved_or_conflicting_values(case: str) -> None:
+    rules = SHARED_RULES.with_rule('testEndHeart', 'end_level_heart', {}).with_rule(
+        'testExtraHeart', 'keep_going_heart', {}
+    )
+    entities = {
+        'absent': (),
+        'known': (BinElement('testEndHeart', {}, ()),),
+        'unmapped': (BinElement('testEndHeart', {}, ()),),
+        'conflict': (
+            BinElement('testEndHeart', {}, ()),
+            BinElement('testExtraHeart', {}, ()),
+        ),
+    }[case]
+    room = BinElement('level', {'name': 'room'}, (BinElement('entities', {}, entities),))
+    map_data = BinMap('Test', BinElement('Map', {}, (BinElement('levels', {}, (room,)),)))
+    stat_rules = STAT_RULES
+    if case == 'unmapped':
+        heart = STAT_RULES.stats['heart'].model_copy(
+            update={'values': {'keep_going_heart': '额外收集'}}
+        )
+        stat_rules = EntityStatRules(stats={**STAT_RULES.stats, 'heart': heart})
+    stats = map_entity_stats(map_data, entity_rules=rules, stat_rules=stat_rules)
+    if case in ('absent', 'known'):
+        expected = '无' if case == 'absent' else '通关收集'
+        assert stats.record_values['主表']['水晶之心'] == expected
+        assert stats.record_fields['heart'] == expected
+        assert stats.has_stat('heart') is (case == 'known')
+    else:
+        assert stats.has_stat('heart')
+        assert '水晶之心' not in stats.record_values['主表']
+        assert 'heart' not in stats.record_fields
+    assert bool(stats.select_conflicts) is (case == 'conflict')
+
+
+def test_select_statistic_without_absent_value_keeps_missing_field() -> None:
+    heart = STAT_RULES.stats['heart'].model_copy(update={'absent_value': None})
+    stats = MapEntityStats(rules=EntityStatRules(stats={'heart': heart}))
+    assert stats.record_values == {}
+
+
+def test_absent_heart_survives_local_save_and_sheet_encoding(tmp_path: Path) -> None:
+    map_data = BinMap('Test', BinElement('Map', {}, ()))
+    stats = map_entity_stats(map_data, entity_rules=SHARED_RULES, stat_rules=STAT_RULES)
+    record = MapRecord.model_validate(
+        {'created_at': datetime.now(UTC), 'map_name': 'Map', **stats.record_fields}
+    )
+    store = RecordStore(tmp_path / 'records.sqlite3')
+    saved = store.load(store.save(record))
+    assert saved.heart == '无'
+    assert encode_record_values(saved, make_sheet_fields(('水晶之心', 17))) == {
+        '水晶之心': [{'text': '无'}]
+    }
 
 
 def test_personal_stat_rules_reject_removed_public_kind(tmp_path: Path) -> None:
@@ -189,7 +255,7 @@ def test_personal_select_values_must_remain_inside_stat_kind_subtree() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match='outside the .* subtree'):
+    with pytest.raises(ValueError, match=r'outside the .* subtree'):
         rules.validate_kinds(SHARED_RULES)
 
 

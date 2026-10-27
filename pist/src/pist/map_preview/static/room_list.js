@@ -1,10 +1,8 @@
 // Room-list controls and first-clear labels; editing and camera changes belong to the page.
-import { formatTime } from './overlays.js';
-
 function firstClearData(room) {
-  if (!Number.isFinite(room.firstClearTime) && !Number.isFinite(room.firstClearDeath)) return;
+  if (typeof room.firstClearTime !== 'string' && !Number.isFinite(room.firstClearDeath)) return;
   return {
-    time: Number.isFinite(room.firstClearTime) ? formatTime(room.firstClearTime) : '',
+    time: typeof room.firstClearTime === 'string' ? room.firstClearTime : '',
     death: Number.isFinite(room.firstClearDeath) ? String(room.firstClearDeath) : '',
   };
 }

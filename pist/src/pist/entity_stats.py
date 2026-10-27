@@ -5,19 +5,22 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from berries.entities.classification import ClassifiedEntity, classify_map_entities
 from berries.entities.rules import EntityRules
 from berries.game.binmap import BinMap
 from berries.map_entity_id import MapEntityID
 from berries.models import FrozenModel
-from berries.types import StrippedNonEmptyStr
-from pist.records.fields import RECORD_ATTRIBUTES
-from pist.types import CellValue, RecordValues
+
+from .records.fields import RECORD_ATTRIBUTES
+from .types import CellValue, RecordValues
 
 ENTITY_STATS_PATH = Path(__file__).parent / 'data' / 'entity_stats.toml'
+
+type _StrippedNonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class EntityStatAggregation(StrEnum):
@@ -31,11 +34,14 @@ class EntityStatAggregation(StrEnum):
 class EntityStatRule(FrozenModel):
     """One personal statistic and its destination record field."""
 
-    kind: StrippedNonEmptyStr
+    kind: _StrippedNonEmptyStr
     aggregation: EntityStatAggregation
-    table: StrippedNonEmptyStr
-    field: StrippedNonEmptyStr
-    values: dict[StrippedNonEmptyStr, StrippedNonEmptyStr] = Field(default_factory=dict)
+    table: _StrippedNonEmptyStr
+    field: _StrippedNonEmptyStr
+    values: dict[_StrippedNonEmptyStr, _StrippedNonEmptyStr] = Field(default_factory=dict)
+    absent_value: _StrippedNonEmptyStr | None = Field(
+        default=None, description='Select value used only when no entity matches the statistic.'
+    )
 
     @model_validator(mode='after')
     def validate_values(self) -> EntityStatRule:
@@ -44,6 +50,8 @@ class EntityStatRule(FrozenModel):
                 raise ValueError('A select statistic requires at least one kind value.')
         elif self.values:
             raise ValueError('Only a select statistic can define kind values.')
+        if self.absent_value is not None and self.aggregation is not EntityStatAggregation.SELECT:
+            raise ValueError('Only a select statistic can define an absent value.')
         return self
 
 
@@ -137,9 +145,12 @@ class MapEntityStats:
                     value = self.exists(name)
                 case EntityStatAggregation.SELECT:
                     selected = self.select_values.get(name, frozenset())
-                    if len(selected) != 1:
+                    if not self.has_stat(name) and rule.absent_value is not None:
+                        value = rule.absent_value
+                    elif len(selected) == 1:
+                        value = next(iter(selected))
+                    else:
                         continue
-                    value = next(iter(selected))
             values.setdefault(rule.table, {})[rule.field] = value
         return values
 
@@ -225,10 +236,10 @@ def _duplicate_instance_ids(map_data: BinMap) -> frozenset[MapEntityID]:
             entity_id = entity.attrs.get('id')
             if type(entity_id) is not int:
                 continue
-            identity = MapEntityID(room_name, entity_id)
-            if identity in seen:
-                duplicates.add(identity)
-            seen.add(identity)
+            instance_id = MapEntityID(room_name, entity_id)
+            if instance_id in seen:
+                duplicates.add(instance_id)
+            seen.add(instance_id)
     return frozenset(duplicates)
 
 

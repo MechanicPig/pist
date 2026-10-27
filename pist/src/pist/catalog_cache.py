@@ -5,8 +5,11 @@ from pathlib import Path
 
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from berries.game.collab import JournalReferences
-from pist.sqlite_store import LOCAL_DATA_PATH, SQLiteStore
+from berries.game.collab import JournalRefs
+from berries.game.maps import Map, ModMap
+
+from . import catalog_fingerprint
+from .sqlite_store import LOCAL_DATA_PATH, SQLiteStore
 
 type CollabJournalIconPaths = dict[str, str | None]
 _ICON_PATHS = TypeAdapter(CollabJournalIconPaths, config=ConfigDict(strict=True))
@@ -19,7 +22,7 @@ class CatalogCache(SQLiteStore):
     def __init__(self, path: Path = LOCAL_DATA_PATH) -> None:
         super().__init__(path)
         with self.connect() as conn:
-            conn.executescript(
+            conn.executescript(  # pyright: ignore[reportUnusedCallResult]
                 """
                 CREATE TABLE IF NOT EXISTS collab_journal_icons (
                     mod_path TEXT NOT NULL,
@@ -65,7 +68,7 @@ class CatalogCache(SQLiteStore):
         icons: CollabJournalIconPaths,
     ) -> None:
         with self.connect() as conn:
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 """
                 INSERT INTO collab_journal_icons (mod_path, map_files, fingerprint, icons)
                 VALUES (?, ?, ?, ?)
@@ -76,9 +79,7 @@ class CatalogCache(SQLiteStore):
                 (mod_path, json.dumps(map_files), fingerprint, json.dumps(icons, sort_keys=True)),
             )
 
-    def load_references(
-        self, mod_path: str, map_file: str, fingerprint: str
-    ) -> JournalReferences | None:
+    def load_refs(self, mod_path: str, map_file: str, fingerprint: str) -> JournalRefs | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -96,17 +97,35 @@ class CatalogCache(SQLiteStore):
         invalid_count = row[1]
         if type(invalid_count) is not int or invalid_count < 0:
             return None
-        return JournalReferences(campaign_refs, invalid_count)
+        return JournalRefs(campaign_refs, invalid_count)
 
-    def save_references(
+    def journal_refs(self, map_file: Map) -> JournalRefs:
+        """Resolve journal references, reusing cached facts for unchanged Mod maps.
+
+        Read errors and map decoding warnings propagate to the caller, which owns
+        diagnostics and continuation policy. Failed reads are never cached.
+        """
+        if not isinstance(map_file, ModMap):
+            return JournalRefs.from_map(map_file)
+        mod_path = str(map_file.mod.path)
+        path = map_file.file_path.as_posix()
+        fingerprint = catalog_fingerprint.journal_fingerprint(map_file)
+        cached = self.load_refs(mod_path, path, fingerprint)
+        if cached is not None:
+            return cached
+        refs = JournalRefs.from_map(map_file)
+        self.save_refs(mod_path, path, fingerprint, refs)
+        return refs
+
+    def save_refs(
         self,
         mod_path: str,
         map_file: str,
         fingerprint: str,
-        references: JournalReferences,
+        refs: JournalRefs,
     ) -> None:
         with self.connect() as conn:
-            conn.execute(
+            conn.execute(  # pyright: ignore[reportUnusedCallResult]
                 """
                 INSERT INTO collab_journal_refs (
                     mod_path, map_file, fingerprint, campaign_refs, invalid_count
@@ -120,7 +139,7 @@ class CatalogCache(SQLiteStore):
                     mod_path,
                     map_file,
                     fingerprint,
-                    json.dumps(references.campaign_refs),
-                    references.invalid_count,
+                    json.dumps(refs.campaign_refs),
+                    refs.invalid_count,
                 ),
             )

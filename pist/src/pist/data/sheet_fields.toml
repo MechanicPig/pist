@@ -1,5 +1,6 @@
 # Pist 主表协议。额外列不写入；可选列缺失不阻止同步。
 fields = [
+  { title = '编号', type = 2 },
   { title = 'Mod元数据名', type = 1, required = true },
   { title = '地图名', type = 1, required = true },
   { title = '状态', type = 17, required = true },

@@ -1,8 +1,11 @@
 [dependency-groups]
 dev = [
+    "gmpy2-stubs>=2.2.1.5",
     "pyright>=1.1.414",
     "pytest>=8.3.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.11.0",
+    "types-lxml>=2026.2.16",
 ]
 
 [tool.uv.sources]
@@ -19,6 +22,11 @@ pythonpath = ["tests"]
 include = ["berries/src", "berries/tests", "pist/src/pist", "pist/tests", "tests", "examples"]
 exclude = [".pist", ".venv"]
 typeCheckingMode = "standard"
+reportUnusedCallResult = "none"
+executionEnvironments = [
+    { root = "berries/src", reportUnusedCallResult = "warning" },
+    { root = "pist/src", reportUnusedCallResult = "warning" },
+]
 pythonVersion = "3.14"
 venvPath = "."
 venv = ".venv"
@@ -31,7 +39,13 @@ line-length = 100
 target-version = "py314"
 
 [tool.ruff.lint]
-extend-select = ["UP010", "ANN"]
+# PLC2701 requires preview; opt into preview rules only by their exact codes.
+preview = true
+explicit-preview-rules = true
+extend-select = ["UP010", "ANN", "I001", "TID252", "SLF001", "PLC2701"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
 
 [tool.ruff.format]
 quote-style = "single"

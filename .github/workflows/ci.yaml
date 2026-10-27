@@ -53,33 +53,33 @@ jobs:
       - name: Test synthetic game and Mod fixtures
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force .pist | Out-Null
-          uv run --all-packages pytest --basetemp .pist/pytest
+          New-Item -ItemType Directory -Force .pist/tests | Out-Null
+          uv run --all-packages pytest -n auto --dist worksteal --basetemp .pist/tests/pytest
 
       - name: Build distributions
         run: uv build --all-packages --out-dir .pist/build
 
       - name: Test Berries without application dependencies
         env:
-          UV_PROJECT_ENVIRONMENT: .pist/berries-tests
+          UV_PROJECT_ENVIRONMENT: .pist/tests/berries-env
         run: |
           uv sync --package berries --group dev --frozen
           uv run --package berries --group dev python -c "from importlib.util import find_spec; assert find_spec('textual') is None; assert find_spec('keyring') is None; assert find_spec('pist.__main__') is None"
-          uv run --package berries --group dev pytest berries/tests --basetemp .pist/pytest-berries
+          uv run --package berries --group dev pytest berries/tests --basetemp .pist/tests/pytest
 
       - name: Verify minimal public installation
         shell: pwsh
         run: |
           $wheel = (Get-ChildItem .pist/build/berries-*.whl).FullName
-          uv venv .pist/package-test
-          uv pip install --python .pist/package-test/Scripts/python.exe $wheel
-          .pist/package-test/Scripts/python.exe -c "from importlib.resources import files; from importlib.util import find_spec; import berries; assert find_spec('textual') is None; assert find_spec('keyring') is None; assert files('berries').joinpath('data/entities.toml').is_file(); assert files('berries.map_preview').joinpath('static/index.html').is_file()"
+          uv venv .pist/tests/package-test
+          uv pip install --python .pist/tests/package-test/Scripts/python.exe $wheel
+          .pist/tests/package-test/Scripts/python.exe -c "from importlib.resources import files; from importlib.util import find_spec; import berries; assert find_spec('textual') is None; assert find_spec('keyring') is None; assert files('berries').joinpath('py.typed').is_file(); assert files('berries').joinpath('data/entities.toml').is_file(); assert files('berries.map_preview').joinpath('static/index.html').is_file()"
 
       - name: Verify Pist installs against built Berries wheel
         shell: pwsh
         run: |
           $berriesWheel = (Get-ChildItem .pist/build/berries-*.whl).FullName
           $pistWheel = (Get-ChildItem .pist/build/pist-*.whl).FullName
-          uv venv .pist/app-package-test
-          uv pip install --python .pist/app-package-test/Scripts/python.exe $berriesWheel $pistWheel
-          .pist/app-package-test/Scripts/pist.exe --help
+          uv venv .pist/tests/app-package-test
+          uv pip install --python .pist/tests/app-package-test/Scripts/python.exe $berriesWheel $pistWheel
+          .pist/tests/app-package-test/Scripts/pist.exe --help

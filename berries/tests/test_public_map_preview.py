@@ -1,31 +1,37 @@
 import asyncio
 import json
-from typing import cast
 from urllib.parse import urlsplit
 
 import pytest
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession
 
 from berries.game.content import ContentPath
-from berries.game.maps import MapInfo
-from berries.map_layout import MapEntrance, MapLayout, MapPreviewEntity, MapRoom
+from berries.map_layout import MapEntrance, MapLayout, MapPreviewEntity, MapRespawn, MapRoom
 from berries.map_preview import MapPreview
 from test_support.browser import load_browser_modules
-from test_support.preview import preview_url
+from test_support.map_factory import make_level_side
+from test_support.preview import preview_request, preview_url
 
 
-class _Request:
-    def __init__(self, data: object, *, match_info: dict[str, str] | None = None) -> None:
-        self._data = data
-        self.match_info = {} if match_info is None else match_info
-
-    async def json(self) -> object:
-        return self._data
+@pytest.mark.parametrize('seeded', (False, True))
+def test_public_preview_observes_updates_to_supplied_dialog_mapping(seeded: bool) -> None:
+    target, side = make_level_side(file_path='Maps/Pack/Target.bin')
+    dialogs: dict[str, dict[str, str]] = {'en': {}} if seeded else {}
+    preview = MapPreview(
+        ContentPath('Maps/Pack/Source.bin'),
+        MapLayout((MapRoom('start', 0, 0, 32, 32),), (MapEntrance('start', target.sid),)),
+        dialogs=dialogs,
+        routable_maps={target.sid: (target, side)},
+    )
+    dialogs['en'] = {target.dialog_key: 'Updated target'}
+    response = asyncio.run(preview_request(preview, 'GET', 'state'))
+    state = asyncio.run(response.json())
+    assert state['entrances'][0]['targetTitle'] == 'Updated target'
 
 
 def test_public_preview_protocol_contains_only_objective_map_state() -> None:
     preview = MapPreview(
-        MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin')),
+        ContentPath('Maps/Author/Pack/Map.bin'),
         MapLayout(
             (
                 MapRoom(
@@ -36,6 +42,7 @@ def test_public_preview_protocol_contains_only_objective_map_state() -> None:
                     184,
                     background=('10',),
                     solids=('01',),
+                    respawns=(MapRespawn(8, 16.5),),
                     entities=(
                         MapPreviewEntity(
                             8,
@@ -55,10 +62,10 @@ def test_public_preview_protocol_contains_only_objective_map_state() -> None:
         title='Map',
     )
 
-    response = asyncio.run(preview._state(cast(web.Request, _Request({}))))
+    response = asyncio.run(preview_request(preview, 'GET', 'state'))
 
-    assert response.text is not None
-    state = json.loads(response.text)
+    assert asyncio.run(response.text()) is not None
+    state = json.loads(asyncio.run(response.text()))
     assert state.keys() == {'title', 'rooms', 'entrances', 'canBack', 'canForward', 'canHome'}
     assert state['rooms'][0].keys() == {
         'name',
@@ -83,11 +90,12 @@ def test_public_preview_protocol_contains_only_objective_map_state() -> None:
         },
         {'x': 32, 'y': 48, 'kind': 'audit'},
     ]
+    assert state['rooms'][0]['respawns'] == [{'x': 8, 'y': 16.5}]
 
 
 def test_public_preview_rejects_unavailable_map_entry() -> None:
     preview = MapPreview(
-        MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin')),
+        ContentPath('Maps/Author/Pack/Map.bin'),
         MapLayout(
             (MapRoom('start', 0, 0, 320, 184),),
             (MapEntrance('start', 'Author/Pack/Target'),),
@@ -95,7 +103,7 @@ def test_public_preview_rejects_unavailable_map_entry() -> None:
     )
 
     response = asyncio.run(
-        preview._open(cast(web.Request, _Request({'targetSid': 'Author/Pack/Target'})))
+        preview_request(preview, 'POST', 'open', {'targetSid': 'Author/Pack/Target'})
     )
 
     assert response.status == 400
@@ -105,7 +113,7 @@ def test_public_preview_serves_loopback_state_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     preview = MapPreview(
-        MapInfo(file_path=ContentPath('Maps/Test.bin')),
+        ContentPath('Maps/Test.bin'),
         MapLayout((MapRoom('room', 0, 0, 8, 8),)),
     )
     urls: list[str] = []

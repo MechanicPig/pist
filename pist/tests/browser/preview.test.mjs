@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EditState } from '../../src/pist/map_preview/static/edit_state.js';
 import { MapOverlays } from '../../src/pist/map_preview/static/overlays.js';
+import { RoomList } from '../../src/pist/map_preview/static/room_list.js';
 import { MapGeometry } from '../../../berries/src/berries/map_preview/static/geometry.js';
 
 function state(readOnly = false) {
   return { readOnly, selected: ['start'], rooms: [
     { name: 'start', x: 0, y: 0, width: 100, height: 100, roomCount: 2,
-      background: [], solids: [], respawns: [], firstClearTime: 1000, firstClearCumulativeTime: 1000,
+      background: [], solids: [], respawns: [], firstClearTime: '00:01', firstClearCumulativeTime: '00:01',
       entities: [{ x: 10, y: 10, kind: 'strawberry', key: 'one', summary: { kind: 'berry', label: '草莓', stat: 'count' } }] },
     { name: 'end', x: 100, y: 0, width: 100, height: 100,
-      background: [], solids: [], respawns: [], firstClearTime: 2000, firstClearCumulativeTime: 3000,
+      background: [], solids: [], respawns: [], firstClearTime: '00:02', firstClearCumulativeTime: '00:03',
       entities: [{ x: 10, y: 10, kind: 'strawberry', key: 'two', excluded: true, summary: { kind: 'berry', label: '草莓', stat: 'count' } }] },
   ], firstClearRooms: ['start', 'end'], entrances: [] };
 }
@@ -110,11 +111,35 @@ test('canvas labels switch between room and cumulative time without changing lis
   const edit = new EditState();
   edit.load(next);
   overlays.draw({ state: next, mode: 'preview', edit, showRoute: true, showTime: true, timeMode: 'room' });
-  assert.ok(texts.includes('0:00:02'));
+  assert.ok(texts.includes('00:02'));
   assert.ok(texts.includes('target'));
   assert.ok(boxes.some(box => box.join(',') === '110,20,30,40'));
   texts.length = 0;
   overlays.draw({ state: next, mode: 'preview', edit, showRoute: true, showTime: true, timeMode: 'cumulative' });
-  assert.ok(texts.includes('0:00:03'));
-  assert.equal(next.rooms[1].firstClearTime, 2000);
+  assert.ok(texts.includes('00:03'));
+  assert.equal(next.rooms[1].firstClearTime, '00:02');
+});
+
+test('room list displays backend time text verbatim, preserving zero and missing values', t => {
+  const previous = globalThis.document;
+  t.after(() => { globalThis.document = previous; });
+  function element() {
+    return { children: [], classList: { toggle() {} },
+      append(...children) { this.children.push(...children); },
+      replaceChildren() { this.children.length = 0; }, addEventListener() {} };
+  }
+  globalThis.document = { createElement: element };
+  const node = element();
+  const next = state();
+  next.rooms[0].firstClearTime = '-1:02:03';
+  next.rooms[1].firstClearTime = '00:00';
+  next.rooms.push({ name: 'deaths-only', firstClearDeath: 0 }, { name: 'missing' });
+  const list = new RoomList(node, { value: '' }, {});
+  list.render({ rooms: next.rooms, mode: 'preview' });
+  const data = index => node.children[index].children[0].children[1];
+  assert.equal(data(0).children[0].textContent, '-1:02:03');
+  assert.equal(data(1).children[0].textContent, '00:00');
+  assert.equal(data(2).children[0].textContent, '');
+  assert.equal(data(2).children[1].textContent, '0');
+  assert.equal(node.children[3].children[0].children.length, 1);
 });

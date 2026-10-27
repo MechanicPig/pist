@@ -10,7 +10,39 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from berries.entities.rules import EntityRuleLayer, EntityRulesForId, entity_rules_toml
+from berries.entities.rules import (
+    EntityRuleLayer,
+    EntityRulesForId,
+)
+from berries.entities.serialization import entity_rules_toml
+
+
+class IncompleteAuditReviewScreen(ModalScreen[bool]):
+    """Offer incomplete candidates for review without preventing explicit continuation."""
+
+    BINDINGS: ClassVar = [('escape', 'dismiss', '返回补审')]
+
+    def __init__(self, entities: tuple[str, ...]) -> None:
+        super().__init__()
+        self._entities = entities
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id='audit-rules-refresh-dialog'):
+            yield Static('部分候选尚未完全覆盖', classes='audit-section-title')
+            yield Static('可以返回补完审查，也可以继续刷新并查看实际规则差异。')
+            with VerticalScroll(id='audit-rules-refresh-body'):
+                yield Static('\n'.join(self._entities), id='audit-incomplete-list', markup=False)
+            with Horizontal():
+                yield Button('返回补审', id='audit-incomplete-cancel')
+                yield Button('继续刷新', id='audit-incomplete-continue', variant='primary')
+
+    @on(Button.Pressed, '#audit-incomplete-cancel')
+    def cancel(self) -> None:
+        self.dismiss(False)  # pyright: ignore[reportUnusedCallResult]
+
+    @on(Button.Pressed, '#audit-incomplete-continue')
+    def proceed(self) -> None:
+        self.dismiss(True)  # pyright: ignore[reportUnusedCallResult]
 
 
 class AuditRulesRefreshScreen(ModalScreen[bool]):
@@ -33,11 +65,11 @@ class AuditRulesRefreshScreen(ModalScreen[bool]):
 
     @on(Button.Pressed, '#audit-rules-refresh-cancel')
     def cancel(self) -> None:
-        self.dismiss(False)
+        self.dismiss(False)  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, '#audit-rules-refresh-save')
     def save(self) -> None:
-        self.dismiss(True)
+        self.dismiss(True)  # pyright: ignore[reportUnusedCallResult]
 
 
 def audit_layer_diff(current: EntityRuleLayer, refreshed: EntityRuleLayer) -> str:
@@ -103,6 +135,6 @@ def _diff_text(diff: str) -> Text:
             if line.startswith('-')
             else 'dim'
         )
-        text.append(f'{line}\n', style=style)
+        text.append(f'{line}\n', style=style)  # pyright: ignore[reportUnusedCallResult]
     text.rstrip()
     return text

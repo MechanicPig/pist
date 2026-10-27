@@ -2,46 +2,51 @@
 
 import asyncio
 import json
+import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
 
 from rich.text import Text
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, OptionList, Select, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from berries.entities.rules import (
-    EntityConfigStore,
+    EntityRule,
     EntityRuleLayer,
     EntityRules,
 )
-from berries.game.binmap import AttrValue
 from berries.game.content import ContentPath
-from berries.game.saves import MapProgress, SaveReader
 from berries.map_preview import MapPreview
 from pist.entities import audit as backend
 from pist.entities.audit import kind_changes
 from pist.entities.audit.inference import rule_candidates_for_detail
-
-from ...tui import RefreshableCssApp
-from ..kinds import kind_button_label
-from ..occurrences import (
+from pist.entities.audit.models import RuleGenerationResult
+from pist.entities.config import EntityConfigStore
+from pist.entities.maintenance import EntityRuleLibrary
+from pist.save_progress import MapProgress, SaveProgressIndex
+from pist.saves import SaveProgressReader
+from pist.ui.entities.kinds import kind_button_label
+from pist.ui.entities.occurrences import (
     OccurrenceScreen,
     load_occurrence_map,
     occurrence_preview_entities,
 )
+from pist.ui.tui import RefreshableCssApp
+
+from .classification import ClassificationGroup, classification_groups
 from .kind_dialogs import (
     AuditSelect,
+    KindEdit,
     KindPickerScreen,
-    NewKind,
 )
-from .rules_refresh import AuditRulesRefreshScreen, audit_layer_diff
+from .rules_refresh import AuditRulesRefreshScreen, IncompleteAuditReviewScreen, audit_layer_diff
 
 ENTITY_FILTER_ID = 'audit-entity-filter'
 ENTITY_LIST_ID = 'audit-entity-list'
@@ -125,46 +130,23 @@ ATTR_STATUS_STYLES: Mapping[backend.AttrAuditStatus, str] = MappingProxyType(
 def _entity_option_label(summary: backend.EntityAuditSummary) -> Text:
     """Render one virtualized entity-navigation row."""
     text = Text(summary.entity_name, style='bold')
-    text.append(
+    text.append(  # pyright: ignore[reportUnusedCallResult]
         f' [{ENTITY_STATUS_LABELS[summary.status]}]',
         style=ENTITY_STATUS_STYLES[summary.status],
     )
-    text.append(f'\n{summary.occurrence_count} instances', style='dim')
+    text.append(f'\n{summary.occurrence_count} instances', style='dim')  # pyright: ignore[reportUnusedCallResult]
     if summary.variant_count is not None:
-        text.append(f' · {summary.variant_count} variants', style='dim')
+        text.append(f' · {summary.variant_count} variants', style='dim')  # pyright: ignore[reportUnusedCallResult]
     if summary.unreviewed_variant_count:
-        text.append(f' · {summary.unreviewed_variant_count} 个新变体待复核', style='dark_orange')
+        text.append(  # pyright: ignore[reportUnusedCallResult]
+            f' · {summary.unreviewed_variant_count} 个新变体待复核', style='dark_orange'
+        )
+    if summary.status is backend.EntityAuditStatus.ENTITY_CANDIDATE:
+        if summary.rules_complete is False:
+            text.append(' · 未完全覆盖', style='dark_orange')  # pyright: ignore[reportUnusedCallResult]
+        elif summary.rules_complete is None:
+            text.append(' · 覆盖检查中', style='dim')  # pyright: ignore[reportUnusedCallResult]
     return text
-
-
-@dataclass(frozen=True, slots=True)
-class ClassificationGroup:
-    """Raw variants sharing every attribute not confirmed irrelevant to kind."""
-
-    attrs: dict[str, AttrValue | None]
-    meta: dict[str, AttrValue | None]
-    variants: tuple[backend.EntityVariant, ...]
-
-    @property
-    def occurrence_count(self) -> int:
-        return sum(variant.occurrence_count for variant in self.variants)
-
-    @property
-    def classification(self) -> tuple[backend.ObservationStatus, str | None] | None:
-        """Return a shared terminal conclusion, only when every variant has one."""
-        conclusions: set[tuple[backend.ObservationStatus, str | None]] = set()
-        for variant in self.variants:
-            variant_conclusions = {
-                (observation.status, observation.kind)
-                for observation in variant.observations
-                if observation.question is backend.ObservationQuestion.ENTITY_CLASSIFICATION
-                and observation.status
-                in {backend.ObservationStatus.CONFIRMED, backend.ObservationStatus.NOT_COLLECTIBLE}
-            }
-            if len(variant_conclusions) != 1:
-                return None
-            conclusions.update(variant_conclusions)
-        return conclusions.pop() if len(conclusions) == 1 else None
 
 
 class EntityAuditApp(RefreshableCssApp[None]):
@@ -180,23 +162,28 @@ class EntityAuditApp(RefreshableCssApp[None]):
     def __init__(
         self,
         store: backend.EntityAuditStore,
-        report_id: int,
-        save_reader: SaveReader | None = None,
-        kind_store: EntityConfigStore | None = None,
+        save_reader: SaveProgressReader | None = None,
+        kind_store: EntityConfigStore | EntityRuleLibrary | None = None,
         game_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._kind_store = kind_store or EntityConfigStore()
+        self._rule_library = (
+            self._kind_store
+            if isinstance(self._kind_store, EntityRuleLibrary)
+            else EntityRuleLibrary(
+                self._kind_store.shared_path, kinds_path=self._kind_store.kinds_path
+            )
+        )
         self._rules = self._kind_store.load()
         self._kind_values: dict[str, str | None] = {
             ENTITY_KIND_ID: None,
             OBSERVATION_KIND_ID: None,
         }
-        self._report_id = report_id
-        self._save_reader = save_reader
+        self._save_progress = None if save_reader is None else SaveProgressIndex(save_reader)
         self._game_dir = game_dir
-        self._summaries = store.entity_summaries(report_id)
+        self._summaries = store.entity_summaries()
         self._summary_sort_keys: dict[str, tuple[int, int, str]] = {}
         self._selected_entity: backend.EntityAuditDetail | None = None
         self._selected_attr: backend.AttrAuditSummary | None = None
@@ -279,7 +266,29 @@ class EntityAuditApp(RefreshableCssApp[None]):
         )
 
     def on_mount(self) -> None:
-        self.query_one(f'#{ENTITY_FILTER_ID}', Input).focus()
+        self.query_one(f'#{ENTITY_FILTER_ID}', Input).focus()  # pyright: ignore[reportUnusedCallResult]
+        self.run_worker(self._load_rule_coverage(), group='audit-rule-coverage', exclusive=True)  # pyright: ignore[reportUnusedCallResult]
+
+    async def _load_rule_coverage(self) -> None:
+        """Populate candidate coverage without blocking navigation or replacing newer edits."""
+        try:
+            result = await asyncio.to_thread(self._store.rule_generation_result)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+            self.notify(f'候选覆盖检查失败：{error}', severity='error')
+            return
+        self._apply_rule_coverage(result, initial=True)
+
+    def _apply_rule_coverage(self, result: RuleGenerationResult, *, initial: bool = False) -> None:
+        incomplete = frozenset(result.incomplete_entities)
+        self._summaries = tuple(
+            replace(summary, rules_complete=summary.entity_name not in incomplete)
+            if summary.status is backend.EntityAuditStatus.ENTITY_CANDIDATE
+            and (not initial or summary.rules_complete is None)
+            else summary
+            for summary in self._summaries
+        )
+        for summary in self._summaries:
+            self._update_entity_option(summary)
 
     @on(Input.Changed, f'#{ENTITY_FILTER_ID}')
     def filter_entities(self, event: Input.Changed) -> None:
@@ -306,7 +315,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self.query_one(f'#{ENTITY_STATUS_ID}', Select).value = summary.status.value
         self._disable_attribute_controls()
         self._disable_observation_controls()
-        self.run_worker(
+        self.run_worker(  # pyright: ignore[reportUnusedCallResult]
             self._load_entity(entity_name),
             group='entity-audit-detail',
             exclusive=True,
@@ -321,9 +330,9 @@ class EntityAuditApp(RefreshableCssApp[None]):
     def _load_entity_data(self, entity_name: str) -> tuple[backend.EntityAuditDetail, int, int]:
         """Read all deferred summary values in the worker thread, not the UI loop."""
         return (
-            self._store.entity_detail(entity_name, self._report_id),
-            self._store.raw_variant_count(entity_name, self._report_id),
-            self._store.unreviewed_variant_count(entity_name, self._report_id),
+            self._store.entity_detail(entity_name),
+            self._store.raw_variant_count(entity_name),
+            self._store.unreviewed_variant_count(entity_name),
         )
 
     def _select_entity(
@@ -334,7 +343,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         unreviewed_variant_count: int | None = None,
     ) -> None:
         """Load one selected entity into the detail controls."""
-        self._selected_entity = detail or self._store.entity_detail(entity_name, self._report_id)
+        self._selected_entity = detail or self._store.entity_detail(entity_name)
         self._refresh_selected_summary(
             self._selected_entity,
             variant_count=variant_count,
@@ -410,7 +419,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         """Open map and room counts without adding another main-page scroll area."""
         if self._selected_entity is not None:
             entity_name = self._selected_entity.entity_name
-            self.run_worker(
+            self.run_worker(  # pyright: ignore[reportUnusedCallResult]
                 self._load_occurrences(entity_name, label=entity_name),
                 group='entity-audit-occurrences',
                 exclusive=True,
@@ -426,7 +435,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         label = _attrs_text(group.attrs)
         if group.meta:
             label = f'{label} · {_meta_text(group.meta)}'
-        self.run_worker(
+        self.run_worker(  # pyright: ignore[reportUnusedCallResult]
             self._load_occurrences(
                 entity_name,
                 group.variants,
@@ -443,13 +452,11 @@ class EntityAuditApp(RefreshableCssApp[None]):
         *,
         label: str,
     ) -> None:
-        maps = await asyncio.to_thread(
-            self._store.occurrence_maps, entity_name, self._report_id, variants
-        )
+        maps = await asyncio.to_thread(self._store.occurrence_maps, entity_name, variants)
         preview = None
         if self._game_dir is not None:
             preview = lambda data: self._start_occurrence_preview(entity_name, data, variants)
-        self.app.push_screen(
+        self.app.push_screen(  # pyright: ignore[reportUnusedCallResult]
             OccurrenceScreen(
                 label,
                 maps,
@@ -465,7 +472,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
         variants: tuple[backend.EntityVariant, ...] | None,
     ) -> None:
         """Keep the audit TUI responsive while a read-only browser preview is open."""
-        self.run_worker(
+        self.run_worker(  # pyright: ignore[reportUnusedCallResult]
             self._preview_occurrences(entity_name, occurrences, variants),
             name='entity-audit-map-preview',
             group='entity-audit-map-preview',
@@ -490,7 +497,6 @@ class EntityAuditApp(RefreshableCssApp[None]):
             self._store.map_occurrences,
             entity_name,
             occurrences.source,
-            self._report_id,
         )
         if variants is not None:
             raw_occurrences = backend.occurrences_for_variants(raw_occurrences, variants)
@@ -514,7 +520,6 @@ class EntityAuditApp(RefreshableCssApp[None]):
         try:
             count = self._store.confirm_entity_kind(
                 self._selected_entity.entity_name,
-                self._report_id,
                 kind,
                 reason=self.query_one(f'#{ENTITY_NOTE_ID}', Input).value.strip(),
                 evidence=_evidence_value(self.query_one(f'#{ENTITY_EVIDENCE_ID}', Input)),
@@ -540,11 +545,19 @@ class EntityAuditApp(RefreshableCssApp[None]):
         control_id = event.button.id
         if not isinstance(control_id, str) or control_id not in self._kind_values:
             return
-        self.push_screen(
+        self.push_screen(  # pyright: ignore[reportUnusedCallResult]
             KindPickerScreen(
                 self._rules,
-                save_kind=self._save_kind_from_picker,
-                delete_kind=self._delete_kind_from_picker,
+                save_kind=(
+                    self._save_kind_from_picker
+                    if isinstance(self._kind_store, EntityRuleLibrary)
+                    else None
+                ),
+                delete_kind=(
+                    self._delete_kind_from_picker
+                    if isinstance(self._kind_store, EntityRuleLibrary)
+                    else None
+                ),
             ),
             lambda kind: self._set_kind(control_id, kind),
         )
@@ -583,29 +596,25 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self.notify('已保存属性审查。')
 
     def _save_kind_from_picker(
-        self, result: NewKind, previous_name: str | None
+        self, result: KindEdit, previous_name: str | None
     ) -> EntityRules | None:
         """Persist a kind created or edited from a classification picker."""
+        if not isinstance(self._kind_store, EntityRuleLibrary):
+            self.notify('分类变更仅在共享维护模式开放。', severity='warning')
+            return None
         try:
             rules = (
-                self._rules.with_kind(
-                    result.name,
-                    result.label,
-                    parent=result.parent,
-                    sprite=result.sprite,
-                )
+                self._rules.with_kind(result.name, result.definition)
                 if previous_name is None
                 else self._rules.with_renamed_kind(
                     previous_name,
                     result.name,
-                    result.label,
-                    parent=result.parent,
-                    sprite=result.sprite,
+                    result.definition,
                 )
             )
             if previous_name is not None and previous_name != result.name:
                 kind_changes.change_kind(
-                    self._kind_store, self._store, previous_name, result.name, rules
+                    self._rule_library, self._store, previous_name, result.name, rules
                 )
                 self._kind_values = {
                     control_id: result.name if value == previous_name else value
@@ -627,17 +636,20 @@ class EntityAuditApp(RefreshableCssApp[None]):
             if previous_name != result.name
             else '更新'
         )
-        self.notify(f'已{action}类别：{result.label} ({result.name})。')
+        self.notify(f'已{action}类别：{result.definition.label} ({result.name})。')
         return self._rules
 
     def _delete_kind_from_picker(self, kind: str) -> EntityRules | None:
         """Delete one kind after its picker confirms fallback to its parent."""
+        if not isinstance(self._kind_store, EntityRuleLibrary):
+            self.notify('分类变更仅在共享维护模式开放。', severity='warning')
+            return None
         try:
             fallback = self._rules.kinds[kind].parent
             if fallback is None:
                 raise ValueError(f'Cannot delete root entity kind: {kind!r}')
             rules = self._rules.with_deleted_kind(kind)
-            kind_changes.change_kind(self._kind_store, self._store, kind, fallback, rules)
+            kind_changes.change_kind(self._rule_library, self._store, kind, fallback, rules)
             self._kind_values = {
                 control_id: fallback if value == kind else value
                 for control_id, value in self._kind_values.items()
@@ -688,10 +700,10 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self.save_entity()
 
     def _map_progress(self, map_file: str) -> MapProgress:
-        if self._save_reader is None:
+        if self._save_progress is None:
             return MapProgress.UNRECORDED
         try:
-            return self._save_reader.map_progress(ContentPath(map_file))
+            return self._save_progress.local_map_progress(ContentPath(map_file))
         except ValueError:
             return MapProgress.ENTERED
 
@@ -724,12 +736,29 @@ class EntityAuditApp(RefreshableCssApp[None]):
         return tuple(options)
 
     def _refresh_entity_options(self, query: str, highlight: str | None = None) -> None:
-        """Replace virtual rows while retaining the selected entity when visible."""
+        """Rebuild filtered or regrouped rows without resetting the viewport."""
         entities = self.query_one(f'#{ENTITY_LIST_ID}', OptionList)
-        entities.clear_options()
-        entities.add_options(self._entity_options(query))
+        scroll = entities.scroll_offset
+        if highlight is None and entities.highlighted is not None:
+            highlight = entities.get_option_at_index(entities.highlighted).id
+        entities.clear_options()  # pyright: ignore[reportUnusedCallResult]
+        entities.add_options(self._entity_options(query))  # pyright: ignore[reportUnusedCallResult]
         if highlight is not None and any(option.id == highlight for option in entities.options):
             entities.highlighted = entities.get_option_index(highlight)
+        self.call_after_refresh(  # pyright: ignore[reportUnusedCallResult]
+            entities.scroll_to, x=scroll.x, y=scroll.y, animate=False, immediate=True, force=True
+        )
+
+    def _update_entity_option(self, summary: backend.EntityAuditSummary) -> None:
+        """Update a visible row's details without changing selection or scroll."""
+        entities = self.query_one(f'#{ENTITY_LIST_ID}', OptionList)
+        try:
+            option = entities.get_option(summary.entity_name)
+        except OptionDoesNotExist:
+            return
+        prompt = _entity_option_label(summary)
+        if option.prompt != prompt:
+            entities.replace_option_prompt(summary.entity_name, prompt)  # pyright: ignore[reportUnusedCallResult]
 
     def _entity_sort_key(self, summary: backend.EntityAuditSummary) -> tuple[int, int, str]:
         """Return the immutable session-local sort key for one entity summary."""
@@ -749,9 +778,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
 
     def _reload_selected_entity(self) -> None:
         assert self._selected_entity is not None
-        self._selected_entity = self._store.entity_detail(
-            self._selected_entity.entity_name, self._report_id
-        )
+        self._selected_entity = self._store.entity_detail(self._selected_entity.entity_name)
         self._refresh_selected_summary(self._selected_entity)
         self._refresh_detail()
         self._update_entity_controls(self._selected_entity)
@@ -780,13 +807,16 @@ class EntityAuditApp(RefreshableCssApp[None]):
         summary = next(summary for summary in self._summaries if summary.entity_name == name)
         updated = replace(
             summary,
+            rules_complete=(
+                bool(rule_candidates_for_detail(detail))
+                if detail.status is backend.EntityAuditStatus.ENTITY_CANDIDATE
+                else None
+            ),
             variant_count=(
-                self._store.raw_variant_count(name, self._report_id)
-                if variant_count is None
-                else variant_count
+                self._store.raw_variant_count(name) if variant_count is None else variant_count
             ),
             unreviewed_variant_count=(
-                self._store.unreviewed_variant_count(name, self._report_id)
+                self._store.unreviewed_variant_count(name)
                 if unreviewed_variant_count is None
                 else unreviewed_variant_count
             ),
@@ -796,20 +826,30 @@ class EntityAuditApp(RefreshableCssApp[None]):
         self._summaries = tuple(
             updated if item.entity_name == name else item for item in self._summaries
         )
-        query = self.query_one(f'#{ENTITY_FILTER_ID}', Input).value
-        self._refresh_entity_options(query, highlight=name)
+        self._update_entity_option(updated)
 
     def _refresh_entity_item(self) -> None:
         """Refresh the saved entity's virtual navigation option."""
         assert self._selected_entity is not None
         name = self._selected_entity.entity_name
         summary = next(summary for summary in self._summaries if summary.entity_name == name)
-        updated = replace(summary, status=self._selected_entity.status)
+        updated = replace(
+            summary,
+            status=self._selected_entity.status,
+            rules_complete=(
+                bool(rule_candidates_for_detail(self._selected_entity))
+                if self._selected_entity.status is backend.EntityAuditStatus.ENTITY_CANDIDATE
+                else None
+            ),
+        )
         self._summaries = tuple(
             updated if item.entity_name == name else item for item in self._summaries
         )
-        query = self.query_one(f'#{ENTITY_FILTER_ID}', Input).value
-        self._refresh_entity_options(query, highlight=name)
+        if summary.status is updated.status:
+            self._update_entity_option(updated)
+        else:
+            query = self.query_one(f'#{ENTITY_FILTER_ID}', Input).value
+            self._refresh_entity_options(query, highlight=name)
 
     def _refresh_detail(self) -> None:
         assert self._selected_entity is not None
@@ -827,39 +867,55 @@ class EntityAuditApp(RefreshableCssApp[None]):
     def _loading_detail(summary: backend.EntityAuditSummary) -> Text:
         """Render summary data already available before loading the entity detail."""
         text = Text()
-        text.append(f'{summary.entity_name}\n', style='bold cyan')
-        text.append(
+        text.append(f'{summary.entity_name}\n', style='bold cyan')  # pyright: ignore[reportUnusedCallResult]
+        text.append(  # pyright: ignore[reportUnusedCallResult]
             f'实体状态: {ENTITY_STATUS_LABELS[summary.status]}\n',
             style=ENTITY_STATUS_STYLES[summary.status],
         )
-        text.append(f'{summary.occurrence_count} 个实体\n', style='dim')
-        text.append('正在加载属性与变体…', style='dim')
+        text.append(f'{summary.occurrence_count} 个实体\n', style='dim')  # pyright: ignore[reportUnusedCallResult]
+        text.append('正在加载属性与变体…', style='dim')  # pyright: ignore[reportUnusedCallResult]
         return text
 
     @on(Button.Pressed, f'#{REFRESH_AUDIT_RULES_ID}')
-    def refresh_audit_rules(self) -> None:
+    @work(group='audit-rule-generation', exclusive=True)
+    async def refresh_audit_rules(self) -> None:
         """Preview then replace published rules from completed audit decisions."""
-        layer = self._store.generated_rule_layer(self._report_id)
         try:
-            EntityRules.model_validate({'kinds': self._rules.kinds, 'entities': layer.entities})
-            current = self._kind_store.load_shared_layer()
-        except ValueError as error:
+            result = await asyncio.to_thread(self._store.rule_generation_result)
+            self._apply_rule_coverage(result)
+            if result.incomplete_entities and not await self.push_screen_wait(
+                IncompleteAuditReviewScreen(result.incomplete_entities)
+            ):
+                return
+            layer = result.layer
+            # Check cross-layer kind references before offering this layer for publication.
+            _ = EntityRules(kinds=self._rules.kinds, entities=layer.entities)
+            current = self._rule_library.load_layer()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
             self.notify(str(error), severity='warning')
             return
         diff = audit_layer_diff(current, layer)
         if not diff:
             self.notify('实体规则没有变化。')
             return
-        self.push_screen(
-            AuditRulesRefreshScreen(diff),
-            lambda confirmed: self._save_audit_rules(layer) if confirmed else None,
-        )
 
-    def _save_audit_rules(self, layer: EntityRuleLayer) -> None:
+        def save_if_confirmed(confirmed: bool | None) -> None:
+            if confirmed:
+                self._save_audit_rules(layer)  # pyright: ignore[reportUnusedCallResult]
+
+        self.push_screen(AuditRulesRefreshScreen(diff), save_if_confirmed)  # pyright: ignore[reportUnusedCallResult]
+
+    @work(group='audit-rule-save', exclusive=True)
+    async def _save_audit_rules(self, layer: EntityRuleLayer) -> None:
         try:
-            self._kind_store.save_generated_layer(layer)
+            latest = await asyncio.to_thread(self._store.rule_generation_result)
+            self._apply_rule_coverage(latest)
+            if latest.layer != layer:
+                self.notify('审计结论已变化，请重新刷新并确认规则差异。', severity='warning')
+                return
+            self._rule_library.save_layer(layer)
             self._rules = self._kind_store.load()
-        except ValueError as error:
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
             self.notify(str(error), severity='warning')
             return
         if self._selected_entity is not None:
@@ -972,6 +1028,17 @@ class EntityAuditApp(RefreshableCssApp[None]):
             self.query_one(f'#{OBSERVATION_KIND_ID}', Button).label = '确认的类别（已确认时必填）'
             self.query_one(f'#{OBSERVATION_EVIDENCE_ID}', Input).value = ''
             self.query_one(f'#{OBSERVATION_NOTE_ID}', Input).value = ''
+        if group.classification is not None:
+            status, kind_name = group.classification
+            self.query_one(
+                f'#{OBSERVATION_QUESTION_ID}', Select
+            ).value = backend.ObservationQuestion.ENTITY_CLASSIFICATION.value
+            self.query_one(f'#{OBSERVATION_STATUS_ID}', Select).value = status.value
+            if kind_name in self._rules.kinds:
+                self._kind_values[OBSERVATION_KIND_ID] = kind_name
+                self.query_one(f'#{OBSERVATION_KIND_ID}', Button).label = kind_button_label(
+                    self._rules, kind_name, prompt='选择 kind'
+                )
         status = self.query_one(f'#{OBSERVATION_STATUS_ID}', Select).value
         if isinstance(status, str):
             self._update_observation_kind_control(backend.ObservationStatus(status))
@@ -1000,7 +1067,7 @@ class EntityAuditApp(RefreshableCssApp[None]):
 
     def _refresh_variants(self) -> None:
         assert self._selected_entity is not None
-        self._groups = _classification_groups(self._selected_entity)
+        self._groups = classification_groups(self._selected_entity)
         self._selected_group = None
         variants = self.query_one(f'#{VARIANT_SELECT_ID}', Select)
         variants.disabled = False
@@ -1019,32 +1086,32 @@ class EntityAuditApp(RefreshableCssApp[None]):
         detail: backend.EntityAuditDetail, candidates: tuple[backend.RuleCandidate, ...]
     ) -> Text:
         text = Text()
-        text.append(f'{detail.entity_name}\n', style='bold cyan')
-        text.append(
+        text.append(f'{detail.entity_name}\n', style='bold cyan')  # pyright: ignore[reportUnusedCallResult]
+        text.append(  # pyright: ignore[reportUnusedCallResult]
             f'实体状态: {ENTITY_STATUS_LABELS[detail.status]}\n',
             style=ENTITY_STATUS_STYLES[detail.status],
         )
         if detail.reason:
-            text.append(f'备注: {detail.reason}\n')
+            text.append(f'备注: {detail.reason}\n')  # pyright: ignore[reportUnusedCallResult]
         if detail.kind_confirmation is not None:
-            text.append(f'整实体类别: {detail.kind_confirmation.kind}\n', style='green')
+            text.append(f'整实体类别: {detail.kind_confirmation.kind}\n', style='green')  # pyright: ignore[reportUnusedCallResult]
         likely_irrelevant = [
             attribute.name
             for attribute in detail.attr_summaries
             if attribute.status is backend.AttrAuditStatus.LIKELY_NOT_AFFECT_KIND
         ]
         if likely_irrelevant:
-            text.append(
+            text.append(  # pyright: ignore[reportUnusedCallResult]
                 f'暂定无关属性: {", ".join(map(_audit_attribute_name, likely_irrelevant))}\n',
                 style='dark_orange',
             )
-            text.append('它们已用于粗审聚合；生成的规则候选会标为暂定。\n', style='dim')
+            text.append('它们已用于粗审聚合；生成的规则候选会标为暂定。\n', style='dim')  # pyright: ignore[reportUnusedCallResult]
         if candidates:
-            text.append('规则候选（仍需人工确认）:\n', style='bold')
+            text.append('规则候选（仍需人工确认）:\n', style='bold')  # pyright: ignore[reportUnusedCallResult]
             for candidate in candidates:
-                text.append(
-                    f'  {_rule_candidate_text(candidate)}: {_attrs_text(candidate.when)} '
-                    f'{_meta_text(candidate.meta)}{_missing_text(candidate)} '
+                text.append(  # pyright: ignore[reportUnusedCallResult]
+                    f'  {_rule_candidate_text(candidate)}: {_attrs_text(candidate.rule.when)} '
+                    f'{_meta_text(candidate.rule.meta)}{_missing_text(candidate.rule)} '
                     f'({candidate.variant_count} 个已确认变体)\n',
                     style='green',
                 )
@@ -1054,19 +1121,14 @@ class EntityAuditApp(RefreshableCssApp[None]):
 async def review_entity_audit(
     report_path: Path | None = None,
     *,
-    save_reader: SaveReader | None = None,
+    save_reader: SaveProgressReader | None = None,
     game_dir: Path | None = None,
 ) -> None:
-    """Optionally import a report, then open its persisted entity-level review UI."""
+    """Optionally import raw data, then review the complete persisted knowledge base."""
     store = backend.EntityAuditStore()
-    report_id = (
-        store.import_report(report_path) if report_path is not None else store.latest_report_id()
-    )
-    if report_id is None:
-        raise ValueError(
-            'No collectible audit report is imported yet. Specify a JSON report path first.'
-        )
-    await EntityAuditApp(store, report_id, save_reader, game_dir=game_dir).run_async()
+    if report_path is not None:
+        await asyncio.to_thread(store.import_report, report_path)  # pyright: ignore[reportUnusedCallResult]
+    await EntityAuditApp(store, save_reader, game_dir=game_dir).run_async()
 
 
 def _entity_status_options() -> tuple[tuple[str, str], ...]:
@@ -1116,50 +1178,6 @@ def _observation_status_options() -> tuple[tuple[str, str], ...]:
     )
 
 
-def _classification_groups(detail: backend.EntityAuditDetail) -> tuple[ClassificationGroup, ...]:
-    """Merge only attributes already confirmed irrelevant to kind."""
-    excluded = {
-        backend.AttrAuditStatus.DOES_NOT_AFFECT_KIND,
-        backend.AttrAuditStatus.LIKELY_NOT_AFFECT_KIND,
-        backend.AttrAuditStatus.AFFECTS_BEHAVIOR,
-    }
-    names = tuple(
-        attribute.name for attribute in detail.attr_summaries if attribute.status not in excluded
-    )
-    groups: dict[tuple[AttrValue | None, ...], list[backend.EntityVariant]] = defaultdict(list)
-    for variant in detail.variants:
-        groups[
-            tuple(
-                variant.meta.get(name.removeprefix(backend.META_ATTR_PREFIX))
-                if name.startswith(backend.META_ATTR_PREFIX)
-                else variant.attrs.get(name)
-                for name in names
-            )
-        ].append(variant)
-    return tuple(
-        ClassificationGroup(
-            {
-                name: value
-                for name, value in zip(names, values, strict=True)
-                if not name.startswith(backend.META_ATTR_PREFIX)
-            },
-            {
-                name.removeprefix(backend.META_ATTR_PREFIX): value
-                for name, value in zip(names, values, strict=True)
-                if name.startswith(backend.META_ATTR_PREFIX)
-            },
-            tuple(variants),
-        )
-        for values, variants in sorted(
-            groups.items(),
-            key=lambda item: (
-                -sum(variant.occurrence_count for variant in item[1]),
-                repr(item[0]),
-            ),
-        )
-    )
-
-
 def _classification_group_options(
     groups: tuple[ClassificationGroup, ...], rules: EntityRules
 ) -> tuple[tuple[Text, str], ...]:
@@ -1180,18 +1198,20 @@ def _classification_group_label(group: ClassificationGroup, rules: EntityRules) 
     classification = group.classification
     if classification is None:
         label = Text(_classification_conditions_text(group.attrs, group.meta))
-        label.append(f'（{group.occurrence_count}实体，{len(group.variants)}变体）', style='dim')
-        label.append(' [未确认]', style='dark_orange')
+        label.append(  # pyright: ignore[reportUnusedCallResult]
+            f'（{group.occurrence_count}实体，{len(group.variants)}变体）', style='dim'
+        )
+        label.append(' [未确认]', style='dark_orange')  # pyright: ignore[reportUnusedCallResult]
         return label
     label = Text(_classification_conditions_text(group.attrs, group.meta))
-    label.append(f'（{group.occurrence_count}实体，{len(group.variants)}变体）', style='dim')
+    label.append(f'（{group.occurrence_count}实体，{len(group.variants)}变体）', style='dim')  # pyright: ignore[reportUnusedCallResult]
     status, kind = classification
     if status is backend.ObservationStatus.NOT_COLLECTIBLE:
-        label.append(' [排除]', style='dim')
+        label.append(' [排除]', style='dim')  # pyright: ignore[reportUnusedCallResult]
     elif kind is not None:
         definition = rules.kinds.get(kind)
         kind_label = kind if definition is None else definition.label
-        label.append(f' [{kind_label}]', style='green')
+        label.append(f' [{kind_label}]', style='green')  # pyright: ignore[reportUnusedCallResult]
     return label
 
 
@@ -1255,19 +1275,19 @@ def _meta_text(meta: Mapping[str, object]) -> str:
     return '' if not meta else f'地图元数据: {_attrs_text(meta)}'
 
 
-def _missing_text(candidate: backend.RuleCandidate) -> str:
+def _missing_text(rule: EntityRule) -> str:
     """Format presence conditions inferred from attributes absent in a raw variant."""
     conditions: list[str] = []
-    if candidate.missing:
-        conditions.append(f'未写入属性: {", ".join(candidate.missing)}')
-    if candidate.missing_meta:
-        conditions.append(f'未写入地图元数据: {", ".join(candidate.missing_meta)}')
+    if rule.missing:
+        conditions.append(f'未写入属性: {", ".join(rule.missing)}')
+    if rule.missing_meta:
+        conditions.append(f'未写入地图元数据: {", ".join(rule.missing_meta)}')
     return '' if not conditions else f' {"；".join(conditions)}'
 
 
 def _rule_candidate_text(candidate: backend.RuleCandidate) -> str:
     """Return the user-facing terminal outcome of one generated rule candidate."""
-    result = '排除' if candidate.exclude else candidate.kind or ''
+    result = '排除' if candidate.rule.kind is None else candidate.rule.kind
     notes = []
     if candidate.fallback:
         notes.append('默认值兜底')

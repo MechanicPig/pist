@@ -4,10 +4,36 @@ import pytest
 
 from berries.game.levels import LevelSide
 from pist.lobby_overrides import (
+    CollabLobbyOverride,
     CollabLobbyOverrideStore,
     load_collab_lobby_override_layers,
     load_collab_lobby_overrides,
 )
+
+
+@pytest.mark.parametrize('side', tuple(LevelSide))
+def test_lobby_side_names_round_trip_without_numeric_encoding(
+    tmp_path: Path, side: LevelSide
+) -> None:
+    shared = tmp_path / 'shared.toml'
+    shared.write_text('lobbies = []\n', encoding='utf-8')
+    local = tmp_path / 'local.toml'
+    store = CollabLobbyOverrideStore(shared, local)
+    lobby = 'Example/0-Lobbies/1-Easy'
+    result = store.save_local(lobby, side, ())
+    assert result.campaigns_for(lobby, side) == ()
+    assert f'side = "{side.name}"' in local.read_text(encoding='utf-8')
+    override = result.lobbies[0]
+    assert override.model_dump(mode='json')['side'] == side.name
+    assert CollabLobbyOverride.model_validate_json(override.model_dump_json()) == override
+
+
+@pytest.mark.parametrize('side', (0, 1, 2, False, True, '0', 'a', 'D'))
+def test_lobby_side_rejects_non_name_encodings(side: str | int | bool) -> None:
+    with pytest.raises(ValueError):
+        CollabLobbyOverride.model_validate(
+            {'lobby': 'Example/0-Lobbies/1-Easy', 'side': side, 'campaigns': []}
+        )
 
 
 def test_local_collab_lobby_override_replaces_shared_side(tmp_path: Path) -> None:

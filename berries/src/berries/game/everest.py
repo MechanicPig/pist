@@ -2,12 +2,10 @@
 
 import re
 from dataclasses import dataclass
-from typing import Self
+from typing import ClassVar, Self
 
-from pydantic import ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import core_schema
-
-from berries.models import ExternalModel
 
 _VERSION_PATTERN = re.compile(r'\d+(?:\.\d+){1,3}')
 _MAX_VERSION_COMPONENT = 2**31 - 1
@@ -81,31 +79,33 @@ class Version:
 
 
 DEFAULT_VERSION = Version.parse('1.0')
+DUMMY_VERSION = Version.parse('0.0.0-dummy')
 
 
-class Dependency(ExternalModel):
+# Pyright recognizes hashability from frozen=True on the class, not a config-only base.
+class Dependency(BaseModel, frozen=True):
     """One required or optional Everest Mod dependency."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='ignore', populate_by_name=True)
 
     name: str = Field(validation_alias='Name')
     version: Version | None = Field(default=None, validation_alias='Version')
 
 
-class ModMetadata(ExternalModel):
-    """One Mod metadata entry declared in an Everest manifest."""
+class ModMetadata(BaseModel, frozen=True):
+    """One immutable, hashable metadata value declared in an Everest manifest."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='ignore', populate_by_name=True)
 
     name: str = Field(validation_alias='Name')
     version: Version | None = Field(default=None, validation_alias='Version')
-    dependencies: list[Dependency] = Field(default_factory=list, validation_alias='Dependencies')
-    optional_dependencies: list[Dependency] = Field(
-        default_factory=list, validation_alias='OptionalDependencies'
+    dependencies: tuple[Dependency, ...] = Field(default=(), validation_alias='Dependencies')
+    optional_dependencies: tuple[Dependency, ...] = Field(
+        default=(), validation_alias='OptionalDependencies'
     )
     dll: str | None = Field(default=None, validation_alias='DLL')
 
 
 type Manifest = tuple[ModMetadata, ...]
 
-MANIFEST_ADAPTER = TypeAdapter(Manifest)
+MANIFEST_ADAPTER: TypeAdapter[Manifest] = TypeAdapter(Manifest)

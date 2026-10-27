@@ -14,9 +14,9 @@ from textual.screen import ModalScreen, Screen
 from textual.widget import AwaitMount
 from textual.widgets import Button, Static, TabbedContent, TabPane
 
-from pist.ui.context_menu import ContextMenuScreen
-from pist.ui.mouse import RIGHT_MOUSE_BUTTON
-from pist.ui.toast_compositor import ToastCompositor
+from .context_menu import ContextMenuScreen
+from .mouse import RIGHT_MOUSE_BUTTON
+from .toast_compositor import ToastCompositor
 
 
 @dataclass(frozen=True, eq=False)
@@ -53,9 +53,9 @@ class MessageActionScreen(ContextMenuScreen[None]):
 
     @on(Button.Pressed, '#message-action-copy')
     def copy_message(self, event: Button.Pressed) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         self.app.copy_to_clipboard(self._text)
-        self.dismiss()
+        self.dismiss()  # pyright: ignore[reportUnusedCallResult]
 
 
 class MessageCard(Horizontal):
@@ -64,7 +64,7 @@ class MessageCard(Horizontal):
     def __init__(self, text: str, *, runtime_message: RuntimeMessage | None = None) -> None:
         super().__init__(classes='message-card')
         if runtime_message is not None and runtime_message.severity == 'error':
-            self.add_class('message-error')
+            self.add_class('message-error')  # pyright: ignore[reportUnusedCallResult]
         self.text = text
         self.runtime_message = runtime_message
 
@@ -77,15 +77,15 @@ class MessageCard(Horizontal):
     @on(events.Click)
     def open_context_menu(self, event: events.Click) -> None:
         if event.button == RIGHT_MOUSE_BUTTON:
-            event.stop()
+            event.stop()  # pyright: ignore[reportUnusedCallResult]
             screen_x = event.x if event.screen_x is None else event.screen_x
             screen_y = event.y if event.screen_y is None else event.screen_y
-            self.app.push_screen(MessageActionScreen(self.text, screen_x, screen_y))
+            self.app.push_screen(MessageActionScreen(self.text, screen_x, screen_y))  # pyright: ignore[reportUnusedCallResult]
 
     @on(Button.Pressed, '.message-clear')
     def clear_message(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.post_message(self.ClearRequested(self))
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
+        self.post_message(self.ClearRequested(self))  # pyright: ignore[reportUnusedCallResult]
 
     class ClearRequested(Message):
         def __init__(self, card: MessageCard) -> None:
@@ -112,7 +112,7 @@ class MessagesScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id='messages-dialog'):
-            yield Static('警告与错误', id='messages-title')
+            yield Static('诊断消息', id='messages-title')
             initial = 'loading-messages' if self._loading_warnings else 'runtime-messages'
             with TabbedContent(initial=initial, id='messages-tabs'):
                 with (
@@ -122,7 +122,7 @@ class MessagesScreen(ModalScreen[None]):
                     for warning in self._loading_warnings:
                         yield MessageCard(warning)
                     if not self._loading_warnings:
-                        yield Static('暂无 Mod 加载警告。', classes='message-empty')
+                        yield Static('暂无 Mod 加载消息。', classes='message-empty')
                 with (
                     TabPane('运行时', id='runtime-messages'),
                     VerticalScroll(id='runtime-message-list'),
@@ -147,7 +147,7 @@ class MessagesScreen(ModalScreen[None]):
 
     @on(MessageCard.ClearRequested)
     async def clear_runtime_message(self, event: MessageCard.ClearRequested) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         card = event.card
         if card.runtime_message is not None:
             self._clear_runtime_message(card.runtime_message)
@@ -156,24 +156,24 @@ class MessagesScreen(ModalScreen[None]):
 
     @on(Button.Pressed, '#messages-close')
     def close(self) -> None:
-        self.dismiss(None)
+        self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]
 
 
 class DiagnosticApp[ReturnType](App[ReturnType]):
     """Retain runtime diagnostics and expose a shared message window."""
 
-    BINDINGS: ClassVar = [('f2', 'show_messages', '警告与错误')]
+    BINDINGS: ClassVar = [('f2', 'show_messages', '消息')]
 
     def get_default_screen(self) -> Screen:
         screen = super().get_default_screen()
-        screen._compositor = ToastCompositor()
+        screen._compositor = ToastCompositor()  # noqa: SLF001
         return screen
 
     def _get_screen(self, screen: Screen | str) -> tuple[Screen, AwaitMount]:
         """Apply the notification rendering workaround to every workflow and modal."""
         mounted, await_mount = super()._get_screen(screen)
-        if not isinstance(mounted._compositor, ToastCompositor):
-            mounted._compositor = ToastCompositor()
+        if not isinstance(mounted._compositor, ToastCompositor):  # noqa: SLF001
+            mounted._compositor = ToastCompositor()  # noqa: SLF001
         return mounted, await_mount
 
     @cached_property
@@ -198,7 +198,7 @@ class DiagnosticApp[ReturnType](App[ReturnType]):
         markup: bool = True,
     ) -> None:
         if severity in ('warning', 'error'):
-            self.post_message(DiagnosticAdded(RuntimeMessage(message, title, severity)))
+            self.post_message(DiagnosticAdded(RuntimeMessage(message, title, severity)))  # pyright: ignore[reportUnusedCallResult]
         super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
 
     async def on_diagnostic_added(self, event: DiagnosticAdded) -> None:

@@ -1,35 +1,25 @@
 """Configurable classification rules for map entities."""
 
-import tomllib
-from collections.abc import Generator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Self
 
-import tomlkit
 from pydantic import (
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
-from tomlkit.items import Array, InlineTable
 
 from berries.game.binmap import AttrValue
 from berries.models import FrozenModel
-from berries.paths import BERRIES_DIR
 from berries.types import NonEmptyStr
 
-from ._file_update import replace_rule_files
-
-SHARED_ENTITIES_PATH = Path(__file__).parent.parent / 'data' / 'entities.toml'
-SHARED_KINDS_PATH = Path(__file__).parent.parent / 'data' / 'kinds.toml'
-LOCAL_ENTITIES_PATH = BERRIES_DIR / 'entities.toml'
+from .values import typed_attrs_key
 
 
 class EntityKind(FrozenModel):
-    """One user-extensible entity kind in the classification tree."""
+    """One entity kind in the shared classification tree."""
 
     label: str
     parent: str | None = None
@@ -47,7 +37,7 @@ class EntityKind(FrozenModel):
         return sprite
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class EntityRuleConditions:
     """The complete value and presence conditions identifying one entity rule."""
 
@@ -55,6 +45,26 @@ class EntityRuleConditions:
     meta: tuple[tuple[str, AttrValue], ...]
     missing: tuple[str, ...]
     missing_meta: tuple[str, ...]
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                typed_attrs_key(self.when),
+                typed_attrs_key(self.meta),
+                self.missing,
+                self.missing_meta,
+            )
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EntityRuleConditions):
+            return NotImplemented
+        return (
+            typed_attrs_key(self.when) == typed_attrs_key(other.when)
+            and typed_attrs_key(self.meta) == typed_attrs_key(other.meta)
+            and self.missing == other.missing
+            and self.missing_meta == other.missing_meta
+        )
 
     @property
     def specificity(self) -> int:
@@ -89,13 +99,22 @@ class EntityRule(FrozenModel):
         return self
 
     @property
-    def identity(self) -> EntityRuleConditions:
-        """Return the condition that identifies one local override."""
+    def conditions(self) -> EntityRuleConditions:
+        """Return the conditions used to match rule overrides, independent of their outcome."""
         return EntityRuleConditions(
             tuple(sorted(self.when.items())),
             tuple(sorted(self.meta.items())),
             tuple(sorted(self.missing)),
             tuple(sorted(self.missing_meta)),
+        )
+
+    def matches(self, attrs: Mapping[str, AttrValue], meta: Mapping[str, AttrValue]) -> bool:
+        """Match attribute values and presence conditions, preserving scalar types."""
+        return (
+            _attrs_match(attrs, self.when)
+            and _attrs_match(meta, self.meta)
+            and all(name not in attrs for name in self.missing)
+            and all(name not in meta for name in self.missing_meta)
         )
 
 
@@ -106,25 +125,23 @@ class EntityRulesForId(FrozenModel):
 
     def merged(self, local: Self) -> Self:
         """Apply local rule overrides before shared rules for one entity ID."""
-        local_identities = {rule.identity for rule in local.rules}
-        return type(self).model_validate(
-            {
-                'rules': (
-                    *local.rules,
-                    *(rule for rule in self.rules if rule.identity not in local_identities),
-                )
-            }
+        local_conditions = {rule.conditions for rule in local.rules}
+        return type(self)(
+            rules=(
+                *local.rules,
+                *(rule for rule in self.rules if rule.conditions not in local_conditions),
+            )
         )
 
     def overrides(self, baseline: Self | None) -> Self | None:
         """Return only rules whose outcomes differ from an optional shared baseline."""
         if baseline is None:
             return self
-        baseline_by_identity = {rule.identity: rule for rule in baseline.rules}
+        baseline_by_conditions = {rule.conditions: rule for rule in baseline.rules}
         rules = tuple(
-            rule for rule in self.rules if baseline_by_identity.get(rule.identity) != rule
+            rule for rule in self.rules if baseline_by_conditions.get(rule.conditions) != rule
         )
-        return None if not rules else type(self).model_validate({'rules': rules})
+        return None if not rules else type(self)(rules=rules)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +165,10 @@ class EntityRuleLayer(FrozenModel):
 
     entities: dict[str, EntityRulesForId] = Field(default_factory=dict)
 
+    def with_replaced_kind(self, old_name: str, new_name: str) -> Self:
+        """Replace category references in this layer without changing its conditions."""
+        return type(self)(entities=_renamed_entity_rules(self.entities, old_name, new_name))
+
     def merged(self, local: Self) -> Self:
         """Apply a local layer to this layer without cross-layer validation."""
         entities = self.entities.copy()
@@ -156,7 +177,7 @@ class EntityRuleLayer(FrozenModel):
             entities[name] = (
                 local_rules if shared_rules is None else shared_rules.merged(local_rules)
             )
-        return type(self).model_validate({'entities': entities})
+        return type(self)(entities=entities)
 
     def conflicts(self, local: EntityRuleLayer) -> tuple[EntityRuleConflict, ...]:
         """Return local rules that replace a shared outcome with the same condition."""
@@ -165,14 +186,14 @@ class EntityRuleLayer(FrozenModel):
             shared_rules = self.entities.get(entity_name)
             if shared_rules is None:
                 continue
-            shared_by_identity = {rule.identity: rule for rule in shared_rules.rules}
+            shared_by_conditions = {rule.conditions: rule for rule in shared_rules.rules}
             for local_rule in local_rules.rules:
-                shared_rule = shared_by_identity.get(local_rule.identity)
+                shared_rule = shared_by_conditions.get(local_rule.conditions)
                 if shared_rule is not None and shared_rule.kind != local_rule.kind:
                     conflicts.append(
                         EntityRuleConflict(
                             entity_name,
-                            local_rule.identity,
+                            local_rule.conditions,
                             shared_rule.kind,
                             local_rule.kind,
                         )
@@ -238,7 +259,7 @@ class EntityRules(FrozenModel):
         if entity_rules is None:
             return None
         for rule in entity_rules.rules:
-            if _rule_matches(rule, attrs, {} if meta is None else meta):
+            if rule.matches(attrs, {} if meta is None else meta):
                 return rule
         return None
 
@@ -265,10 +286,11 @@ class EntityRules(FrozenModel):
             kind = definition.parent
 
     @model_validator(mode='after')
-    def validate_references(self) -> EntityRules:
+    def validate_refs(self) -> EntityRules:
         for kind_name, kind in self.kinds.items():
             if kind.parent is not None and kind.parent not in self.kinds:
                 raise ValueError(f'Unknown parent kind {kind.parent!r} for {kind_name!r}.')
+        for kind_name, kind in self.kinds.items():
             parents: set[str] = set()
             parent = kind.parent
             while parent is not None:
@@ -298,13 +320,14 @@ class EntityRules(FrozenModel):
         new_rule = EntityRule(kind=kind, when=dict(when), meta={} if meta is None else dict(meta))
         entity_rules = self.entities.get(entity_name, EntityRulesForId(rules=()))
         rules = tuple(
-            new_rule if rule.identity == new_rule.identity else rule for rule in entity_rules.rules
+            new_rule if rule.conditions == new_rule.conditions else rule
+            for rule in entity_rules.rules
         )
-        if new_rule not in rules:
+        if not any(rule.conditions == new_rule.conditions for rule in rules):
             rules = (new_rule, *rules)
         rules = _specific_rules_first(rules)
         entities = self.entities.copy()
-        entities[entity_name] = EntityRulesForId.model_validate({'rules': rules})
+        entities[entity_name] = EntityRulesForId(rules=rules)
         return self._updated(entities=entities)
 
     def with_exclusion(
@@ -318,56 +341,47 @@ class EntityRules(FrozenModel):
         new_rule = EntityRule(kind=None, when=dict(when), meta={} if meta is None else dict(meta))
         entity_rules = self.entities.get(entity_name, EntityRulesForId(rules=()))
         rules = tuple(
-            new_rule if rule.identity == new_rule.identity else rule for rule in entity_rules.rules
+            new_rule if rule.conditions == new_rule.conditions else rule
+            for rule in entity_rules.rules
         )
-        if new_rule not in rules:
+        if not any(rule.conditions == new_rule.conditions for rule in rules):
             rules = (new_rule, *rules)
         rules = _specific_rules_first(rules)
         entities = self.entities.copy()
-        entities[entity_name] = EntityRulesForId.model_validate({'rules': rules})
+        entities[entity_name] = EntityRulesForId(rules=rules)
         return self._updated(entities=entities)
 
     def with_kind(
         self,
         name: str,
-        label: str,
-        *,
-        parent: str | None = None,
-        sprite: str | None = None,
+        definition: EntityKind,
     ) -> EntityRules:
-        """Return rules with one new user-defined kind in the hierarchy."""
+        """Return rules with one new kind in the hierarchy."""
         if not name:
             raise ValueError('Entity kind name must not be empty.')
         if name in self.kinds:
             raise ValueError(f'Entity kind already exists: {name!r}')
-        if parent is not None and parent not in self.kinds:
-            raise ValueError(f'Unknown parent kind: {parent!r}')
+        if definition.parent is not None and definition.parent not in self.kinds:
+            raise ValueError(f'Unknown parent kind: {definition.parent!r}')
         kinds = self.kinds.copy()
-        kinds[name] = EntityKind(
-            label=label or name,
-            parent=parent,
-            sprite=sprite,
+        kinds[name] = (
+            definition if definition.label else definition.model_copy(update={'label': name})
         )
         return self._updated(kinds=kinds)
 
     def with_updated_kind(
         self,
         name: str,
-        label: str,
-        *,
-        parent: str | None = None,
-        sprite: str | None = None,
+        definition: EntityKind,
     ) -> EntityRules:
         """Return rules with one existing kind's editable fields updated."""
         if name not in self.kinds:
             raise ValueError(f'Unknown entity kind: {name!r}')
-        if parent is not None and parent not in self.kinds:
-            raise ValueError(f'Unknown parent kind: {parent!r}')
+        if definition.parent is not None and definition.parent not in self.kinds:
+            raise ValueError(f'Unknown parent kind: {definition.parent!r}')
         kinds = self.kinds.copy()
-        kinds[name] = EntityKind(
-            label=label or name,
-            parent=parent,
-            sprite=sprite,
+        kinds[name] = (
+            definition if definition.label else definition.model_copy(update={'label': name})
         )
         return self._updated(kinds=kinds)
 
@@ -375,10 +389,7 @@ class EntityRules(FrozenModel):
         self,
         old_name: str,
         new_name: str,
-        label: str,
-        *,
-        parent: str | None = None,
-        sprite: str | None = None,
+        definition: EntityKind,
     ) -> EntityRules:
         """Rename one kind and every hierarchy or entity-rule reference to it."""
         if old_name not in self.kinds:
@@ -397,12 +408,7 @@ class EntityRules(FrozenModel):
             kinds=kinds,
             entities=_renamed_entity_rules(self.entities, old_name, new_name),
         )
-        return renamed.with_updated_kind(
-            new_name,
-            label,
-            parent=parent,
-            sprite=sprite,
-        )
+        return renamed.with_updated_kind(new_name, definition)
 
     def with_deleted_kind(self, name: str) -> EntityRules:
         """Delete a non-root kind, falling its rules and children back to its parent."""
@@ -446,281 +452,13 @@ def _renamed_entity_rules(
     }
 
 
-def load_entity_rules(path: Path, *, kinds_path: Path | None = None) -> EntityRules:
-    """Load one entity-rule file with its separate category configuration."""
-    try:
-        if kinds_path is None:
-            if path.resolve() != SHARED_ENTITIES_PATH.resolve():
-                raise ValueError(
-                    'Specify a separate kinds.toml path for a custom entity rules file.'
-                )
-            kinds_path = SHARED_KINDS_PATH
-        layer = EntityRuleLayer.model_validate(_load_toml(path))
-        kinds = EntityKindLayer.model_validate(_load_toml(kinds_path))
-        return EntityRules.from_layers(kinds, layer)
-    except (OSError, tomllib.TOMLDecodeError, TypeError, ValidationError, ValueError) as error:
-        raise ValueError(f'Invalid entity rules config: {path!r}') from error
-
-
-def load_entity_rule_layers(
-    shared_path: Path = SHARED_ENTITIES_PATH,
-    local_path: Path = LOCAL_ENTITIES_PATH,
-    *,
-    kinds_path: Path | None = None,
-) -> EntityRules:
-    """Load entity rules with local rules taking precedence over shared rules.
-
-    Defaults read packaged categories/rules and the user's writable local rules.
-    The local file may be absent; when present, it is read even without explicit
-    opt-in. Use ``load_entity_rules(SHARED_ENTITIES_PATH)`` for packaged rules only.
-    Custom layer paths require a separate ``kinds_path``.
-    """
-    if (shared_path, local_path) == (
-        SHARED_ENTITIES_PATH,
-        LOCAL_ENTITIES_PATH,
-    ) and kinds_path is None:
-        kinds_path = SHARED_KINDS_PATH
-    if kinds_path is None:
-        raise ValueError('Specify a separate kinds.toml path for custom entity rule layers.')
-    rules, _ = _load_entity_rule_layers(shared_path, kinds_path, local_path)
-    return rules
-
-
-def _load_entity_rule_layers(
-    shared_path: Path,
-    kinds_path: Path,
-    local_path: Path,
-) -> tuple[EntityRules, tuple[EntityRuleConflict, ...]]:
-    try:
-        shared = EntityRuleLayer.model_validate(_load_toml(shared_path))
-        kinds = EntityKindLayer.model_validate(_load_toml(kinds_path))
-        local = (
-            EntityRuleLayer.model_validate(_load_toml(local_path))
-            if local_path.is_file()
-            else EntityRuleLayer()
-        )
-        return EntityRules.from_layers(kinds, shared, local), shared.conflicts(local)
-    except (OSError, tomllib.TOMLDecodeError, TypeError, ValidationError, ValueError) as error:
-        raise ValueError(
-            f'Invalid entity rules config layers: {kinds_path!r}, {shared_path!r}, {local_path!r}'
-        ) from error
-
-
-class EntityConfigStore:
-    """Load shared rules and persist either shared or local rule additions."""
-
-    def __init__(
-        self,
-        path: Path | None = None,
-        *,
-        shared: bool = False,
-        shared_path: Path = SHARED_ENTITIES_PATH,
-        kinds_path: Path | None = None,
-        local_path: Path = LOCAL_ENTITIES_PATH,
-    ) -> None:
-        if path is not None:
-            self._shared_path = path
-            if kinds_path is None and path.resolve() != SHARED_ENTITIES_PATH.resolve():
-                raise ValueError('Specify kinds_path for a custom entity rules file.')
-            self._kinds_path = SHARED_KINDS_PATH if kinds_path is None else kinds_path
-            self._local_path: Path | None = None
-        else:
-            self._shared_path = shared_path
-            if kinds_path is None and (shared_path, local_path) != (
-                SHARED_ENTITIES_PATH,
-                LOCAL_ENTITIES_PATH,
-            ):
-                raise ValueError('Specify kinds_path for custom entity rule layers.')
-            self._kinds_path = SHARED_KINDS_PATH if kinds_path is None else kinds_path
-            self._local_path = None if shared else local_path
-        self._conflicts: tuple[EntityRuleConflict, ...] = ()
-
-    @property
-    def path(self) -> Path:
-        """Return the rule file this store writes."""
-        return self._shared_path if self._local_path is None else self._local_path
-
-    @property
-    def conflicts(self) -> tuple[EntityRuleConflict, ...]:
-        """Return local-over-shared rule overrides observed during the last load."""
-        return self._conflicts
-
-    def load(self) -> EntityRules:
-        if self._local_path is None:
-            self._conflicts = ()
-            return EntityRules.from_layers(
-                EntityKindLayer.model_validate(_load_toml(self._kinds_path)),
-                EntityRuleLayer.model_validate(_load_toml(self._shared_path)),
-            )
-        rules, self._conflicts = _load_entity_rule_layers(
-            self._shared_path, self._kinds_path, self._local_path
-        )
-        return rules
-
-    def save(self, rules: EntityRules) -> None:
-        current_kinds = EntityKindLayer.model_validate(_load_toml(self._kinds_path))
-        kind_layer = EntityKindLayer(kinds=rules.kinds)
-        updates: dict[Path, str] = {}
-        if current_kinds.kinds != rules.kinds:
-            updates[self._kinds_path] = entity_kinds_toml(kind_layer)
-        baseline = (
-            EntityRules.from_layers(kind_layer)
-            if self._local_path is None
-            else EntityRules.from_layers(
-                kind_layer,
-                EntityRuleLayer.model_validate(_load_toml(self._shared_path)),
-            )
-        )
-        updates[self.path] = entity_rules_toml(rules, baseline=baseline)
-        with replace_rule_files(updates):
-            pass
-
-    def rename_kind(self, old_name: str, new_name: str, rules: EntityRules) -> None:
-        """Persist a kind-ID rename across every rule layer this store owns."""
-        if old_name == new_name:
-            self.save(rules)
-            return
-
-        with self.kind_change(old_name, new_name, rules):
-            pass
-
-    def delete_kind(self, name: str, fallback_kind: str, rules: EntityRules) -> None:
-        """Persist a kind deletion across every rule layer this store owns."""
-        with self.kind_change(name, fallback_kind, rules):
-            pass
-
-    @contextmanager
-    def kind_change(self, old_name: str, new_name: str, rules: EntityRules) -> Generator[None]:
-        """Change kind definitions and references, restoring files if a participant fails.
-
-        Use this scope to coordinate rule changes with another transactional store.
-        The supplied rules define the resulting tree for either rename or deletion.
-        """
-
-        paths_and_layers: list[tuple[Path, EntityRuleLayer]] = [
-            (self._shared_path, EntityRuleLayer.model_validate(_load_toml(self._shared_path))),
-        ]
-        if self._local_path is not None and self._local_path.is_file():
-            paths_and_layers.append(
-                (self._local_path, EntityRuleLayer.model_validate(_load_toml(self._local_path)))
-            )
-
-        renamed_layers = [
-            (
-                path,
-                EntityRuleLayer(entities=_renamed_entity_rules(layer.entities, old_name, new_name)),
-            )
-            for path, layer in paths_and_layers
-        ]
-        kind_layer = EntityKindLayer(kinds=rules.kinds)
-        # Validate all writes together before modifying any user-visible file.
-        EntityRules.from_layers(kind_layer, *(layer for _, layer in renamed_layers))
-
-        updates = {self._kinds_path: entity_kinds_toml(kind_layer)}
-        updates.update((path, entity_rules_toml(layer)) for path, layer in renamed_layers)
-        with replace_rule_files(updates):
-            yield
-
-    def load_shared_layer(self) -> EntityRuleLayer:
-        """Load the shared entity rules without kinds or user-local overrides."""
-        try:
-            return EntityRuleLayer.model_validate(_load_toml(self._shared_path))
-        except (OSError, tomllib.TOMLDecodeError, TypeError, ValidationError, ValueError) as error:
-            raise ValueError(f'Invalid shared entity rules: {self._shared_path!r}') from error
-
-    def save_generated_layer(self, layer: EntityRuleLayer) -> None:
-        """Replace the published shared entity rules with audited generated rules."""
-        self._shared_path.parent.mkdir(parents=True, exist_ok=True)
-        self._shared_path.write_text(entity_rules_toml(layer), encoding='utf-8')
-
-
-def _load_toml(path: Path) -> dict[str, object]:
-    with path.open('rb') as file:
-        data = tomllib.load(file)
-    if not isinstance(data, dict):
-        raise TypeError('Expected a TOML table.')
-    return data
-
-
 def _specific_rules_first(rules: tuple[EntityRule, ...]) -> tuple[EntityRule, ...]:
     """Keep specific conditions before defaults, regardless of write order."""
     return tuple(sorted(rules, key=_rule_specificity, reverse=True))
 
 
 def _rule_specificity(rule: EntityRule) -> int:
-    return rule.identity.specificity
-
-
-def entity_kinds_toml(kinds: EntityKindLayer) -> str:
-    """Serialize the category tree in Berries' canonical TOML layout."""
-    return tomlkit.dumps(kinds.model_dump(mode='json', exclude_none=True, exclude_defaults=True))
-
-
-def entity_rules_toml(
-    rules: EntityRuleLayer | EntityRules, *, baseline: EntityRules | None = None
-) -> str:
-    """Serialize validated entity rules in Berries' canonical TOML layout."""
-    layer = EntityRuleLayer(entities=rules.entities)
-    if baseline is not None:
-        layer = layer.local_overrides(EntityRuleLayer(entities=baseline.entities))
-    document = tomlkit.document()
-    entities = tomlkit.table()
-    document['entities'] = entities
-    for entity_name, rules_for_id in layer.entities.items():
-        entity = tomlkit.table()
-        entity['rules'] = _toml_rules(rules_for_id.rules)
-        entities[entity_name] = entity
-    return tomlkit.dumps(document)
-
-
-def _toml_rules(rules: tuple[EntityRule, ...]) -> Array:
-    if not rules:
-        return tomlkit.array()
-    values = tomlkit.array().multiline(True)
-    values.extend(_toml_rule(rule) for rule in rules)
-    return values
-
-
-def _toml_rule(rule: EntityRule) -> InlineTable:
-    fields: list[tuple[str, AttrValue | Mapping[str, AttrValue] | tuple[str, ...]]] = []
-    if rule.kind is not None:
-        fields.append(('kind', rule.kind))
-    if rule.when:
-        fields.append(('when', rule.when))
-    if rule.meta:
-        fields.append(('meta', rule.meta))
-    if rule.missing:
-        fields.append(('missing', rule.missing))
-    if rule.missing_meta:
-        fields.append(('missing_meta', rule.missing_meta))
-    table = _empty_inline_table()
-    for key, value in fields:
-        table[key] = _toml_value(value)
-        table.add(tomlkit.ws(' '))
-    return table
-
-
-def _toml_value(
-    value: AttrValue | Mapping[str, AttrValue] | tuple[str, ...],
-) -> AttrValue | Array | InlineTable:
-    if isinstance(value, Mapping):
-        table = _empty_inline_table()
-        for key, item in value.items():
-            table[key] = item
-            table.add(tomlkit.ws(' '))
-        return table
-    if isinstance(value, tuple):
-        values = tomlkit.array()
-        values.extend(value)
-        return values
-    return value
-
-
-def _empty_inline_table() -> InlineTable:
-    """Create an inline table with the canonical spaces inside its braces."""
-    value = tomlkit.parse('value = { }')['value']
-    assert isinstance(value, InlineTable)
-    return value
+    return rule.conditions.specificity
 
 
 def _attrs_match(actual: Mapping[str, AttrValue], expected: Mapping[str, AttrValue]) -> bool:
@@ -731,14 +469,3 @@ def _attrs_match(actual: Mapping[str, AttrValue], expected: Mapping[str, AttrVal
         if type(actual_value) is not type(expected_value) or actual_value != expected_value:
             return False
     return True
-
-
-def _rule_matches(
-    rule: EntityRule, attrs: Mapping[str, AttrValue], meta: Mapping[str, AttrValue]
-) -> bool:
-    return (
-        _attrs_match(attrs, rule.when)
-        and _attrs_match(meta, rule.meta)
-        and all(name not in attrs for name in rule.missing)
-        and all(name not in meta for name in rule.missing_meta)
-    )

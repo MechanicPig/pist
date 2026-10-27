@@ -349,17 +349,17 @@ def _expression_start(tokens: list[_Token], index: int) -> int:
     """Return the first token of the expression immediately before *index*."""
     depth = 0
     stop_tokens = frozenset({'(', '{', ',', '=', 'return', 'then', 'and', 'or'})
-    for current in range(index - 1, -1, -1):
-        value = tokens[current].value
+    for i in range(index - 1, -1, -1):
+        value = tokens[i].value
         if value in {')', ']', '}'}:
             depth += 1
         elif value in {'(', '[', '{'}:
             if depth:
                 depth -= 1
             else:
-                return current + 1
+                return i + 1
         elif depth == 0 and value in stop_tokens:
-            return current + 1
+            return i + 1
     return 0
 
 

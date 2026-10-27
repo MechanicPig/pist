@@ -1,124 +1,164 @@
+"""Ender's Blender file queries use explicit raw protocol keys."""
+
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+import yaml
 
-from berries.game.content import ContentPath, GameContent
 from berries.game.duration import Duration
-from berries.game.enders_blender import EndersBlenderReader, EndersBlenderSave
-from berries.game.levels import Level, LevelSide, Map
-from berries.game.maps import MapInfo
-from test_support.map_factory import make_level_side
+from berries.game.levels import LevelSide
+from berries.game.saves.files.enders_blender import EndersBlenderSave
+from berries.game.saves.rooms import RoomStats, room_key
+from berries.game.saves.unknown import UnknownSaveFieldWarning
+from test_support.save_docs import read_save, save_bytes
 
 
-def test_first_clear_stats_distinguishes_final_and_inferred_map_identities() -> None:
-    map_info = MapInfo(file_path=ContentPath('Maps/Local/Map-B.bin'))
-    map_file = Map(map_info, GameContent(Path('Content')))
-    level = Level('Final/Map', 'Final_Map', (map_file, map_file))
-    time = Duration.from_milliseconds(2500)
-    save = EndersBlenderSave(
-        0,
-        {'Final/Map_B': ('start', 'end'), 'Local/Map_B': ('raw',)},
-        {'Final/Map_B': {'start': 0, 'end': 2}},
-        {'Final/Map_B': {'start': time}},
+def test_first_clear_stats_keep_explicit_final_and_local_keys_distinct() -> None:
+    save = read_save(
+        EndersBlenderSave,
+        'mapDict_roomStat_firstClear_roomOrder:\n'
+        '  Final/Map_B: [start, end]\n  Local/Map_B: [raw]\n'
+        'mapDict_roomStat_firstClear_death:\n  Final/Map_B: {start: 0, end: 2}\n'
+        'mapDict_roomStat_firstClear_timer:\n  Final/Map_B: {start: 25000000}\n',
     )
-
-    stats = save.first_clear_stats(level, LevelSide.B)
-    assert stats.room_order == ('start', 'end')
+    stats = save.first_clear.get(room_key('Final/Map', LevelSide.B))
+    assert stats is not None
+    assert stats.room_order == ['start', 'end']
     assert stats.room_deaths == {'start': 0, 'end': 2}
-    assert stats.room_times == {'start': time}
-    assert stats.room_times['start'] == save.first_clear_room_time(level, LevelSide.B, 'start')
-    assert stats.room_deaths['start'] == save.first_clear_room_death(level, LevelSide.B, 'start')
-    raw_stats = save.first_clear_stats_for_file(map_info)
-    assert raw_stats.room_order == ('raw',)
-    assert raw_stats.room_deaths == {}
-    assert raw_stats.room_times == {}
-
-    missing = save.first_clear_stats(level, LevelSide.A)
-    assert missing.room_order == ()
-    assert missing.room_deaths == {}
-    assert missing.room_times == {}
+    assert stats.room_times == {'start': Duration.from_dotnet_ticks(25000000)}
+    raw = save.first_clear.get('Local/Map_B')
+    assert raw is not None and raw.room_order == ['raw']
+    assert raw.room_deaths == {} and raw.room_times == {}
+    assert save.first_clear.get(room_key('Final/Map', LevelSide.A)) is None
 
 
-def test_enders_blender_reader_loads_first_clear_room_order(tmp_path: Path) -> None:
-    saves_dir = tmp_path / 'Celeste' / 'Saves'
-    saves_dir.mkdir(parents=True)
-    (saves_dir / '2-modsave-EndersBlender.celeste').write_text(
-        """mapDict_roomStat_firstClear_roomOrder:
-  Author/Pack/Map_B:
-  - start
-  - middle
-  - goal
-  Author/Pack/Numbers:
-  - 0
-  - 1
-mapDict_roomStat_firstClear_death:
-  Author/Pack/Map_B:
-    start: 4
-mapDict_roomStat_firstClear_timer:
-  Author/Pack/Map_B:
-    start: 25500000
-""",
+def test_blender_file_loads_first_clear_records_and_preserves_numeric_room_names(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / '2-modsave-EndersBlender.celeste'
+    path.write_text(
+        'mapDict_roomStat_firstClear_roomOrder:\n'
+        '  Author/Pack/Map_B: [start, middle, goal]\n'
+        '  Author/Pack/Numbers: [0, 1]\n'
+        'mapDict_roomStat_firstClear_death:\n  Author/Pack/Map_B: {start: 4}\n'
+        'mapDict_roomStat_firstClear_timer:\n  Author/Pack/Map_B: {start: 25500000}\n',
         encoding='utf-8',
     )
-
-    reader = EndersBlenderReader(tmp_path / 'Celeste')
-    save = reader.load(2)
-
-    assert reader.available_numbers() == [2]
-    assert save.first_clear_room_order(
-        *make_level_side(file_path='Maps/Author/Pack/Map-B.bin')
-    ) == ('start', 'middle', 'goal')
-    assert save.first_clear_room_order(*make_level_side(file_path='Maps/Author/Pack/Map.bin')) == ()
-    assert save.first_clear_room_order(
-        *make_level_side(file_path='Maps/Author/Pack/Numbers.bin')
-    ) == ('0', '1')
-    level, side = make_level_side(file_path='Maps/Author/Pack/Map-B.bin')
-    assert save.first_clear_room_death(level, side, 'start') == 4
-    assert save.first_clear_room_time(level, side, 'start') == Duration.from_milliseconds(2550)
+    save = EndersBlenderSave.read(path)
+    stats = save.first_clear.get(room_key('Author/Pack/Map', LevelSide.B))
+    assert stats is not None and stats.room_order == ['start', 'middle', 'goal']
+    assert stats.room_deaths['start'] == 4
+    assert stats.room_times['start'] == Duration.from_dotnet_ticks(25500000)
+    assert save.first_clear.get(room_key('Author/Pack/Map', LevelSide.A)) is None
+    numbers = save.first_clear.get('Author/Pack/Numbers')
+    assert numbers is not None and numbers.room_order == ['0', '1']
 
 
-def test_enders_blender_reader_rejects_invalid_room_orders(tmp_path: Path) -> None:
-    saves_dir = tmp_path / 'Celeste' / 'Saves'
-    saves_dir.mkdir(parents=True)
-    (saves_dir / '0-modsave-EndersBlender.celeste').write_text(
-        'mapDict_roomStat_firstClear_roomOrder: invalid\n', encoding='utf-8'
+def test_final_sid_suffix_does_not_select_the_side() -> None:
+    save = read_save(
+        EndersBlenderSave,
+        'mapDict_roomStat_firstClear_roomOrder:\n  Pack/Map-B: [a-room]\n  Pack/Map-B_B: [b-room]\n',
     )
+    a = save.first_clear.get(room_key('Pack/Map-B', LevelSide.A))
+    b = save.first_clear.get(room_key('Pack/Map-B', LevelSide.B))
+    assert a is not None and a.room_order == ['a-room']
+    assert b is not None and b.room_order == ['b-room']
 
-    with pytest.raises(ValueError, match='room orders'):
-        EndersBlenderReader(tmp_path / 'Celeste').load(0)
+
+def test_blender_file_rejects_invalid_record_mapping_on_load() -> None:
+    with pytest.raises(ValueError):
+        read_save(EndersBlenderSave, 'mapDict_roomStat_firstClear_roomOrder: invalid\n')
 
 
 @pytest.mark.parametrize(
-    ('field', 'value', 'label', 'reason'),
-    (
-        ('mapDict_roomStat_firstClear_death', '1.0', 'room deaths', 'decimal integer'),
-        ('mapDict_roomStat_firstClear_timer', '1', 'room timers', 'whole milliseconds'),
-    ),
+    ('field', 'value'),
+    (('mapDict_roomStat_firstClear_death', '1.0'), ('mapDict_roomStat_firstClear_timer', '-1.0')),
 )
-def test_enders_blender_reader_preserves_invalid_value_locations(
-    tmp_path: Path,
-    field: str,
-    value: str,
-    label: str,
-    reason: str,
-) -> None:
-    saves_dir = tmp_path / 'Celeste' / 'Saves'
-    saves_dir.mkdir(parents=True)
-    (saves_dir / '0-modsave-EndersBlender.celeste').write_text(
-        f"""{field}:
-  Author/Pack/Map_B:
-    start: {value}
-""",
-        encoding='utf-8',
+def test_blender_file_preserves_invalid_value_locations(field: str, value: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        read_save(EndersBlenderSave, f'{field}:\n  Author/Pack/Map_B:\n    start: {value}\n')
+    message = str(caught.value)
+    assert field in message and 'Author/Pack/Map_B' in message and 'start' in message
+    assert 'decimal integer' in message
+
+
+def test_incomplete_room_statistics_can_be_loaded_and_repaired_before_output() -> None:
+    save = EndersBlenderSave.fromstring('mapDict_roomStat_firstClear_roomOrder: {Map: [start]}\n')
+    stats = save.first_clear['Map']
+    assert stats.room_order == ['start']
+    assert not stats.room_deaths and not stats.room_times
+    with pytest.raises(ValueError, match='Missing Blender room deaths'):
+        save.tostring()
+    stats.room_deaths['start'] = 3
+    stats.room_times['start'] = Duration.from_seconds(2)
+    restored = EndersBlenderSave.fromstring(save.tostring(), strict=False)
+    assert restored.first_clear['Map'] == stats
+
+
+def test_all_blender_fields_round_trip_independently() -> None:
+    save = EndersBlenderSave()
+    first = RoomStats(
+        room_order=['01', 'true'],
+        room_deaths={'01': 0, 'true': 1, 'death_only': 0},
+        room_times={
+            '01': Duration(),
+            'true': Duration(),
+            'time_only': Duration.from_dotnet_ticks(-1),
+        },
+        room_rta_times={'rta_only': Duration.from_dotnet_ticks(13)},
+        room_strawberries={'berry_only': 2},
+        pause_flags={'Level_Invalid': True, '01': False},
     )
+    last = RoomStats(room_order=['last'], room_deaths={'last': 3}, room_times={'last': Duration()})
+    save.first_clear[room_key('Pack/Map', LevelSide.B)] = first
+    save.last_saved['Pack/Map_B'] = last
+    save.room_names['Second_B'] = {'01': 'first room'}
+    save.room_names['First'] = {'true': 'second room'}
+    save.room_names['Pack/Map_B'] = {}
+    save.room_colors['Pack/Map_B'] = {'01': -1}
+    encoded = save_bytes(save)
+    restored = read_save(EndersBlenderSave, encoded)
+    assert restored.first_clear[room_key('Pack/Map', LevelSide.B)] == first
+    assert restored.last_saved['Pack/Map_B'] == last
+    assert list(restored.room_names) == ['Second_B', 'First', 'Pack/Map_B']
+    assert restored.room_names == save.room_names
+    assert restored.room_colors == save.room_colors
+    restored.first_clear['Pack/Map_B'].reset()
+    assert restored.last_saved['Pack/Map_B'] == last
+    assert restored.room_names == save.room_names
 
-    with pytest.raises(ValueError) as info:
-        EndersBlenderReader(tmp_path / 'Celeste').load(0)
 
-    message = str(info.value)
-    assert label in message
-    assert 'Author/Pack/Map_B' in message
-    assert 'start' in message
-    assert reason in message
-    assert isinstance(info.value.__cause__, ValidationError)
+def test_room_edits_do_not_follow_unknown_yaml_aliases() -> None:
+    with pytest.warns(UnknownSaveFieldWarning, match='EndersBlenderSave.Unknown'):
+        save = EndersBlenderSave.fromstring(
+            'mapDict_roomStat_firstClear_death: &deaths\n  Map: {room: 2}\n'
+            'mapDict_roomStat_latestSession_death: *deaths\n'
+            'Unknown: *deaths\n',
+            unknown='warn',
+        )
+    stats = save.first_clear['Map']
+    assert save.first_clear['Map'] is stats
+    stats.room_deaths['room'] = 7
+    result = yaml.safe_load(save_bytes(save))
+    assert result['mapDict_roomStat_firstClear_death']['Map']['room'] == 7
+    assert result['mapDict_roomStat_latestSession_death']['Map']['room'] == 2
+    assert 'Unknown' not in result
+
+
+def test_room_access_keeps_record_order_and_serialization_is_repeatable() -> None:
+    data = (
+        'mapDict_roomStat_firstClear_roomOrder: {One: [start], Two: [goal]}\n'
+        'mapDict_roomStat_firstClear_death: {One: {start: 0}, Two: {goal: 0}}\n'
+        'mapDict_roomStat_firstClear_timer: {One: {start: 0}, Two: {goal: 0}}\n'
+        'mapDict_roomStat_latestSession_rtatimer: {OnlyRta: {room: 17}}\n'
+    )
+    save = read_save(EndersBlenderSave, data)
+    original = save_bytes(save)
+    assert save.first_clear['One'].room_order == ['start']
+    assert list(save.first_clear.keys()) == ['One', 'Two']
+    assert list(save.last_saved.keys()) == ['OnlyRta']
+    assert save.last_saved['OnlyRta'].room_rta_times == {'room': Duration.from_dotnet_ticks(17)}
+    assert save_bytes(save) == original
+    assert save_bytes(save) == original
+    del save.first_clear['Two']
+    assert list(read_save(EndersBlenderSave, save_bytes(save)).first_clear.keys()) == ['One']

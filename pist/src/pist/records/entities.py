@@ -1,14 +1,30 @@
 """Build personal record statistics from public map classification results."""
 
 from dataclasses import dataclass
+from typing import Self
 
-from berries.entities import classification, rules
-from berries.game import binmap, levels, map_data
+from berries.entities import rules
+from berries.game import binmap, map_data
+from berries.game.maps import Map
 from berries.map_entity_id import MapEntityID
 from pist import entity_stats
-from pist.paths import PIST_DIR
+from pist.entities import collected as collected_entities
+from pist.entities import config
+from pist.routes.models import MapRoute
+from pist.types import CellValue
 
-LOCAL_ENTITIES_PATH = PIST_DIR / 'entities.toml'
+
+def record_fields(
+    stats: entity_stats.MapEntityStats, route: MapRoute | None
+) -> dict[str, CellValue]:
+    """Build record fields, applying the caller's explicit route correction."""
+    fields: dict[str, CellValue] = dict(stats.record_fields)
+    if route is not None:
+        if route.room_count:
+            fields['n_main_rooms'] = route.room_count
+        else:
+            fields.pop('n_main_rooms', None)  # pyright: ignore[reportUnusedCallResult]
+    return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +32,7 @@ class MapEntityRecordReview:
     """One decoded map's personal summaries and saved-pickup rule issues."""
 
     stats: entity_stats.MapEntityStats
-    collected_issues: tuple[classification.CollectedEntityRuleIssue, ...]
+    collected_issues: tuple[collected_entities.CollectedEntityReviewIssue, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,13 +43,28 @@ class MapEntityRecordSource:
     collected: frozenset[MapEntityID]
     excluded_entities: frozenset[str] = frozenset()
 
+    @classmethod
+    def from_map(
+        cls,
+        map_file: Map,
+        collected: frozenset[MapEntityID],
+        *,
+        excluded_entities: frozenset[str] = frozenset(),
+    ) -> Self:
+        """Read one active map once, retaining inputs needed for rule refreshes."""
+        return cls(
+            map_data.load_map_data(map_file),
+            collected,
+            excluded_entities,
+        )
+
     def eval_rules(
         self,
         *,
         entity_rules: rules.EntityRules | None = None,
         stat_rules: entity_stats.EntityStatRules | None = None,
-        needs_variant_review: classification.VariantReview | None = None,
-        variant_review_loader: classification.VariantReviewLoader | None = None,
+        needs_variant_review: collected_entities.VariantReview | None = None,
+        variant_review_loader: collected_entities.VariantReviewLoader | None = None,
     ) -> MapEntityRecordReview:
         """Return personal statistics and collected-entity issues under the given rules.
 
@@ -43,9 +74,7 @@ class MapEntityRecordSource:
         if needs_variant_review is not None and variant_review_loader is not None:
             raise ValueError('Specify either a variant review checker or loader, not both.')
         current_entity_rules = (
-            rules.load_entity_rule_layers(local_path=LOCAL_ENTITIES_PATH)
-            if entity_rules is None
-            else entity_rules
+            config.load_entity_rule_layers() if entity_rules is None else entity_rules
         )
         current_stat_rules = (
             entity_stats.load_entity_stat_rules(current_entity_rules)
@@ -59,7 +88,7 @@ class MapEntityRecordSource:
                 entity_rules=current_entity_rules,
                 stat_rules=current_stat_rules,
             ),
-            collected_issues=classification.collected_entity_rule_issues(
+            collected_issues=collected_entities.collected_entity_review_issues(
                 self.map_data,
                 self.collected,
                 rule_set=current_entity_rules,
@@ -67,17 +96,3 @@ class MapEntityRecordSource:
                 variant_review_loader=variant_review_loader,
             ),
         )
-
-
-def load_map_entity_record_source(
-    map_file: levels.Map,
-    collected: frozenset[MapEntityID],
-    *,
-    excluded_entities: frozenset[str] = frozenset(),
-) -> MapEntityRecordSource:
-    """Read one active map once, retaining inputs needed for rule refreshes."""
-    return MapEntityRecordSource(
-        map_data.load_map_data(map_file),
-        collected,
-        excluded_entities,
-    )

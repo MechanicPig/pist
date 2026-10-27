@@ -1,21 +1,23 @@
 """Read-only access to Game and Mod content trees."""
 
 from bisect import bisect_left
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from heapq import merge
+from itertools import groupby
 from os import PathLike
 from pathlib import Path, PurePath, PurePosixPath
 from string import ascii_letters
-from typing import Protocol, Self, cast
-from zipfile import BadZipFile, ZipFile
+from typing import Self, cast
+from zipfile import BadZipFile, ZipFile, ZipInfo
 
 from pydantic_core import core_schema
 
-type StrPath = str | PathLike[str]
+type _StrPath = str | PathLike[str]
 
 
-def _normalized_virtual_segment(segment: StrPath) -> str:
+def _normalized_virtual_segment(segment: _StrPath) -> str:
     normalized = (
         ''
         if isinstance(segment, PurePath) and not segment.parts
@@ -33,11 +35,11 @@ def _normalized_virtual_segment(segment: StrPath) -> str:
     return normalized
 
 
-def _normalized_virtual_segments(segments: tuple[StrPath, ...]) -> tuple[str, ...]:
+def _normalized_virtual_segments(segments: tuple[_StrPath, ...]) -> tuple[str, ...]:
     return tuple(_normalized_virtual_segment(segment) for segment in segments)
 
 
-def _dir_entry_path(*segments: StrPath) -> PurePath:
+def _dir_entry_path(*segments: _StrPath) -> PurePath:
     path = PurePath(*segments)
     if path.is_absolute() or path.drive or '..' in path.parts:
         raise ValueError('Directory entry paths must be relative and remain within their root.')
@@ -47,16 +49,26 @@ def _dir_entry_path(*segments: StrPath) -> PurePath:
 class ContentPath(PurePosixPath):
     """An exact, relative path in Everest's virtual content tree.
 
-    The value follows ``PurePosixPath``'s structural API while rejecting the
-    normalization that would otherwise hide invalid empty, dot, parent, or
-    absolute segments. Everest's accepted backslash separator is normalized
-    before the immutable path value is constructed.
+    This is a supported subset of Everest paths, not its resource lookup model.
+    Backslashes become slashes; empty, dot, parent, absolute, and drive-prefixed
+    segments are rejected before pathlib can normalize them. In particular,
+    repeated separators are unsupported rather than aliases of another path.
+    Everest may register such names and later redirect reads or fall back to
+    physical files; this type deliberately does not emulate those edge cases.
+
+    Ordinary ZIPs created from a directory tree with relative member names,
+    single separators, and no dot/parent segments have no such discrepancy.
+    ZIP reads retain original member names and ZipInfo independently of this
+    value, including duplicate names and file/directory coexistence. Hidden
+    entries remain representable here; resource loaders decide to ignore them.
+    Pass raw strings at external boundaries: a preconstructed PurePath may
+    already have discarded unsupported segments and cannot recover them.
     """
 
-    def __init__(self, *segments: StrPath) -> None:
+    def __init__(self, *segments: _StrPath) -> None:
         super().__init__(*_normalized_virtual_segments(segments))
 
-    def with_segments(self, *segments: StrPath) -> Self:
+    def with_segments(self, *segments: _StrPath) -> Self:
         """Construct a derived path without exposing pathlib's ``'.'`` root spelling."""
         return type(self)(
             *(
@@ -84,25 +96,6 @@ MAPS_DIR = ContentPath('Maps')
 DIALOG_DIR = ContentPath('Dialog')
 
 
-class ContentSource(Protocol):
-    """A physical source that can open one Everest content tree."""
-
-    @property
-    def path(self) -> Path: ...
-
-    def open(self) -> ContentEntry: ...
-
-
-@dataclass(frozen=True, slots=True)
-class GameContent:
-    """The Game installation's always-loaded Content directory."""
-
-    path: Path
-
-    def open(self) -> DirContentEntry:
-        return DirContentEntry(self.path)
-
-
 class BadContentEntry(Exception):
     pass
 
@@ -112,17 +105,20 @@ class BadZipContentEntry(BadContentEntry, BadZipFile):
 
 
 @dataclass(frozen=True, slots=True)
-class _ZipMemberIndex:
+class ZipMemberIndex:
     """Sorted exact ZIP member paths for binary and prefix lookup.
 
     ``files`` and ``dirs`` contain unique, normalized, case-sensitive paths in
     lexicographic order. ``dirs`` contains only explicit directory entries;
     directory queries also infer implicit directories from descendant members.
+    ``entries`` maps virtual names to the first ZIP occurrence of the last
+    registered original name. ``invalid_paths`` preserves skipped raw names.
     """
 
     files: tuple[str, ...]
     dirs: tuple[str, ...]
     invalid_paths: tuple[str, ...]
+    entries: Mapping[str, ZipInfo]
 
     @staticmethod
     def _contains(values: tuple[str, ...], path: str) -> bool:
@@ -168,58 +164,68 @@ class _ZipChildren:
     files: tuple[str, ...]
 
 
-class _ContentZipFile(ZipFile):
-    """An open content archive with lazy member and directory caches."""
+class ContentZipFile(ZipFile):
+    """A read-only content archive with lazy member and directory caches.
 
-    root: Path
-    _member_index: _ZipMemberIndex | None
-    _children: dict[str, _ZipChildren]
-    _cached_subtrees: set[str]
+    ``member_index.entries`` selects original members by normalized virtual name;
+    inherited ``getinfo`` retains the standard library's name lookup semantics.
+    Use the selected ZipInfo with ``open`` or ``read`` for content lookups.
+    Directory traversal caches are private implementation shared with
+    ZipContentEntry, not part of the public archive interface.
+    """
 
-    @classmethod
-    def from_path(cls, root: StrPath) -> Self:
+    def __init__(self, root: _StrPath) -> None:
         try:
-            archive = cls(root)
+            super().__init__(root)
         except BadZipFile:
             raise BadZipContentEntry(f'{root!r} is not a ZIP file.') from None
-        archive.root = Path(root)
-        archive._member_index = None
-        archive._children = {}
-        archive._cached_subtrees = set()
-        return archive
+        self.root = Path(root)
+        self._children: dict[str, _ZipChildren] = {}
+        self._cached_subtrees: set[str] = set()
 
-    def member_index(self) -> _ZipMemberIndex:
+    @cached_property
+    def member_index(self) -> ZipMemberIndex:
         """Validate and index ZIP members without building directory relationships."""
-        if self._member_index is not None:
-            return self._member_index
         files: set[str] = set()
         dirs: set[str] = set()
         invalid_paths: list[str] = []
+        first_entries: dict[str, ZipInfo] = {}
+        selected_names: dict[str, str] = {}
         for info in self.infolist():
+            raw = info.orig_filename
             try:
-                path = _normalized_virtual_segment(info.filename.rstrip('/'))
+                virtual = raw.replace('\\', '/')
+                path = _normalized_virtual_segment(virtual.removesuffix('/'))
             except ValueError:
-                invalid_paths.append(info.filename)
+                invalid_paths.append(raw)
                 continue
             if not path:
                 continue
-            (dirs if info.is_dir() else files).add(path)
-        self._member_index = _ZipMemberIndex(
+            if raw not in first_entries:
+                first_entries[raw] = info
+            selected_names[virtual] = raw
+            if virtual.endswith('/'):
+                dirs.add(path)
+            else:
+                files.add(path)
+
+        return ZipMemberIndex(
             files=tuple(sorted(files)),
             dirs=tuple(sorted(dirs)),
             invalid_paths=tuple(invalid_paths),
+            entries={key: first_entries[raw] for key, raw in selected_names.items()},
         )
-        return self._member_index
 
-    def children(self, path: str) -> _ZipChildren:
+    def _children_at(self, path: str) -> _ZipChildren:
         """Return and cache one directory's immediate children."""
-        if path in self._children:
-            return self._children[path]
+        children = self._children.get(path)
+        if children is not None:
+            return children
 
         prefix = f'{path}/' if path else ''
         dirs: set[str] = set()
         files: set[str] = set()
-        member_index = self.member_index()
+        member_index = self.member_index
 
         for member in member_index.dirs_below(path):
             relative = member[len(prefix) :]
@@ -236,11 +242,11 @@ class _ContentZipFile(ZipFile):
             else:
                 files.add(name)
 
-        result = _ZipChildren(tuple(sorted(dirs)), tuple(sorted(files - dirs)))
+        result = _ZipChildren(tuple(sorted(dirs)), tuple(sorted(files)))
         self._children[path] = result
         return result
 
-    def cache_subtree(self, base: str) -> None:
+    def _cache_subtree(self, base: str) -> None:
         """Populate adjacency entries for one subtree in a single member pass."""
         if base in self._cached_subtrees:
             return
@@ -265,7 +271,7 @@ class _ContentZipFile(ZipFile):
                 child = f'{parent}/{parts[-1]}' if parent else parts[-1]
                 directories.add(child)
 
-        member_index = self.member_index()
+        member_index = self.member_index
         for path in member_index.dirs_below(base):
             add_path(path, is_dir=True)
         for path in member_index.files_below(base):
@@ -273,7 +279,7 @@ class _ContentZipFile(ZipFile):
 
         for directory in directories:
             dirs = dir_children.get(directory, set())
-            files = file_children.get(directory, set()) - dirs
+            files = file_children.get(directory, set())
             self._children[directory] = _ZipChildren(tuple(sorted(dirs)), tuple(sorted(files)))
         self._cached_subtrees.update(directories)
 
@@ -287,7 +293,7 @@ class ContentEntry:
 
     root: Path
 
-    def __new__(cls, root: StrPath, *_: object, **__: object) -> Self:
+    def __new__(cls, root: _StrPath, *_: object, **__: object) -> Self:
         if cls is not ContentEntry:
             return object.__new__(cls)
 
@@ -328,10 +334,10 @@ class ContentEntry:
         """Walk this content subtree from the top down, like :meth:`pathlib.Path.walk`."""
         raise NotImplementedError
 
-    def joinpath(self, *_: StrPath) -> Self:
+    def joinpath(self, *_: _StrPath) -> Self:
         raise NotImplementedError
 
-    def __truediv__(self, part: StrPath) -> Self:
+    def __truediv__(self, part: _StrPath) -> Self:
         return self.joinpath(part)
 
     def read_bytes(self) -> bytes:
@@ -342,7 +348,7 @@ class ContentEntry:
 
 
 class DirContentEntry(ContentEntry):
-    def __init__(self, root: StrPath, at: StrPath = '') -> None:
+    def __init__(self, root: _StrPath, at: _StrPath = '') -> None:
         self.root = Path(root)
         self._at = _dir_entry_path(at)
 
@@ -378,7 +384,7 @@ class DirContentEntry(ContentEntry):
         for directory, dirnames, filenames in self.path.walk():
             yield type(self)(self.root, directory.relative_to(self.root)), dirnames, filenames
 
-    def joinpath(self, *parts: StrPath) -> Self:
+    def joinpath(self, *parts: _StrPath) -> Self:
         return type(self)(self.root, self.at.joinpath(*parts))
 
     def read_bytes(self) -> bytes:
@@ -386,8 +392,8 @@ class DirContentEntry(ContentEntry):
 
 
 class ZipContentEntry(ContentEntry):
-    def __init__(self, root: StrPath) -> None:
-        self._zip = _ContentZipFile.from_path(root)
+    def __init__(self, root: _StrPath) -> None:
+        self._zip = ContentZipFile(root)
         self.root = self._zip.root
         self._at = PurePosixPath()
 
@@ -399,35 +405,23 @@ class ZipContentEntry(ContentEntry):
         return self._at
 
     @property
-    def zip_file(self) -> _ContentZipFile:
-        """Return the open ZIP file containing this entry."""
+    def zip_file(self) -> ContentZipFile:
+        """Borrow the content archive until this content root is closed.
+
+        Internal member indexes and caches are not part of this public contract.
+        """
         return self._zip
 
     def _next(self, at: PurePosixPath) -> Self:
         result = object.__new__(type(self))
-        result._zip = self._zip
+        result._zip = self._zip  # noqa: SLF001
         result.root = self.root
-        result._at = at
+        result._at = at  # noqa: SLF001
         return result
-
-    def _member_index(self) -> _ZipMemberIndex:
-        return self._zip.member_index()
-
-    def _has_explicit_file(self) -> bool:
-        try:
-            return not self._zip.getinfo(self.at.as_posix()).is_dir()
-        except KeyError:
-            return False
 
     def _path_key(self) -> str:
         """Return the archive key used by the shared caches."""
         return self.at.as_posix() if self.at.parts else ''
-
-    def _has_explicit_dir(self) -> bool:
-        try:
-            return self._zip.getinfo(f'{self.at.as_posix()}/').is_dir()
-        except KeyError:
-            return False
 
     @property
     def name(self) -> str:
@@ -437,35 +431,39 @@ class ZipContentEntry(ContentEntry):
         if not self.at.parts:
             return True
         path = self._path_key()
-        return (
-            self._has_explicit_file()
-            or self._has_explicit_dir()
-            or self._member_index().has_file(path)
-            or self._member_index().has_dir(path)
-        )
+        index = self._zip.member_index
+        return index.has_file(path) or index.has_dir(path)
 
     def is_dir(self) -> bool:
         if not self.at.parts:
             return True
-        return self._has_explicit_dir() or self._member_index().has_dir(self._path_key())
+        return self._zip.member_index.has_dir(self._path_key())
 
     def is_file(self) -> bool:
-        return self._has_explicit_file() or self._member_index().has_file(self._path_key())
+        return self._zip.member_index.has_file(self._path_key())
 
     def iterdir(self) -> Iterator[Self]:
         if not self.is_dir():
             raise NotADirectoryError(self.at)
-        children = self._zip.children(self._path_key())
-        for name in merge(children.dirs, children.files):
+        children = self._zip._children_at(self._path_key())  # noqa: SLF001
+        for name, _ in groupby(merge(children.dirs, children.files)):
             yield self._next(self.at / name)
 
     def walk(self) -> Iterator[tuple[Self, list[str], list[str]]]:
+        """Walk top-down, allowing in-place pruning or reordering of yielded dirnames.
+
+        As with Path.walk(), changes to dirnames control subsequent traversal.
+        The yielded lists are independent of cached directory contents, so edits
+        do not affect later walks.
+        A name may occur in both dirnames and filenames when the ZIP has a
+        file and a directory with the same name.
+        """
         if not self.is_dir():
             return
-        self._zip.cache_subtree(self._path_key())
+        self._zip._cache_subtree(self._path_key())  # noqa: SLF001
 
         def visit(entry: Self) -> Iterator[tuple[Self, list[str], list[str]]]:
-            children = self._zip.children(entry._path_key())
+            children = self._zip._children_at(entry._path_key())  # noqa: SLF001
             dirnames = list(children.dirs)
             filenames = list(children.files)
             yield entry, dirnames, filenames
@@ -474,26 +472,8 @@ class ZipContentEntry(ContentEntry):
 
         yield from visit(self)
 
-    def joinpath(self, *parts: StrPath) -> Self:
+    def joinpath(self, *parts: _StrPath) -> Self:
         return self._next(self.at.joinpath(*_normalized_virtual_segments(parts)))
 
     def read_bytes(self) -> bytes:
-        return self._zip.read(self.at.as_posix())
-
-
-def entry_fingerprint(entry: ContentEntry) -> str:
-    """Return a cheap signature that changes when one content entry changes."""
-    if isinstance(entry, DirContentEntry):
-        stat = entry.path.stat()
-        return f'{stat.st_size}:{stat.st_mtime_ns}'
-    if isinstance(entry, ZipContentEntry):
-        info = entry.zip_file.getinfo(entry.at.as_posix())
-        return f'{info.CRC}:{info.compress_size}:{info.file_size}:{info.date_time}'
-    raise TypeError(f'Unsupported content entry type: {type(entry).__name__}')
-
-
-def invalid_archive_member_paths(root: ContentEntry) -> tuple[str, ...]:
-    """Return invalid member paths diagnosed while reading one ZIP content tree."""
-    if not isinstance(root, ZipContentEntry):
-        return ()
-    return root.zip_file.member_index().invalid_paths
+        return self._zip.read(self._zip.member_index.entries[self.at.as_posix()])

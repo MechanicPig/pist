@@ -10,8 +10,9 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import ListItem, LoadingIndicator, Static
 
-from berries.game.levels import Level, LevelSide, Map
-from berries.game.saves import SaveSlot
+from berries.game.levels import Level, LevelSide
+from berries.game.maps import Map
+from pist.saves import SaveProgress
 from pist.ui.mouse import LEFT_MOUSE_BUTTON
 
 from .map_list import MapItem, MapSideButton, SideGroup
@@ -23,9 +24,9 @@ class CollabMapList(Vertical):
     def __init__(
         self,
         map_groups: Iterable[Iterable[tuple[Level, LevelSide]]],
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
         *,
         extra_items: Iterable[ListItem] = (),
@@ -33,7 +34,7 @@ class CollabMapList(Vertical):
         super().__init__(classes='collab-map-list is-loading')
         self.map_groups = tuple(tuple(group) for group in map_groups)
         self.maps = tuple(map_ref for group in self.map_groups for map_ref in group)
-        self.languages = tuple(languages)
+        self.lang = lang
         self.dialogs = dialogs
         self.save_slot = save_slot
         self.source_name_for = source_name_for
@@ -51,12 +52,12 @@ class CollabMapList(Vertical):
 
     def finish_loading(self) -> None:
         """Switch from the compact loading row to a normally sized map list."""
-        self.remove_class('is-loading')
+        self.remove_class('is-loading')  # pyright: ignore[reportUnusedCallResult]
 
     @on(events.Click)
     def stop_click_bubbling(self, event: events.Click) -> None:
         """Keep nested map gestures from selecting the containing Collab lobby."""
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
 
 
 class LobbyMapToggle(Static):
@@ -70,9 +71,9 @@ class LobbyMapToggle(Static):
 
     @on(events.Click)
     def toggle(self, event: events.Click) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         if event.button == LEFT_MOUSE_BUTTON and event.chain == 1:
-            self.post_message(self.Toggled())
+            self.post_message(self.Toggled())  # pyright: ignore[reportUnusedCallResult]
 
 
 class LobbyMapItem(MapItem):
@@ -91,9 +92,9 @@ class LobbyMapItem(MapItem):
         self,
         level: Level,
         side: LevelSide,
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
         submission_maps: Widget,
         *children: Widget,
@@ -103,7 +104,7 @@ class LobbyMapItem(MapItem):
         super().__init__(
             level,
             side,
-            languages,
+            lang,
             dialogs,
             save_slot,
             source_name_for,
@@ -116,14 +117,14 @@ class LobbyMapItem(MapItem):
 
     def watch_collapsed(self, collapsed: bool) -> None:
         self._toggle.update('▸' if collapsed else '▾')
-        self.set_class(collapsed, '-collapsed')
+        self.set_class(collapsed, '-collapsed')  # pyright: ignore[reportUnusedCallResult]
 
     @on(LobbyMapToggle.Toggled)
     def toggle_collapsed(self, event: LobbyMapToggle.Toggled) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         self.collapsed = not self.collapsed
         if not self.collapsed:
-            self.post_message(self.ExpansionRequested(self))
+            self.post_message(self.ExpansionRequested(self))  # pyright: ignore[reportUnusedCallResult]
 
 
 class SideLobbyMapItem(LobbyMapItem):
@@ -133,9 +134,9 @@ class SideLobbyMapItem(LobbyMapItem):
         self,
         level: Level,
         sides: SideGroup,
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
         submission_maps: Widget,
     ) -> None:
@@ -148,14 +149,14 @@ class SideLobbyMapItem(LobbyMapItem):
         super().__init__(
             level,
             self._sides[0],
-            languages,
+            lang,
             dialogs,
             save_slot,
             source_name_for,
             submission_maps,
             controls,
         )
-        self.add_class('side-map-item')
+        self.add_class('side-map-item')  # pyright: ignore[reportUnusedCallResult]
         self._update_side_buttons()
 
     @on(MapSideButton.Clicked)
@@ -166,13 +167,13 @@ class SideLobbyMapItem(LobbyMapItem):
             self.set_side(self._sides[self._index], self._save_slot)
             self._update_side_buttons()
             if not self.collapsed:
-                self.post_message(self.ExpansionRequested(self))
+                self.post_message(self.ExpansionRequested(self))  # pyright: ignore[reportUnusedCallResult]
 
     def _update_side_buttons(self) -> None:
-        self._previous.set_class(self._index == 0, '-hidden')
-        self._next.set_class(self._index == len(self._sides) - 1, '-hidden')
+        self._previous.set_class(self._index == 0, '-hidden')  # pyright: ignore[reportUnusedCallResult]
+        self._next.set_class(self._index == len(self._sides) - 1, '-hidden')  # pyright: ignore[reportUnusedCallResult]
 
-    def refresh_stats(self, save_slot: SaveSlot | None) -> None:
+    def refresh_stats(self, save_slot: SaveProgress | None) -> None:
         """Refresh the current side and retain its save slot for later side switches."""
         self._save_slot = save_slot
         super().refresh_stats(save_slot)

@@ -4,16 +4,53 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from textual.pilot import Pilot
+from textual.widgets import Button, OptionList
 
-from berries.entities import rules as entity_rules
+from berries.entities.rules import EntityKind
+from pist.entities import config as entity_config
 from pist.entities.audit import kind_changes
 from pist.entities.audit.store import EntityAuditStore
-from pist.ui.entities.audit.app import EntityAuditApp
-from pist.ui.entities.audit.kind_dialogs import NewKind
+from pist.entities.maintenance import EntityRuleLibrary
+from pist.ui.entities.audit.app import ENTITY_KIND_ID, ENTITY_LIST_ID, EntityAuditApp
+from pist.ui.entities.audit.kind_dialogs import KindContextScreen, KindPickerScreen
+from pist.ui.entities.kinds import KindTree
+
+
+async def _open_kind_menu(app: EntityAuditApp, pilot: Pilot[None]) -> KindTree:
+    await app.workers.wait_for_complete()
+    options = app.query_one(f'#{ENTITY_LIST_ID}', OptionList)
+    assert await pilot.click(options)
+    await pilot.press('home', 'enter')
+    await app.workers.wait_for_complete()
+    button = app.query_one(f'#{ENTITY_KIND_ID}')
+    button.scroll_visible(immediate=True)
+    await pilot.pause()
+    assert await pilot.click(button)
+    await pilot.pause()
+    assert isinstance(app.screen, KindPickerScreen)
+    tree = app.screen.query_one(KindTree)
+    node = next(child for child in tree.root.children[0].children if child.data == 'old')
+    offset = tree.content_region.offset - tree.region.offset + (8, node.line)
+    assert await pilot.click(tree, offset=offset, button=3)
+    await pilot.pause()
+    return tree
+
+
+async def _submit_kind_change(pilot: Pilot[None], operation: str) -> None:
+    assert await pilot.click(f'#kind-context-{"edit" if operation == "rename" else "delete"}')
+    await pilot.pause()
+    if operation == 'rename':
+        assert await pilot.click('#audit-new-kind-name')
+        await pilot.press('ctrl+a', 'n', 'e', 'w')
+        assert await pilot.click('#audit-save-new-kind')
+    else:
+        assert await pilot.click('#kind-delete-confirm')
+    await pilot.pause()
 
 
 @pytest.fixture
-def config(tmp_path: Path) -> entity_rules.EntityConfigStore:
+def config(tmp_path: Path) -> EntityRuleLibrary:
     kinds = tmp_path / 'kinds.toml'
     shared = tmp_path / 'shared.toml'
     local = tmp_path / 'local.toml'
@@ -23,11 +60,11 @@ def config(tmp_path: Path) -> entity_rules.EntityConfigStore:
     )
     shared.write_text('[[entities.test.rules]]\nkind="old"\n', encoding='utf-8')
     local.write_text('[[entities.local.rules]]\nkind="old"\n', encoding='utf-8')
-    return entity_rules.EntityConfigStore(kinds_path=kinds, shared_path=shared, local_path=local)
+    return EntityRuleLibrary(shared, kinds_path=kinds)
 
 
 @pytest.fixture
-def audit(tmp_path: Path) -> tuple[EntityAuditStore, int]:
+def audit(tmp_path: Path) -> EntityAuditStore:
     path = tmp_path / 'report.json'
     path.write_text(
         json.dumps(
@@ -53,68 +90,76 @@ def audit(tmp_path: Path) -> tuple[EntityAuditStore, int]:
         encoding='utf-8',
     )
     store = EntityAuditStore(tmp_path / 'audit.sqlite3')
-    report_id = store.import_report(path)
-    store.confirm_entity_kind('test', report_id, 'old')
-    return store, report_id
+    store.import_report(path)
+    store.confirm_entity_kind('test', 'old')
+    return store
 
 
 @pytest.mark.parametrize('operation', ('rename', 'delete'))
 @pytest.mark.parametrize('failure', ('kinds.toml', 'shared.toml', 'local.toml', 'database', None))
-def test_kind_changes_preserve_all_files_and_audit_references_on_failure(
+def test_kind_changes_leave_completed_writes_and_keep_database_transactional(
     tmp_path: Path,
-    config: entity_rules.EntityConfigStore,
-    audit: tuple[EntityAuditStore, int],
+    config: EntityRuleLibrary,
+    audit: EntityAuditStore,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
     failure: str | None,
 ) -> None:
-    store, report_id = audit
+    store = audit
     original = config.load()
     before = {path: path.read_bytes() for path in tmp_path.glob('*.toml')}
     rules = (
-        original.with_renamed_kind('old', 'new', 'New', parent='root')
+        original.with_renamed_kind('old', 'new', EntityKind(label='New', parent='root'))
         if operation == 'rename'
         else original.with_deleted_kind('old')
     )
     target = 'new' if operation == 'rename' else 'root'
-    replace = Path.replace
+    write_text = Path.write_text
 
-    def replace_file(path: Path, destination: Path) -> Path:
-        if path.suffix == '.tmp' and destination.name == failure:
+    def write_file(path: Path, text: str, *, encoding: str) -> int:
+        if path.name == failure:
             raise PermissionError('simulated read-only target')
-        return replace(path, destination)
+        return write_text(path, text, encoding=encoding)
 
-    monkeypatch.setattr(Path, 'replace', replace_file)
+    monkeypatch.setattr(Path, 'write_text', write_file)
     if failure == 'database':
         with sqlite3.connect(store.path) as conn:
-            conn.execute("""CREATE TRIGGER reject_kind_change
+            conn.execute(
+                """CREATE TRIGGER reject_kind_change
                 BEFORE UPDATE ON entity_kind_confirmations BEGIN
-                SELECT RAISE(ABORT, 'simulated audit failure'); END""")
-    if failure is None:
+                SELECT RAISE(ABORT, 'simulated audit failure'); END"""
+            )
+    if failure in (None, 'local.toml'):
         kind_changes.change_kind(config, store, 'old', target, rules)
         assert config.load() == rules
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match='未自动恢复'):
             kind_changes.change_kind(config, store, 'old', target, rules)
-        assert config.load() == original
+    if failure == 'kinds.toml':
         assert all(path.read_bytes() == data for path, data in before.items())
-    detail = store.entity_detail('test', report_id)
+    elif failure == 'shared.toml':
+        assert (tmp_path / 'kinds.toml').read_bytes() != before[tmp_path / 'kinds.toml']
+        assert (tmp_path / 'shared.toml').read_bytes() == before[tmp_path / 'shared.toml']
+    else:
+        assert config.load() == rules
+    detail = store.entity_detail('test')
     assert detail.kind_confirmation is not None
-    expected = target if failure is None else 'old'
+    expected = target if failure in (None, 'local.toml') else 'old'
+    assert (tmp_path / 'local.toml').read_bytes() == before[tmp_path / 'local.toml']
     assert detail.kind_confirmation.kind == expected
     assert detail.variants[0].observations[0].kind == expected
     assert not tuple(tmp_path.glob('.*.bak'))
     assert not tuple(tmp_path.glob('.*.tmp'))
 
 
-def test_audit_commit_failure_restores_files_and_rolls_back_references(
-    config: entity_rules.EntityConfigStore,
-    audit: tuple[EntityAuditStore, int],
+def test_audit_commit_failure_keeps_written_files_and_rolls_back_refs(
+    config: EntityRuleLibrary,
+    audit: EntityAuditStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, report_id = audit
+    store = audit
     original = config.load()
-    rules = original.with_renamed_kind('old', 'new', 'New', parent='root')
+    rules = original.with_renamed_kind('old', 'new', EntityKind(label='New', parent='root'))
     connect = sqlite3.connect
 
     class FailingConnection(sqlite3.Connection):
@@ -125,39 +170,81 @@ def test_audit_commit_failure_restores_files_and_rolls_back_references(
         patch.setattr(sqlite3, 'connect', lambda path: connect(path, factory=FailingConnection))
         with pytest.raises(RuntimeError, match='commit failure'):
             kind_changes.change_kind(config, store, 'old', 'new', rules)
-    assert config.load() == original
-    detail = store.entity_detail('test', report_id)
+    assert config.load() == rules
+    detail = store.entity_detail('test')
     assert detail.kind_confirmation is not None and detail.kind_confirmation.kind == 'old'
     assert detail.variants[0].observations[0].kind == 'old'
 
 
 @pytest.mark.parametrize('operation', ('rename', 'delete'))
 def test_kind_failure_is_visible_in_ui_and_keeps_original_memory(
-    config: entity_rules.EntityConfigStore,
-    audit: tuple[EntityAuditStore, int],
+    config: EntityRuleLibrary,
+    audit: EntityAuditStore,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    store, report_id = audit
-    app = EntityAuditApp(store, report_id, kind_store=config)
+    store = audit
+    app = EntityAuditApp(store, kind_store=config)
     original = config.load()
     messages: list[str] = []
     monkeypatch.setattr(app, 'notify', lambda message, **kwargs: messages.append(message))
     with sqlite3.connect(store.path) as conn:
-        conn.execute("""CREATE TRIGGER reject_kind_change BEFORE UPDATE ON variant_observations
-            BEGIN SELECT RAISE(ABORT, 'simulated database error'); END""")
+        conn.execute(
+            """CREATE TRIGGER reject_kind_change BEFORE UPDATE ON variant_observations
+            BEGIN SELECT RAISE(ABORT, 'simulated database error'); END"""
+        )
 
     async def run() -> None:
-        async with app.run_test() as pilot:
-            result = (
-                app._save_kind_from_picker(NewKind('new', 'New', 'root', None), 'old')
-                if operation == 'rename'
-                else app._delete_kind_from_picker('old')
-            )
-            await pilot.pause()
-            assert result is None
-            assert app._rules == original
+        async with app.run_test(size=(160, 60)) as pilot:
+            await _open_kind_menu(app, pilot)
+            await _submit_kind_change(pilot, operation)
+            assert isinstance(app.screen, KindPickerScreen)
+            tree = app.screen.query_one(KindTree)
+            assert tree.root.children[0].children[0].data == 'old'
 
     asyncio.run(run())
-    assert messages and 'simulated database error' in messages[-1]
-    assert config.load() == original
+    assert len(messages) == 1
+    message = messages[0]
+    assert 'simulated database error' in message
+    assert '未自动恢复' in message and 'Git diff' in message
+    assert config.load() != original
+    detail = audit.entity_detail('test')
+    assert detail.kind_confirmation is not None and detail.kind_confirmation.kind == 'old'
+    assert detail.variants[0].observations[0].kind == 'old'
+
+
+@pytest.mark.parametrize('shared', (False, True))
+def test_audit_picker_only_opens_category_edits_in_shared_mode(
+    tmp_path: Path,
+    config: EntityRuleLibrary,
+    audit: EntityAuditStore,
+    shared: bool,
+) -> None:
+    user_config = (
+        EntityRuleLibrary(tmp_path / 'shared.toml', kinds_path=tmp_path / 'kinds.toml')
+        if shared
+        else entity_config.EntityConfigStore(
+            tmp_path / 'local.toml',
+            shared_path=tmp_path / 'shared.toml',
+            kinds_path=tmp_path / 'kinds.toml',
+        )
+    )
+    app = EntityAuditApp(audit, kind_store=user_config)
+    before = {path: path.read_bytes() for path in tmp_path.glob('*.toml')}
+
+    async def run() -> None:
+        async with app.run_test(size=(160, 60)) as pilot:
+            tree = await _open_kind_menu(app, pilot)
+            if shared:
+                assert isinstance(app.screen, KindContextScreen)
+            else:
+                assert isinstance(app.screen, KindPickerScreen)
+                node = tree.root.children[0].children[0]
+                offset = tree.content_region.offset - tree.region.offset + (8, node.line)
+                assert await pilot.double_click(tree, offset=offset)
+                await pilot.pause()
+                assert '(old)' in str(app.query_one(f'#{ENTITY_KIND_ID}', Button).label)
+                assert not isinstance(app.screen, KindPickerScreen)
+
+    asyncio.run(run())
+    assert all(path.read_bytes() == data for path, data in before.items())

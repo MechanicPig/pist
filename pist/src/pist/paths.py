@@ -12,7 +12,10 @@ SHARED_DATA_DIR = PKG_DIR / 'data'
 
 def source_root(pkg_dir: Path = PKG_DIR) -> Path | None:
     """Return the repository root when Pist is running from a source checkout."""
-    candidate = pkg_dir.parent.parent.parent
+    parents = pkg_dir.parents
+    if len(parents) < 3:
+        return None
+    candidate = parents[2]
     if pkg_dir == candidate / 'pist' / 'src' / 'pist' and (candidate / 'pyproject.toml').is_file():
         return candidate
     return None

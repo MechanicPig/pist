@@ -6,15 +6,12 @@ import pytest
 from berries.entities.rules import EntityRules
 from berries.game.binmap import BinElement, BinMap
 from berries.game.content import ContentPath
-from berries.game.levels import Map
-from berries.game.maps import MapInfo
-from berries.map_entrances import MapEntranceSource, load_map_entrance_rule_layers
+from berries.game.maps import ModMap
+from berries.map_entrances import MapEntranceSource, load_map_entrance_rules
 from berries.map_layout import (
     MapEntrance,
+    MapLayout,
     MapPreviewEntity,
-    load_map_layout,
-    load_map_layout_from_path,
-    map_layout,
 )
 from test_support.mod_factory import make_installed_mod
 
@@ -23,7 +20,7 @@ from test_support.mod_factory import make_installed_mod
 @pytest.mark.parametrize('loader', ('active_map', 'path'))
 def test_map_layout_reports_uninstalled_mod(tmp_path: Path, source: str, loader: str) -> None:
     mod_path = tmp_path / ('Removed.zip' if source == 'zip' else 'Removed')
-    map_info = MapInfo(file_path=ContentPath('Maps/Removed/Map.bin'))
+    map_info = ContentPath('Maps/Removed/Map.bin')
     mod = make_installed_mod(
         source='zip' if source == 'zip' else 'directory',
         filename=mod_path.name,
@@ -33,11 +30,12 @@ def test_map_layout_reports_uninstalled_mod(tmp_path: Path, source: str, loader:
         maps=[map_info],
     )
 
-    with pytest.raises(ValueError) as caught:
-        if loader == 'active_map':
-            load_map_layout(Map(map_info, mod))
-        else:
-            load_map_layout_from_path(mod_path, map_info.file_path)
+    if loader == 'active_map':
+        with pytest.raises(ValueError) as caught:
+            MapLayout.from_map(ModMap(map_info, mod))
+    else:
+        with pytest.raises(ValueError) as caught:
+            MapLayout.from_path(mod_path, map_info)
 
     assert mod_path.name in str(caught.value)
     if source == 'zip' and loader == 'active_map':
@@ -81,7 +79,7 @@ def test_map_layout_keeps_rooms_without_complete_preview_bounds() -> None:
         ),
     )
 
-    layout = map_layout(map_data)
+    layout = MapLayout.from_bin_map(map_data)
 
     assert layout.room_names == {'start', 'secret'}
     assert layout.rooms[0].has_bounds
@@ -129,7 +127,7 @@ def test_map_layout_extracts_tiles_and_configured_entity_markers() -> None:
         ),
     )
 
-    room = map_layout(map_data).rooms[0]
+    room = MapLayout.from_bin_map(map_data).rooms[0]
 
     assert room.background == ('010', '111')
     assert room.solids == ('100', '001')
@@ -180,7 +178,7 @@ def test_map_layout_uses_rules_supplied_when_the_map_is_opened() -> None:
         }
     )
 
-    room = map_layout(map_data, entity_rules=rules).rooms[0]
+    room = MapLayout.from_bin_map(map_data, entity_rules=rules).rooms[0]
 
     assert room.entities == (
         MapPreviewEntity(
@@ -247,7 +245,7 @@ def test_map_layout_extracts_collab_route_links() -> None:
         ),
     )
 
-    assert map_layout(map_data).entrances == (
+    assert MapLayout.from_bin_map(map_data).entrances == (
         MapEntrance(
             'lobby',
             'Author/Pack/SmallMap',
@@ -307,7 +305,7 @@ height = { value = 16 }
         encoding='utf-8',
     )
 
-    rules = load_map_entrance_rule_layers(shared_path, local_path)
+    rules = load_map_entrance_rules(shared_path).merged(load_map_entrance_rules(local_path))
 
     assert len(rules.rules) == 1
     rule = rules.rules[0]
@@ -346,6 +344,6 @@ def test_load_map_layout_reads_an_active_mod_map(tmp_path: Path) -> None:
         metadata_version=None,
     )
 
-    layout = load_map_layout(Map(MapInfo(file_path=ContentPath('Maps/Author/Pack/Map.bin')), mod))
+    layout = MapLayout.from_map(ModMap(ContentPath('Maps/Author/Pack/Map.bin'), mod))
 
     assert [room.name for room in layout.rooms] == ['start']

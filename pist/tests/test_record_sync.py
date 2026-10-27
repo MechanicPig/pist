@@ -7,11 +7,12 @@ import pytest
 from sheet_factory import FakeSheet
 from sheet_factory import make_sheet_fields as fields
 
+from berries.game.duration import Duration
 from pist.records.models import MapRecord
 from pist.records.store import RecordSheetLink, RecordStore, RecordSyncState
 from pist.records.sync import RecordAddRecoveryRequired, RecordSyncConflict, RecordSyncService
 from pist.smartsheet.encoding import encode_record_values
-from pist.smartsheet.models import JsonObject, MainSheetSnapshot
+from pist.smartsheet.models import JsonObject, MainSheetSnapshot, SmartSheetRecord
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 
@@ -125,8 +126,10 @@ def test_recovery_refuses_retry_with_candidates_and_another_sheet(
         asyncio.run(service.resolve_add(error.value.recovery, record_id=None))
     recovery = error.value.recovery
     wrong = recovery.attempt.model_copy(update={'sheet_id': 'different'})
+    store.allow_sheet_add_retry(recovery.attempt)
+    store.begin_sheet_add(wrong)
     with pytest.raises(ValueError, match='其他表格'):
-        service._add_recovery((wrong,), recovery.snapshot)
+        asyncio.run(service.check(saved))
 
 
 @pytest.fixture
@@ -137,7 +140,7 @@ def record() -> MapRecord:
         mod_metadata_name='Example',
         map_file='Maps/Map.bin',
         save_slot=0,
-        time_played='0:01:00',
+        time_played=Duration.from_dotnet_ticks(600000000),
         status='进行中',
         notes='A',
     )
@@ -181,7 +184,7 @@ def test_offline_edits_sync_latest_contents_using_original_baseline(
 
     asyncio.run(run())
 
-    assert client.read_selections == [('target',)] * 3
+    assert client.read_selections == [('target',)] * 2
 
 
 @pytest.mark.parametrize('reviewed', (False, True))
@@ -277,7 +280,7 @@ def test_remote_change_during_editing_requires_renewed_consent_before_saving(
 
 
 @pytest.mark.parametrize('verification', (False, True))
-def test_failed_write_or_readback_keeps_local_pending_and_baseline_unchanged(
+def test_failed_write_or_response_keeps_local_pending_and_baseline_unchanged(
     tmp_path: Path, record: MapRecord, verification: bool
 ) -> None:
     store = RecordStore(tmp_path / 'records.sqlite3')
@@ -288,7 +291,7 @@ def test_failed_write_or_readback_keeps_local_pending_and_baseline_unchanged(
     async def run() -> None:
         check = await service.check(saved)
         client.write_error = not verification
-        client.verify_error = verification
+        client.response_error = verification
         result = await service.save(saved.model_copy(update={'deaths': 9}), check)
         assert not result.synced and result.error is not None
         assert saved.local_id is not None
@@ -313,12 +316,12 @@ def test_new_row_keeps_returned_association_even_if_verification_fails(
 
     async def run() -> None:
         check = await service.check(record)
-        client.verify_error = True
+        client.response_error = True
         result = await service.save(record, check)
         assert not result.synced and result.record.local_id is not None
         assert store.sheet_links(result.record.local_id)[0].record_id == 'created'
         assert store.sheet_add_attempts(result.record.local_id) == ()
-        client.verify_error = False
+        client.response_error = False
         reviewed = await service.check(result.record)
         assert (await service.save(result.record, reviewed)).synced
         assert [id_ for id_, _ in client.writes] == [
@@ -394,7 +397,7 @@ def test_uncertain_add_survives_restart_and_rename_without_another_write(
     class LostResponseSheet(FakeSheet):
         async def write_record(
             self, snapshot: MainSheetSnapshot, values: JsonObject, *, record_id: str | None
-        ) -> str:
+        ) -> SmartSheetRecord:
             # The intent must be committed before the request can reach the remote boundary.
             assert len(RecordStore(store.path).sheet_add_attempts(1)) == 1
             if created_before_failure:

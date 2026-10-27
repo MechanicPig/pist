@@ -6,18 +6,20 @@ from importlib.resources import files
 
 from pydantic import JsonValue, TypeAdapter, field_validator, model_validator
 
+from berries.game.duration import Duration
 from berries.models import FrozenModel
 from pist.records.fields import FORMULA_FIELD_TITLES, RECORD_ATTRIBUTES
 from pist.records.models import MapRecord
-from pist.smartsheet.encoding import MapNameCell
-from pist.smartsheet.models import (
+from pist.types import CellValue
+
+from .encoding import MapNameCell
+from .models import (
     MILLISECONDS_PER_SECOND,
     FieldsResult,
     FieldType,
     JsonObject,
     SheetTextFragment,
 )
-from pist.types import CellValue
 
 
 class SheetFieldSpec(FrozenModel):
@@ -141,6 +143,9 @@ class SheetFields(FrozenModel):
         for spec in self.fields:
             if spec.title not in present:
                 continue
+            if spec.title == '编号':
+                # Numbering belongs to the coordinated local order, not one row's editor.
+                continue
             if spec.title == '地图名':
                 cell = MapNameCell.from_value(values.get(spec.title, []))
                 data.update(map_name=cell.name, video_url=cell.video_url)
@@ -154,6 +159,21 @@ class SheetFields(FrozenModel):
                     data.update(mod_name=value[0], mod_url=value[1])
             else:
                 attribute = RECORD_ATTRIBUTES[spec.title]
+                if attribute == 'time_played':
+                    if value is not None:
+                        if not isinstance(value, str):
+                            raise ValueError('用时必须是文本字段。')
+                        previous = record.time_played
+                        # Equal public seconds do not authorize discarding local subsecond data.
+                        duration = (
+                            previous
+                            if previous is not None and format(previous, '%Qh:%M:%S') == value
+                            else Duration.from_format(value, '%Qh:%M:%S')
+                        )
+                    else:
+                        duration = None
+                    data[attribute] = duration
+                    continue
                 if attribute == 'n_main_rooms' and isinstance(value, int) and value <= 0:
                     value = None
                 data[attribute] = value or () if spec.type == FieldType.MULTI_SELECT else value

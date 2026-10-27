@@ -16,6 +16,9 @@ DatePickerScreen, RecordRefScreen, RecordEditorScreen, AuthorSelectionScreen { a
     margin: 0 1;
 }
 
+#date-picker-header Button { min-width: 0; width: 5; }
+#date-picker-month { width: 1fr; height: 3; content-align: center middle; }
+
 #date-picker-days {
     grid-size: 7;
     grid-gutter: 0;

@@ -9,11 +9,13 @@ from textual.widget import Widget
 from textual.widgets import ListItem, ListView, Static
 
 from berries.game import maps as backend
-from berries.game.levels import Level, LevelSide, Map
-from berries.game.saves import SaveSlot
+from berries.game.content import ContentPath
+from berries.game.levels import Level, LevelSide
+from berries.game.maps import Map
+from pist.saves import SaveProgress
 from pist.ui.mouse import LEFT_MOUSE_BUTTON
 
-from .catalog import map_detail_lines, map_title
+from .catalog import map_detail_lines, map_save_stats, map_title
 
 type SideGroup = tuple[LevelSide, *tuple[LevelSide, ...]]
 
@@ -21,9 +23,9 @@ type MapItemFactory = Callable[
     [
         Level,
         SideGroup,
-        Iterable[str],
+        str,
         Mapping[str, Mapping[str, str]],
-        SaveSlot | None,
+        SaveProgress | None,
         Callable[[Map], str],
     ],
     'MapItem',
@@ -42,6 +44,13 @@ def _map_side_groups(
 
 class MapItem(ListItem):
     """One selectable active map item in the campaign detail pane."""
+
+    class Mounted(Message):
+        """Request the current save-loading label for a newly mounted map row."""
+
+        def __init__(self, item: MapItem) -> None:
+            super().__init__()
+            self.item = item
 
     class Clicked(Message):
         """A map item was clicked with a specific mouse button and click count."""
@@ -65,9 +74,9 @@ class MapItem(ListItem):
         self,
         level: Level,
         side: LevelSide,
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
         *children: Widget,
         leading: Widget | None = None,
@@ -76,26 +85,42 @@ class MapItem(ListItem):
     ) -> None:
         self.level = level
         self.side = side
-        self._languages = languages
+        self._lang = lang
         self._dialogs = dialogs
         self._marker = marker
         self._source_name_for = source_name_for
         self._title = Static(
-            map_title(level, side, languages, dialogs, marker=marker), classes='map-item-title'
+            map_title(level, side, lang, dialogs, marker=marker), classes='map-item-title'
         )
         self._content = Static(
-            map_detail_lines(
-                level, side, languages, dialogs, source_name_for(level[side]), save_slot
-            ),
+            map_detail_lines(level, side, lang, dialogs, source_name_for(level[side])),
             classes='map-item-content',
         )
+        self._save_stats = Static(classes='map-item-content map-item-save-stats')
+        self._save_loading = Static(classes='map-item-save-loading')
+        self._update_save_stats(save_slot)
         leading_children = () if leading is None else (leading,)
-        super().__init__(*leading_children, self._title, self._content, *children, classes=classes)
+        super().__init__(
+            *leading_children,
+            self._title,
+            self._content,
+            self._save_stats,
+            self._save_loading,
+            *children,
+            classes=classes,
+        )
+
+    def on_mount(self) -> None:
+        self.post_message(self.Mounted(self))  # pyright: ignore[reportUnusedCallResult]
+
+    def set_save_loading_number(self, number: int | None) -> None:
+        """Update the loading placeholder without exposing the previous slot's data."""
+        self._save_loading.update('' if number is None else f'  存档 {number}：加载中…')
 
     @property
-    def map_info(self) -> backend.MapInfo:
-        """Return the map data for callers that do not need its source package."""
-        return self.map.map_info
+    def file_path(self) -> ContentPath:
+        """Return the current side's exact virtual path without reading its source."""
+        return self.map.file_path
 
     @property
     def map(self) -> Map:
@@ -106,27 +131,27 @@ class MapItem(ListItem):
     def state_key(self) -> str:
         """Return a stable map-family key for an intentional list replacement."""
         if self.side is not LevelSide.A:
-            return self.map_info.file_path.as_posix()
+            return self.file_path.as_posix()
         return self.level.sid
 
-    def refresh_stats(self, save_slot: SaveSlot | None) -> None:
+    def refresh_stats(self, save_slot: SaveProgress | None) -> None:
         """Update only this item's dynamic native save statistics."""
-        self._content.update(
-            map_detail_lines(
-                self.level,
-                self.side,
-                self._languages,
-                self._dialogs,
-                self._source_name_for(self.map),
-                save_slot,
-            )
-        )
+        self._update_save_stats(save_slot)
 
-    def set_side(self, side: LevelSide, save_slot: SaveSlot | None) -> None:
+    def _update_save_stats(self, save_slot: SaveProgress | None) -> None:
+        self._save_stats.update(map_save_stats(self.level.sid, self.side, save_slot))
+        self._save_stats.set_class(save_slot is None, 'no-save-slot')  # pyright: ignore[reportUnusedCallResult]
+
+    def set_side(self, side: LevelSide, save_slot: SaveProgress | None) -> None:
         """Switch this row to another available side of the same map."""
         self.side = side
         self._title.update(
-            map_title(self.level, side, self._languages, self._dialogs, marker=self._marker)
+            map_title(self.level, side, self._lang, self._dialogs, marker=self._marker)
+        )
+        self._content.update(
+            map_detail_lines(
+                self.level, side, self._lang, self._dialogs, self._source_name_for(self.map)
+            )
         )
         self.refresh_stats(save_slot)
 
@@ -135,7 +160,7 @@ class MapItem(ListItem):
         """Expose map-specific mouse gestures after ListItem handles selection."""
         screen_x = event.x if event.screen_x is None else event.screen_x
         screen_y = event.y if event.screen_y is None else event.screen_y
-        self.post_message(self.Clicked(self, event.button, event.chain, screen_x, screen_y))
+        self.post_message(self.Clicked(self, event.button, event.chain, screen_x, screen_y))  # pyright: ignore[reportUnusedCallResult]
 
 
 class MapSideButton(Static):
@@ -152,9 +177,9 @@ class MapSideButton(Static):
 
     @on(events.Click)
     def click(self, event: events.Click) -> None:
-        event.stop()
+        event.stop()  # pyright: ignore[reportUnusedCallResult]
         if event.button == LEFT_MOUSE_BUTTON:
-            self.post_message(self.Clicked(self.direction))
+            self.post_message(self.Clicked(self.direction))  # pyright: ignore[reportUnusedCallResult]
 
 
 class SideMapItem(MapItem):
@@ -164,9 +189,9 @@ class SideMapItem(MapItem):
         self,
         level: Level,
         sides: SideGroup,
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
     ) -> None:
         self._sides = tuple(sorted(sides))
@@ -178,13 +203,13 @@ class SideMapItem(MapItem):
         super().__init__(
             level,
             self._sides[0],
-            languages,
+            lang,
             dialogs,
             save_slot,
             source_name_for,
             self._controls,
         )
-        self.add_class('side-map-item')
+        self.add_class('side-map-item')  # pyright: ignore[reportUnusedCallResult]
         self._update_buttons()
 
     @on(MapSideButton.Clicked)
@@ -196,10 +221,10 @@ class SideMapItem(MapItem):
             self._update_buttons()
 
     def _update_buttons(self) -> None:
-        self._previous.set_class(self._index == 0, '-hidden')
-        self._next.set_class(self._index == len(self._sides) - 1, '-hidden')
+        self._previous.set_class(self._index == 0, '-hidden')  # pyright: ignore[reportUnusedCallResult]
+        self._next.set_class(self._index == len(self._sides) - 1, '-hidden')  # pyright: ignore[reportUnusedCallResult]
 
-    def refresh_stats(self, save_slot: SaveSlot | None) -> None:
+    def refresh_stats(self, save_slot: SaveProgress | None) -> None:
         """Refresh the current side and retain its save slot for later side switches."""
         self._save_slot = save_slot
         super().refresh_stats(save_slot)
@@ -225,9 +250,9 @@ class MapList(ListView):
     def __init__(
         self,
         maps: Iterable[tuple[Level, LevelSide]],
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
         *,
         item_factory: MapItemFactory | None = None,
@@ -240,7 +265,7 @@ class MapList(ListView):
         self.source_name_for = source_name_for
         super().__init__(
             *(
-                self.item_for(level, sides, languages, dialogs, save_slot, source_name_for)
+                self.item_for(level, sides, lang, dialogs, save_slot, source_name_for)
                 for level, sides in self._side_groups
             ),
             *extra_items,
@@ -251,17 +276,17 @@ class MapList(ListView):
         self,
         level: Level,
         sides: SideGroup,
-        languages: Iterable[str],
+        lang: str,
         dialogs: Mapping[str, Mapping[str, str]],
-        save_slot: SaveSlot | None,
+        save_slot: SaveProgress | None,
         source_name_for: Callable[[Map], str],
     ) -> MapItem:
         """Build the list item while preserving a specialized lobby item factory."""
         if self._item_factory is None:
             if len(sides) > 1:
-                return SideMapItem(level, sides, languages, dialogs, save_slot, source_name_for)
-            return MapItem(level, sides[0], languages, dialogs, save_slot, source_name_for)
-        return self._item_factory(level, sides, languages, dialogs, save_slot, source_name_for)
+                return SideMapItem(level, sides, lang, dialogs, save_slot, source_name_for)
+            return MapItem(level, sides[0], lang, dialogs, save_slot, source_name_for)
+        return self._item_factory(level, sides, lang, dialogs, save_slot, source_name_for)
 
     @property
     def map_items(self) -> tuple[MapItem, ...]:

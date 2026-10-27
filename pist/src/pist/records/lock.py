@@ -32,7 +32,7 @@ def record_writer_lock(data_dir: Path = PIST_DIR) -> Generator[None]:
             if os.name == 'nt':
                 import msvcrt
 
-                file.seek(0)
+                file.seek(0)  # pyright: ignore[reportUnusedCallResult]
                 # Windows supports locking a byte beyond EOF; no PID or marker is needed.
                 msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
             else:

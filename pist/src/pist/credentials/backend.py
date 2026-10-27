@@ -9,7 +9,7 @@ def credential_backend() -> KeyringBackend:
     """Retain the selected backend, correcting native Windows same-user updates."""
     backend = keyring.get_keyring()
     if type(backend) is WinVaultKeyring:
-        from pist.credentials.windows import UpdatingWinVaultKeyring
+        from .windows import UpdatingWinVaultKeyring
 
         corrected = UpdatingWinVaultKeyring()
         corrected.persist = backend.persist

@@ -13,22 +13,16 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, SelectionList, Static
 
 from berries.game import campaigns, mods
-from berries.game.content import MAPS_DIR
+from pist import map_names
 from pist.ui.context_menu import ContextMenuScreen
-
-
-def campaign_ref(camp: campaigns.Campaign) -> str:
-    """Return one Campaign directory in CollabUtils2 journal-reference form."""
-    return camp.directory.relative_to(MAPS_DIR).as_posix()
 
 
 def lobby_campaign_choices(
     camps: Iterable[campaigns.Campaign],
     hidden_campaigns: Iterable[campaigns.Campaign],
     current_mod: mods.InstalledMod,
-    catalog: campaigns.CampaignCatalog,
     dialogs: Mapping[str, Mapping[str, str]],
-    languages: Iterable[str],
+    lang: str,
     initial: Iterable[str],
 ) -> tuple[tuple[str, str], ...]:
     """Prioritize hidden Campaigns supplied by the current lobby's physical Mod."""
@@ -36,13 +30,13 @@ def lobby_campaign_choices(
     candidates = sorted(
         camps,
         key=lambda camp: (
-            not (id(camp) in hidden_campaign_ids and catalog.campaign_uses_mod(camp, current_mod)),
+            not (id(camp) in hidden_campaign_ids and camp.uses_mod(current_mod)),
             camp.directory.as_posix().casefold(),
         ),
     )
-    choices = {campaign_ref(camp): camp.display_name(dialogs, languages) for camp in candidates}
+    choices = {camp.ref: map_names.campaign_name(camp, dialogs, lang) for camp in candidates}
     for ref in initial:
-        choices.setdefault(ref, f'{ref}（当前未找到）')
+        choices.setdefault(ref, f'{ref}（当前未找到）')  # pyright: ignore[reportUnusedCallResult]
     return tuple(choices.items())
 
 
@@ -79,7 +73,7 @@ class MapActionScreen(ContextMenuScreen[MapAction | None]):
                 action = MapAction.EDIT_LOBBY
             case _:
                 return
-        self.dismiss(action)
+        self.dismiss(action)  # pyright: ignore[reportUnusedCallResult]
 
 
 class LobbyCampaignEditTarget(StrEnum):
@@ -171,10 +165,10 @@ class LobbyCampaignEditorScreen(ModalScreen[LobbyCampaignEdit | None]):
                     if event.button.id == 'lobby-campaign-save-local'
                     else LobbyCampaignEditTarget.SHARED
                 )
-                self.dismiss(LobbyCampaignEdit(target, camps))
+                self.dismiss(LobbyCampaignEdit(target, camps))  # pyright: ignore[reportUnusedCallResult]
             case 'lobby-campaign-remove':
-                self.dismiss(LobbyCampaignEdit(LobbyCampaignEditTarget.RESET_LOCAL))
+                self.dismiss(LobbyCampaignEdit(LobbyCampaignEditTarget.RESET_LOCAL))  # pyright: ignore[reportUnusedCallResult]
             case 'lobby-campaign-remove-shared':
-                self.dismiss(LobbyCampaignEdit(LobbyCampaignEditTarget.RESET_SHARED))
+                self.dismiss(LobbyCampaignEdit(LobbyCampaignEditTarget.RESET_SHARED))  # pyright: ignore[reportUnusedCallResult]
             case _:
-                self.dismiss(None)
+                self.dismiss(None)  # pyright: ignore[reportUnusedCallResult]

@@ -5,7 +5,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from pist.paths import PIST_DIR
+from .paths import PIST_DIR
 
 LOCAL_DATA_PATH = PIST_DIR / 'local-data.sqlite3'
 

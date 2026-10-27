@@ -1,5 +1,23 @@
-Horizontal {
+Screen > Horizontal {
     height: 1fr;
+}
+
+.map-item-save-loading {
+    display: none;
+    height: 1;
+    color: $text-muted;
+}
+
+.map-item-save-stats.no-save-slot {
+    display: none;
+}
+
+Screen.save-loading .map-item-save-stats {
+    display: none;
+}
+
+Screen.save-loading .map-item-save-loading {
+    display: block;
 }
 
 #campaign-panel {
@@ -132,6 +150,7 @@ Horizontal {
 
 .lobby-map-item > .map-item-title,
 .lobby-map-item > .map-item-content,
+.lobby-map-item > .map-item-save-loading,
 .lobby-map-item > .lobby-maps {
     layer: content;
 }

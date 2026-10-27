@@ -7,10 +7,10 @@ Keep Textual's normal rendering and damage tracking, but omit those hidden cuts.
 
 from collections.abc import Iterable
 
-from textual._compositor import ChopsUpdate, Compositor
+from textual._compositor import ChopsUpdate, Compositor  # noqa: PLC2701
 from textual.geometry import Region
 from textual.strip import Strip
-from textual.widgets._toast import Toast
+from textual.widgets._toast import Toast  # noqa: PLC2701
 
 
 class ToastCompositor(Compositor):

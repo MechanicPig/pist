@@ -2,11 +2,14 @@ import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
+from typing import Self
 from unittest.mock import Mock
 
 import pytest
 from sheet_factory import FakeSheet, make_sheet_fields
 
+from berries.game.duration import Duration
 from pist import __main__ as cli
 from pist.credentials.store import CredentialStore
 from pist.records.lock import record_writer_lock
@@ -17,12 +20,31 @@ from pist.smartsheet.encoding import encode_record_values
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 
 
+class SessionSheet(FakeSheet):
+    """Track ownership of the CLI's shared remote session."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[RecordStore, FakeSheet, MapRecord]:
     store = RecordStore(tmp_path / 'records.sqlite3')
-    client = FakeSheet()
+    client = SessionSheet()
     monkeypatch.setattr(cli, 'RecordStore', lambda: store)
     monkeypatch.setattr(cli, 'TencentSmartSheetClient', lambda _: client)
     monkeypatch.setattr(cli, 'record_writer_lock', lambda: record_writer_lock(tmp_path))
@@ -32,7 +54,7 @@ def context(
                 created_at=NOW,
                 mod_metadata_name='Example',
                 map_name='Map',
-                time_played='0:01:00',
+                time_played=Duration.from_dotnet_ticks(600000000),
                 status='进行中',
                 notes='A',
             )
@@ -71,6 +93,7 @@ def test_cli_uses_exact_association_or_new_row_and_verifies(
     link = store.sheet_links(saved.local_id)[0]
     assert link.confirmed_values == client.rows[link.record_id]
     assert store.sheet_add_attempts(saved.local_id) == ()
+    assert isinstance(client, SessionSheet) and client.closed
 
 
 @pytest.mark.parametrize('failure', ('conflict', 'schema', 'offline'))
@@ -90,6 +113,7 @@ def test_cli_refuses_unreviewed_remote_changes_or_read_failure_without_writing(
         asyncio.run(cli.sync_saved_record(Mock(spec=CredentialStore), 'source', saved.local_id))
     assert store.load(saved.local_id) == saved
     assert client.writes == []
+    assert isinstance(client, SessionSheet) and client.closed
 
 
 def test_cli_failed_add_keeps_pending_and_cannot_blindly_retry(
@@ -98,7 +122,7 @@ def test_cli_failed_add_keeps_pending_and_cannot_blindly_retry(
     store, client, saved = context
     assert saved.local_id is not None
     client.write_error = True
-    with pytest.raises(RuntimeError, match='待同步'):
+    with pytest.raises(RuntimeError, match='待推送'):
         asyncio.run(cli.sync_saved_record(Mock(spec=CredentialStore), 'source', saved.local_id))
     assert store.sync_state(saved.local_id) is RecordSyncState.PENDING
     client.write_error = False

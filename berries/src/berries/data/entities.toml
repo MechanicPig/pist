@@ -22,6 +22,7 @@ rules = [
 
 [entities."SorbetHelper/ReturnBerry"]
 rules = [
+    { kind = "moonberry", when = { moon = true } },
     { kind = "strawberry", when = { moon = false } },
     { kind = "strawberry", missing = ["moon"] },
 ]
@@ -55,14 +56,14 @@ rules = [
     { when = { fake = true }, missing_meta = ["HeartIsEnd"] },
 ]
 
-[entities."CollabUtils2/SpeedBerry"]
-rules = [
-    { kind = "speedberry" },
-]
-
 [entities."MaxHelpingHand/SecretBerry"]
 rules = [
     { kind = "secretberry" },
+]
+
+[entities."CollabUtils2/SpeedBerry"]
+rules = [
+    { kind = "speedberry" },
 ]
 
 [entities."MaxHelpingHand/MultiRoomStrawberrySeed"]
@@ -85,14 +86,15 @@ rules = [
     { kind = "strawberry" },
 ]
 
-[entities.cassette]
-rules = [
-    { kind = "cassette" },
-]
-
 [entities."AdventureHelper/CustomCrystalHeart"]
 rules = [
     { kind = "end_level_heart", meta = { HeartIsEnd = true } },
+    { kind = "keep_going_heart", meta = { HeartIsEnd = false } },
+]
+
+[entities.cassette]
+rules = [
+    { kind = "cassette" },
 ]
 
 [entities."MaxHelpingHand/ReskinnableCrystalHeart"]
@@ -127,6 +129,11 @@ rules = [
     { kind = "cassette" },
 ]
 
+[entities.memorialTextController]
+rules = [
+    { kind = "dashless_goldenberry" },
+]
+
 [entities."SpringCollab2020/MultiRoomStrawberrySeed"]
 rules = [
     { kind = "miniberry" },
@@ -147,6 +154,11 @@ rules = [
     { kind = "strawberry" },
 ]
 
+[entities.birdForsakenCityGem]
+rules = [
+    { kind = "keep_going_heart" },
+]
+
 [entities."CommunalHelper/DreamStrawberry"]
 rules = [
     { kind = "secretberry" },
@@ -162,24 +174,9 @@ rules = [
     { kind = "secretberry" },
 ]
 
-[entities."JungleHelper/TreeDepthController"]
-rules = [
-    { kind = "grabless_goldenberry" },
-]
-
-[entities.memorialTextController]
-rules = [
-    { kind = "dashless_goldenberry" },
-]
-
 [entities."SJ2021/ExplodingStrawberry"]
 rules = [
     { kind = "strawberry" },
-]
-
-[entities.birdForsakenCityGem]
-rules = [
-    { kind = "keep_going_heart" },
 ]
 
 [entities."ChronoHelper/DownWingedStrawberry"]
@@ -190,6 +187,11 @@ rules = [
 [entities."DSidesPlatinum/PlatinumStrawberry"]
 rules = [
     { kind = "platinumberry" },
+]
+
+[entities."JungleHelper/TreeDepthController"]
+rules = [
+    { kind = "grabless_goldenberry" },
 ]
 
 [entities."MemorialHelper/FlagCrystalHeart"]

@@ -131,7 +131,7 @@ class _Evaluator:
             case ast.Return():
                 self._returns.extend(self.value(value) for value in stat.values)
             case ast.Call():
-                self.value(stat)
+                self.value(stat)  # pyright: ignore[reportUnusedCallResult]
 
     def _local_function(self, stat: ast.LocalFunction) -> None:
         if not isinstance(stat.name, ast.Name):
@@ -312,7 +312,7 @@ class _Evaluator:
                 self._statement(stat)
         for target in targets:
             if target not in saved:
-                self._values.pop(target, None)
+                self._values.pop(target, None)  # pyright: ignore[reportUnusedCallResult]
             else:
                 self._values[target] = saved[target]
 
